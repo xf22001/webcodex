@@ -1,0 +1,130 @@
+name: Manual release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (for example v0.4.1)
+        required: true
+        type: string
+      amd64:
+        description: Build Linux amd64
+        required: false
+        default: false
+        type: boolean
+      arm64:
+        description: Build Linux arm64
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: manual-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      arches: ${{ steps.arches.outputs.arches }}
+    steps:
+      - name: Validate architecture selection
+        id: arches
+        shell: bash
+        env:
+          AMD64: ${{ inputs.amd64 }}
+          ARM64: ${{ inputs.arm64 }}
+        run: |
+          set -euo pipefail
+          arches=()
+          [[ "$AMD64" == "true" ]] && arches+=(amd64)
+          [[ "$ARM64" == "true" ]] && arches+=(arm64)
+          if [ "${#arches[@]}" -eq 0 ]; then
+            echo "Select at least one architecture (amd64 and/or arm64)." >&2
+            exit 1
+          fi
+          printf 'Selected architectures: %s\n' "${arches[*]}"
+          printf 'arches=[%s]\n' "$(printf '"%s",' "${arches[@]}" | sed 's/,$//')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.prepare.outputs.arches) }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Validate tag checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git describe --tags --exact-match HEAD)" = "${{ inputs.tag }}"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.arch }}" = amd64 ]; then
+            target=x86_64-unknown-linux-gnu
+          else
+            target=aarch64-unknown-linux-gnu
+          fi
+          rustup target add "$target"
+          cargo build --release --target "$target" --bin webcodex --bin webcodex-server --bin webcodex-runner
+          mkdir -p dist
+          staging="dist/webcodex-${{ inputs.tag }}-${{ matrix.arch }}"
+          mkdir -p "$staging"
+          cp "target/$target/release/webcodex" "$staging/"
+          cp "target/$target/release/webcodex-server" "$staging/"
+          cp "target/$target/release/webcodex-runner" "$staging/"
+          tar -C "$staging" -czf "dist/webcodex-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz" webcodex webcodex-server webcodex-runner
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/webcodex-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release and mark latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.tar.gz)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release archives were produced." >&2
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest=true --title "$TAG"
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --latest
+          fi
