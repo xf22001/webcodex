@@ -66,45 +66,116 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(needs.prepare.outputs.arches) }}
-    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            image: quay.io/pypa/manylinux2014_x86_64
+            machine: x86_64
+            elf_machine: Advanced Micro Devices X86-64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux2014_aarch64
+            machine: aarch64
+            elf_machine: AArch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    env:
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      MANYLINUX_IMAGE: ${{ matrix.image }}
+      CARGO_CACHE_DIR: /tmp/webcodex-manual-cargo-${{ matrix.arch }}
+      RUSTUP_CACHE_DIR: /tmp/webcodex-manual-rustup-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Validate source checkout
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CARGO_CACHE_DIR }}
+            ${{ env.RUSTUP_CACHE_DIR }}
+            target
+          key: manual-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: |
+            manual-${{ matrix.arch }}-
+
+      - name: Build inside glibc 2.17 userspace
         shell: bash
-        env:
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir -p "$CARGO_CACHE_DIR" "$RUSTUP_CACHE_DIR" dist
 
-      - uses: dtolnay/rust-toolchain@stable
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$CARGO_CACHE_DIR:/cargo" \
+            -v "$RUSTUP_CACHE_DIR:/rustup" \
+            -w /work \
+            -e CARGO_HOME=/cargo \
+            -e RUSTUP_HOME=/rustup \
+            -e SOURCE_SHA \
+            "$MANYLINUX_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              export PATH="/cargo/bin:$PATH"
+              git config --global --add safe.directory /work
 
-      - name: Build release binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.arch }}" = amd64 ]; then
-            target=x86_64-unknown-linux-gnu
-          else
-            target=aarch64-unknown-linux-gnu
-          fi
-          rustup target add "$target"
-          cargo build --release --target "$target" -p webcodex-cli --bin webcodex
-          cargo build --release --target "$target" -p webcodex --bin webcodex-server
-          cargo build --release --target "$target" -p webcodex-runner
-          mkdir -p dist
-          staging="dist/webcodex-${{ matrix.arch }}"
-          mkdir -p "$staging"
-          cp "target/$target/release/webcodex" "$staging/"
-          cp "target/$target/release/webcodex-server" "$staging/"
-          cp "target/$target/release/webcodex-runner" "$staging/"
-          tar -C "$staging" -czf "dist/webcodex-${{ matrix.arch }}.tar.gz" webcodex webcodex-server webcodex-runner
+              if [ "$(uname -m)" != "${{ matrix.machine }}" ]; then
+                echo "Unexpected native architecture: $(uname -m)" >&2
+                exit 1
+              fi
+              if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]; then
+                echo "Build checkout does not match prepared source commit." >&2
+                exit 1
+              fi
+              if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+                echo "Build checkout is not clean before compilation." >&2
+                exit 1
+              fi
+
+              if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+                yum install -y git curl
+              fi
+              if [ ! -x /cargo/bin/rustup ]; then
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --profile minimal --default-toolchain stable
+              fi
+              rustup toolchain install stable --profile minimal
+              rustup default stable
+              rustc --version --verbose
+              cargo --version --verbose
+
+              cargo build --locked --release -p webcodex -p webcodex-cli -p webcodex-runner
+
+              mkdir -p dist/webcodex-${{ matrix.arch }}
+              cp target/release/webcodex dist/webcodex-${{ matrix.arch }}/
+              cp target/release/webcodex-server dist/webcodex-${{ matrix.arch }}/
+              cp target/release/webcodex-runner dist/webcodex-${{ matrix.arch }}/
+
+              for name in webcodex webcodex-server webcodex-runner; do
+                binary="target/release/$name"
+                if ! readelf -h "$binary" | grep -F "Machine:" | grep -Fq "${{ matrix.elf_machine }}"; then
+                  echo "Unexpected ELF architecture for $binary" >&2
+                  readelf -h "$binary" >&2
+                  exit 1
+                fi
+
+                max_glibc="$(readelf --version-info "$binary" \
+                  | grep -oE "GLIBC_[0-9]+(\\.[0-9]+)*" \
+                  | sed "s/^GLIBC_//" \
+                  | sort -Vu \
+                  | tail -n 1 || true)"
+                if [ -n "$max_glibc" ] && [ "$(printf "%s\\n" 2.17 "$max_glibc" | sort -V | tail -n 1)" != "2.17" ]; then
+                  echo "$binary requires GLIBC_$max_glibc, exceeding the 2.17 release floor." >&2
+                  exit 1
+                fi
+              done
+
+              tar -C "dist/webcodex-${{ matrix.arch }}" \
+                -czf "dist/webcodex-${{ matrix.arch }}.tar.gz" \
+                webcodex webcodex-server webcodex-runner
+            '
 
       - uses: actions/upload-artifact@v4
         with:
