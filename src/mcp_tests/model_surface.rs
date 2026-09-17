@@ -1505,6 +1505,8 @@ async fn adaptive_stateless_manifest_inventory_matches_extension_gateway_univers
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<BTreeSet<_>>();
+    assert!(direct_names.contains("skill_load"));
+    assert!(direct_names.contains("run_skill_resource"));
     assert!(
         extensions
             .iter()

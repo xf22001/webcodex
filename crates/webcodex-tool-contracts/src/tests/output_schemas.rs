@@ -2050,6 +2050,29 @@ fn computer_recovery_output_schemas_use_canonical_action_shapes() {
 }
 
 #[test]
+fn skill_load_declares_exact_loading_and_ambiguity_output_contract() {
+    let specs = registered_tool_specs();
+    let fields = output_schema_field_names(spec_named(&specs, "skill_load"));
+    for field in [
+        "catalog_revision",
+        "descriptor",
+        "skill_id",
+        "name",
+        "text",
+        "definition_revision",
+        "package_revision",
+        "candidate_count",
+        "candidates",
+        "candidates_truncated",
+        "discovery_truncated",
+        "error_kind",
+    ] {
+        assert!(fields.contains(field), "skill_load missing {field}");
+    }
+    assert_ne!(fields, default_output_schema_field_names());
+}
+
+#[test]
 fn skill_recovery_output_schema_accepts_canonical_shapes_and_declares_legacy_rejection() {
     let schema = output_schema_for_tool("skill_install");
     let actionable = json!({
@@ -2649,4 +2672,50 @@ fn run_process_shell_recovery_schema_is_optional_and_failure_only() {
     test_support::validate_schema_instance(&failure, &spec.output_schema).unwrap();
     let success = json!({"success":true,"output":{"suggested_call":suggested},"error":null});
     assert!(test_support::validate_schema_instance(&success, &spec.output_schema).is_err());
+}
+
+#[test]
+fn run_skill_resource_success_requires_provenance_and_keeps_lifecycle_constraints() {
+    let specs = registered_tool_specs();
+    let schema = &spec_named(&specs, "run_skill_resource").output_schema;
+    let complete = json!({
+        "success": true,
+        "output": {
+            "skill_id": "wc_skill_ExExExExExExExExExExEA",
+            "skill_path": "scripts/probe.py",
+            "skill_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "skill_trust": "operator_configured_guidance",
+            "skill_definition_revision": "abababababababababababababababababababababababababababababababab",
+            "skill_package_revision": null
+        },
+        "error": null
+    });
+    test_support::validate_schema_instance(&complete, schema).unwrap_or_else(|error| {
+        panic!("complete configured execution provenance must validate: {error}")
+    });
+
+    for field in [
+        "skill_id",
+        "skill_path",
+        "skill_sha256",
+        "skill_trust",
+        "skill_definition_revision",
+        "skill_package_revision",
+    ] {
+        let mut missing = complete.clone();
+        missing["output"].as_object_mut().unwrap().remove(field);
+        assert!(
+            test_support::validate_schema_instance(&missing, schema).is_err(),
+            "successful run_skill_resource output must require {field}"
+        );
+    }
+
+    let mut contradictory_lifecycle = complete;
+    contradictory_lifecycle["output"]["execution_state"] = json!("not_started");
+    contradictory_lifecycle["output"]["command_started"] = json!(true);
+    contradictory_lifecycle["output"]["command_completed"] = json!(false);
+    assert!(
+        test_support::validate_schema_instance(&contradictory_lifecycle, schema).is_err(),
+        "run_skill_resource must retain structured execution lifecycle constraints"
+    );
 }

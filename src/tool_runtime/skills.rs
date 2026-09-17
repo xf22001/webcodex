@@ -6,7 +6,7 @@ use super::runtime_metrics::{
 use super::startup_brief::{
     bounded_extension_description, StartupSkillEntry, StartupSkillsCatalog,
 };
-use super::{SuggestedToolCall, ToolResult, ToolRuntime};
+use super::{ExecutionPurpose, SuggestedToolCall, ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::json_measurement::serialized_json_len;
 use crate::runner_http::{EnqueueRunnerSkillError, RunnerFeature};
@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Component;
 use std::time::{Duration, Instant};
+use unicase::UniCase;
 use webcodex_core::runner_skill::{
     RunnerSkillDescriptor, RunnerSkillListResponse, RunnerSkillReadResponse, RunnerSkillRequest,
     RunnerSkillResolveResponse, RunnerSkillSource,
@@ -831,6 +832,286 @@ impl ToolRuntime {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_skill_resource(
+        &self,
+        project: &ResolvedProject,
+        skill_id: String,
+        path: String,
+        expected_definition_revision: String,
+        expected_package_revision: Option<String>,
+        args: Vec<String>,
+        cwd: Option<String>,
+        timeout_secs: Option<u64>,
+        sync_wait_secs: Option<u64>,
+        purpose: Option<ExecutionPurpose>,
+        session_id: Option<String>,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        if !valid_skill_id(&skill_id) {
+            return skill_execution_error("skill_id_invalid", Some(json!({"skill_id": skill_id})));
+        }
+        let resource_path = match validate_resource_path(&path) {
+            Ok(path) => path,
+            Err(kind) => return skill_execution_error(kind, Some(json!({"skill_id": skill_id}))),
+        };
+        if !resource_path.starts_with("scripts/") {
+            return skill_execution_error(
+                "skill_resource_not_executable",
+                Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+            );
+        }
+        let interpreter_candidates = match skill_resource_interpreters(&resource_path, args) {
+            Ok(candidates) => candidates,
+            Err(kind) => {
+                return skill_execution_error(
+                    kind,
+                    Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+                )
+            }
+        };
+        if !is_lower_sha256(&expected_definition_revision) {
+            return skill_execution_error(
+                "skill_definition_revision_invalid",
+                Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+            );
+        }
+        if expected_package_revision
+            .as_deref()
+            .is_some_and(|revision| !valid_package_revision(revision))
+        {
+            return skill_execution_error(
+                "skill_package_revision_invalid",
+                Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+            );
+        }
+
+        let resolved = match self.resolve_exact_skill(project, auth, &skill_id).await {
+            Ok(Some(ExactSkillCandidate::Runner(resolved))) => resolved,
+            Ok(Some(ExactSkillCandidate::Project { .. })) => {
+                return skill_execution_error(
+                    "skill_execution_trust_denied",
+                    Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+                )
+            }
+            Ok(None) => {
+                return skill_execution_error(
+                    "skill_not_found",
+                    Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+                )
+            }
+            Err(_) => return skill_execution_error("skill_catalog_unavailable", None),
+        };
+
+        match resolved.source() {
+            RunnerSkillSource::Configured => {
+                if expected_package_revision.is_some() {
+                    return skill_execution_error(
+                        "skill_package_revision_not_supported",
+                        Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+                    );
+                }
+                if expected_definition_revision != resolved.definition_revision() {
+                    return skill_execution_error(
+                        "skill_definition_changed",
+                        Some(json!({
+                            "skill_id": skill_id,
+                            "skill_path": resource_path,
+                            "skill_definition_revision": resolved.definition_revision(),
+                        })),
+                    );
+                }
+            }
+            RunnerSkillSource::Managed if expected_package_revision.is_none() => {
+                return skill_execution_error(
+                    "skill_package_revision_required",
+                    Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+                );
+            }
+            RunnerSkillSource::Managed => {}
+        }
+
+        let read = self
+            .read_runner_skill(
+                project,
+                auth,
+                &resolved,
+                &resource_path,
+                1,
+                MAX_SKILL_READ_LINES,
+                expected_package_revision.as_deref(),
+                Some(&expected_definition_revision),
+            )
+            .await;
+        if !read.success {
+            let kind = read
+                .output
+                .get("error_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("skill_resource_unavailable")
+                .to_string();
+            return skill_execution_error(
+                &kind,
+                Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+            );
+        }
+        let Some(read_output) = read.output.as_object() else {
+            return skill_execution_error("skill_resource_unavailable", None);
+        };
+        if read_output.get("has_more").and_then(Value::as_bool) == Some(true) {
+            return skill_execution_error(
+                "skill_resource_too_large_for_execution",
+                Some(json!({"skill_id": skill_id, "skill_path": resource_path})),
+            );
+        }
+        let Some(script) = read_output.get("text").and_then(Value::as_str) else {
+            return skill_execution_error("skill_resource_unavailable", None);
+        };
+        let metadata = json!({
+            "skill_id": skill_id,
+            "skill_name": read_output.get("name").cloned().unwrap_or(Value::Null),
+            "skill_path": resource_path,
+            "skill_sha256": read_output.get("sha256").cloned().unwrap_or(Value::Null),
+            "skill_trust": read_output.get("trust").cloned().unwrap_or(Value::Null),
+            "skill_definition_revision": read_output.get("definition_revision").cloned().unwrap_or(Value::Null),
+            "skill_package_revision": read_output.get("package_revision").cloned().unwrap_or(Value::Null),
+        });
+
+        let mut candidates = interpreter_candidates.into_iter().peekable();
+        let mut result = loop {
+            let (executable, process_args) = candidates
+                .next()
+                .expect("validated Skill resource interpreter candidates are non-empty");
+            let result = self
+                .run_process_with_contract_for_resource(
+                    project.resolved_id.clone(),
+                    executable,
+                    process_args,
+                    Some(script.to_string()),
+                    timeout_secs,
+                    sync_wait_secs,
+                    cwd.clone(),
+                    purpose,
+                    None,
+                    session_id.clone(),
+                    None,
+                    auth,
+                )
+                .await;
+            if candidates.peek().is_some() && skill_resource_interpreter_spawn_unavailable(&result)
+            {
+                continue;
+            }
+            break result;
+        };
+        if let Some(output) = result.output.as_object_mut() {
+            if let Some(metadata) = metadata.as_object() {
+                output.extend(metadata.clone());
+            }
+            output.insert(
+                "execution_source".to_string(),
+                Value::String("run_skill_resource".to_string()),
+            );
+            output.remove("suggested_call");
+        }
+        result
+    }
+
+    pub(crate) async fn skill_load(
+        &self,
+        project: &ResolvedProject,
+        name: String,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        let name = match validate_skill_load_name(name) {
+            Ok(name) => name,
+            Err(kind) => return skill_error(kind, &project.resolved_id, None),
+        };
+        let catalog = match self.discover_skills(project, auth).await {
+            Ok(catalog) => catalog,
+            Err(_) => return skill_error("skill_catalog_unavailable", &project.resolved_id, None),
+        };
+        let matches = match exact_skill_name_matches(&catalog, &name) {
+            Ok(matches) => matches,
+            Err(kind) => {
+                return skill_error(
+                    kind,
+                    &project.resolved_id,
+                    Some(json!({
+                        "catalog_revision": catalog.catalog_revision,
+                        "discovery_truncated": true,
+                    })),
+                )
+            }
+        };
+        if matches.is_empty() {
+            return skill_error("skill_not_found", &project.resolved_id, None);
+        }
+        if matches.len() != 1 {
+            let candidates = matches
+                .iter()
+                .take(8)
+                .map(|skill| {
+                    json!({
+                        "skill_id": skill.descriptor.skill_id,
+                        "name": skill.descriptor.name,
+                        "source_scope": skill.descriptor.source_scope,
+                        "trust": skill.descriptor.trust,
+                        "package_revision": skill.descriptor.package_revision,
+                        "definition_revision": skill.descriptor.definition_revision,
+                    })
+                })
+                .collect::<Vec<_>>();
+            return skill_error(
+                "skill_name_ambiguous",
+                &project.resolved_id,
+                Some(json!({
+                    "candidate_count": matches.len(),
+                    "candidates": candidates,
+                    "candidates_truncated": matches.len() > 8,
+                })),
+            );
+        }
+        let descriptor = matches[0].descriptor.clone();
+        let mut result = self
+            .skill_read_file(
+                project,
+                descriptor.skill_id.clone(),
+                Some(SKILL_DEFINITION_FILE.to_string()),
+                Some(1),
+                Some(MAX_SKILL_READ_LINES),
+                Some(descriptor.definition_revision.clone()),
+                descriptor.package_revision.clone(),
+                auth,
+            )
+            .await;
+        if !result.success {
+            return result;
+        }
+        let Some(output) = result.output.as_object_mut() else {
+            return skill_error("skill_load_result_invalid", &project.resolved_id, None);
+        };
+        output.insert(
+            "catalog_revision".to_string(),
+            Value::String(catalog.catalog_revision),
+        );
+        output.insert(
+            "descriptor".to_string(),
+            serde_json::to_value(&descriptor).expect("SkillDescriptor serialization is infallible"),
+        );
+        if serialized_json_len(&result.output)
+            .map(|bytes| bytes > MAX_SKILL_READ_RESULT_BYTES)
+            .unwrap_or(true)
+        {
+            return skill_error(
+                "skill_load_result_too_large",
+                &project.resolved_id,
+                Some(json!({"skill_id": descriptor.skill_id})),
+            );
+        }
+        result
+    }
+
     pub(crate) async fn skill_list(
         &self,
         project: &ResolvedProject,
@@ -1580,17 +1861,7 @@ impl ToolRuntime {
             });
         }
         skills.sort_by(|left, right| left.order_key.cmp(&right.order_key));
-        let mut counts = BTreeMap::<String, usize>::new();
-        for skill in &skills {
-            *counts.entry(skill.descriptor.name.clone()).or_default() += 1;
-        }
-        for skill in &mut skills {
-            skill.descriptor.name_conflict = counts
-                .get(&skill.descriptor.name)
-                .copied()
-                .unwrap_or_default()
-                > 1;
-        }
+        recompute_name_conflicts(&mut skills);
         let catalog_revision =
             catalog_revision(&skills, invalid_count, &diagnostics, discovery_truncated);
         Ok(SkillCatalog {
@@ -1970,6 +2241,70 @@ fn catalog_page_envelope(
     })
 }
 
+fn skill_resource_interpreters(
+    resource_path: &str,
+    args: Vec<String>,
+) -> Result<Vec<(String, Vec<String>)>, &'static str> {
+    let extension = std::path::Path::new(resource_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "py" => {
+            let mut stdin_args = Vec::with_capacity(args.len() + 1);
+            stdin_args.push("-".to_string());
+            stdin_args.extend(args.iter().cloned());
+            let mut launcher_args = Vec::with_capacity(args.len() + 2);
+            launcher_args.extend(["-3".to_string(), "-".to_string()]);
+            launcher_args.extend(args);
+            Ok(vec![
+                ("python3".to_string(), stdin_args.clone()),
+                ("python".to_string(), stdin_args),
+                ("py".to_string(), launcher_args),
+            ])
+        }
+        "sh" => {
+            let mut process_args = Vec::with_capacity(args.len() + 2);
+            process_args.extend(["-s".to_string(), "--".to_string()]);
+            process_args.extend(args);
+            Ok(vec![("sh".to_string(), process_args)])
+        }
+        _ => Err("skill_resource_interpreter_unsupported"),
+    }
+}
+
+fn skill_resource_interpreter_spawn_unavailable(result: &ToolResult) -> bool {
+    !result.success
+        && result.output.get("execution_state").and_then(Value::as_str) == Some("not_started")
+        && result
+            .output
+            .get("command_started")
+            .and_then(Value::as_bool)
+            == Some(false)
+        && result.output.get("failure_kind").and_then(Value::as_str) == Some("spawn_failed")
+}
+
+fn skill_execution_error(kind: &str, extra: Option<Value>) -> ToolResult {
+    let mut output = json!({
+        "execution_state": "not_started",
+        "command_started": false,
+        "command_completed": false,
+        "command_ok": false,
+        "exit_code": null,
+        "failure_kind": kind,
+        "tool_failure": true,
+        "state_changed": false,
+    });
+    if let (Some(target), Some(extra)) = (
+        output.as_object_mut(),
+        extra.and_then(|value| value.as_object().cloned()),
+    ) {
+        target.extend(extra);
+    }
+    ToolResult::err_with_output(kind.to_string(), output)
+}
+
 fn skill_error(kind: &'static str, project: &str, extra: Option<Value>) -> ToolResult {
     let mut output = json!({
         "error_kind": kind,
@@ -2111,18 +2446,50 @@ fn uncertain_skill_store_error(kind: &str) -> bool {
     )
 }
 
+fn skill_name_key(name: &str) -> String {
+    UniCase::unicode(name).to_folded_case()
+}
+
+fn exact_skill_name_matches<'a>(
+    catalog: &'a SkillCatalog,
+    name: &str,
+) -> Result<Vec<&'a CatalogSkill>, &'static str> {
+    if catalog.discovery_truncated {
+        return Err("skill_catalog_truncated");
+    }
+    let key = skill_name_key(name);
+    Ok(catalog
+        .skills
+        .iter()
+        .filter(|skill| skill_name_key(&skill.descriptor.name) == key)
+        .collect())
+}
+
 fn recompute_name_conflicts(skills: &mut [CatalogSkill]) {
     let mut counts = BTreeMap::<String, usize>::new();
     for skill in skills.iter() {
-        *counts.entry(skill.descriptor.name.clone()).or_default() += 1;
+        *counts
+            .entry(skill_name_key(&skill.descriptor.name))
+            .or_default() += 1;
     }
     for skill in skills {
         skill.descriptor.name_conflict = counts
-            .get(&skill.descriptor.name)
+            .get(&skill_name_key(&skill.descriptor.name))
             .copied()
             .unwrap_or_default()
             > 1;
     }
+}
+
+fn validate_skill_load_name(name: String) -> Result<String, &'static str> {
+    if name.is_empty()
+        || name.trim() != name
+        || name.chars().count() > MAX_SKILL_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return Err("skill_name_invalid");
+    }
+    Ok(name)
 }
 
 fn validate_query(query: Option<String>) -> Result<Option<String>, &'static str> {
@@ -2296,6 +2663,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_name_selection_fails_closed_when_catalog_discovery_is_truncated() {
+        let skills = vec![CatalogSkill {
+            descriptor: SkillDescriptor {
+                skill_id: "wc_skill_AAAAAAAAAAAAAAAAAAAAAg".to_string(),
+                name: "demo".to_string(),
+                description: "demo".to_string(),
+                definition_revision: "a".repeat(64),
+                package_revision: None,
+                source_scope: "project",
+                trust: "project_content",
+                name_conflict: false,
+            },
+            order_key: "demo".to_string(),
+        }];
+        let catalog = SkillCatalog {
+            catalog_revision: catalog_revision(&skills, 0, &[], true),
+            skills,
+            invalid_count: 0,
+            diagnostics: Vec::new(),
+            discovery_truncated: true,
+        };
+        assert_eq!(
+            exact_skill_name_matches(&catalog, "demo").unwrap_err(),
+            "skill_catalog_truncated"
+        );
+    }
+
+    #[test]
     fn catalog_projection_is_byte_bounded_and_continuable() {
         let mut skills = Vec::new();
         for index in 0..64usize {
@@ -2464,6 +2859,57 @@ mod tests {
         assert!(family_only.output.get("suggested_call").is_none());
         assert!(family_only.output.get("recovery_tool").is_none());
         assert_eq!(family_only.output["retry_same_idempotency_key"], true);
+    }
+
+    #[test]
+    fn skill_resource_interpreter_is_server_owned_and_extension_scoped() {
+        assert_eq!(
+            skill_resource_interpreters("scripts/probe.py", vec!["arg".to_string()]).unwrap(),
+            vec![
+                (
+                    "python3".to_string(),
+                    vec!["-".to_string(), "arg".to_string()]
+                ),
+                (
+                    "python".to_string(),
+                    vec!["-".to_string(), "arg".to_string()]
+                ),
+                (
+                    "py".to_string(),
+                    vec!["-3".to_string(), "-".to_string(), "arg".to_string()]
+                ),
+            ]
+        );
+        assert_eq!(
+            skill_resource_interpreters("scripts/probe.sh", vec!["arg".to_string()]).unwrap(),
+            vec![(
+                "sh".to_string(),
+                vec!["-s".to_string(), "--".to_string(), "arg".to_string()]
+            )]
+        );
+        assert_eq!(
+            skill_resource_interpreters("scripts/probe.rb", Vec::new()),
+            Err("skill_resource_interpreter_unsupported")
+        );
+
+        let retryable = ToolResult::err_with_output(
+            "python3 unavailable",
+            json!({
+                "execution_state": "not_started",
+                "command_started": false,
+                "failure_kind": "spawn_failed"
+            }),
+        );
+        assert!(skill_resource_interpreter_spawn_unavailable(&retryable));
+        let started = ToolResult::err_with_output(
+            "interpreter exited",
+            json!({
+                "execution_state": "completed",
+                "command_started": true,
+                "failure_kind": "command_failed"
+            }),
+        );
+        assert!(!skill_resource_interpreter_spawn_unavailable(&started));
     }
 
     #[test]
