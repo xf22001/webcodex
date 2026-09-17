@@ -59,24 +59,17 @@ jobs:
             exit 1
           fi
           printf 'Selected architectures: %s\n' "${arches[*]}"
-          printf 'arches=[%s]\n' "$(printf '"%s",' "${arches[@]}" | sed 's/,$//')" >> "$GITHUB_OUTPUT"
+          matrix=()
+          [[ "$AMD64" == "true" ]] && matrix+=('{"arch":"amd64","runner":"ubuntu-latest","image":"quay.io/pypa/manylinux2014_x86_64","machine":"x86_64","elf_machine":"Advanced Micro Devices X86-64"}')
+          [[ "$ARM64" == "true" ]] && matrix+=('{"arch":"arm64","runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux2014_aarch64","machine":"aarch64","elf_machine":"AArch64"}')
+          printf 'matrix=[%s]\n' "$(IFS=,; echo "${matrix[*]}")" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-            image: quay.io/pypa/manylinux2014_x86_64
-            machine: x86_64
-            elf_machine: Advanced Micro Devices X86-64
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            image: quay.io/pypa/manylinux2014_aarch64
-            machine: aarch64
-            elf_machine: AArch64
+        include: '${{ fromJSON(needs.prepare.outputs.matrix) }}'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     env:
