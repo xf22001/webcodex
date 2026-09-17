@@ -3,6 +3,11 @@ name: Manual release build
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: Git branch, tag, or commit to build
+        required: true
+        default: xiaofei
+        type: string
       amd64:
         description: Build Linux amd64
         required: false
@@ -28,13 +33,13 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      arches: ${{ steps.arches.outputs.arches }}
+      matrix: ${{ steps.arches.outputs.matrix }}
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          ref: main
+          ref: ${{ inputs.source_ref }}
 
       - name: Capture source revision
         id: source
@@ -208,6 +213,6 @@ jobs:
             "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Latest build" \
-            --notes "Manual build from main @ ${SOURCE_SHA}" \
+            --notes "Manual build from ${SOURCE_SHA}" \
             --latest \
             --target "$SOURCE_SHA"
