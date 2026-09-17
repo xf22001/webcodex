@@ -18,10 +18,12 @@ pub(super) fn decorate_structured_execution_prestart_denial(
     result: &mut ToolResult,
     fallback_failure_kind: &'static str,
 ) {
-    if !matches!(
+    let structured_execution = matches!(
         tool_name,
         "run_process" | "run_detached_process" | "run_script" | "run_skill_resource"
-    ) {
+    );
+    let structured_mutation = tool_name == "apply_text_edits";
+    if !structured_execution && !structured_mutation {
         return;
     }
     let mut output = match std::mem::take(&mut result.output) {
@@ -43,12 +45,18 @@ pub(super) fn decorate_structured_execution_prestart_denial(
         "execution_state".to_string(),
         Value::String("not_started".to_string()),
     );
-    output.insert("command_started".to_string(), Value::Bool(false));
-    output.insert("command_completed".to_string(), Value::Bool(false));
-    output.insert("command_ok".to_string(), Value::Bool(false));
-    output.insert("exit_code".to_string(), Value::Null);
     output.insert("failure_kind".to_string(), Value::String(failure_kind));
     output.insert("tool_failure".to_string(), Value::Bool(true));
+    if structured_mutation {
+        // These Runtime gates precede business mutation dispatch, so the
+        // canonical mutation result can authoritatively prove no state changed.
+        output.insert("state_changed".to_string(), Value::Bool(false));
+    } else {
+        output.insert("command_started".to_string(), Value::Bool(false));
+        output.insert("command_completed".to_string(), Value::Bool(false));
+        output.insert("command_ok".to_string(), Value::Bool(false));
+        output.insert("exit_code".to_string(), Value::Null);
+    }
     result.output = Value::Object(output);
 }
 
@@ -1644,6 +1652,7 @@ impl ToolRuntime {
         let activity_context =
             Self::capture_workspace_activity_context(&call, activity_project.as_deref());
         let validation_assertion_name = recorder_metadata.expectation.assertion_name.as_deref();
+        let logical_invocation_id = recorder_metadata.logical_invocation_id.as_deref();
         let tool_name = call.tool_name();
         let trusted_recording_session_id = recorder_metadata
             .recording_session_authorized
@@ -1674,6 +1683,7 @@ impl ToolRuntime {
                 project_resolution,
                 trusted_recording_session_id,
                 trusted_recording_session_project,
+                logical_invocation_id,
                 protocol_capabilities,
                 correlation,
             )
@@ -1777,6 +1787,7 @@ impl ToolRuntime {
         project_resolution: Option<Result<ResolvedProject, ProjectResolverError>>,
         trusted_recording_session_id: Option<&str>,
         trusted_recording_session_project: Option<&str>,
+        _logical_invocation_id: Option<&str>,
         protocol_capabilities: super::kernel::ToolProtocolCapabilities,
         correlation: &mut super::window_activity::ToolCallCorrelation,
     ) -> ToolResult {
@@ -1880,6 +1891,95 @@ impl ToolRuntime {
             | ToolCall::WorkspaceCheckpointRestore { .. }
             | ToolCall::WorkspaceCheckpointDelete { .. }) => {
                 self.dispatch_workspace_checkpoint_tool(call).await
+            }
+
+            #[cfg(feature = "experimental-code-mode")]
+            ToolCall::CodeModeExec {
+                project: _,
+                session_id,
+                source,
+                timeout_ms,
+            } => {
+                let project = match project_resolution {
+                    Some(Ok(project)) => project,
+                    Some(Err(error)) => return error.into_tool_result(),
+                    None => return ToolResult::err("code_mode_exec requires a resolved Project"),
+                };
+                let (result, composition) = self
+                    .code_mode_exec(
+                        project,
+                        session_id,
+                        source,
+                        timeout_ms,
+                        auth,
+                        transport,
+                        _logical_invocation_id.map(str::to_string),
+                    )
+                    .await;
+                correlation.code_mode_composition = Some(composition);
+                result
+            }
+
+            #[cfg(feature = "experimental-code-mode")]
+            ToolCall::CodeModeExecEffectful {
+                project: _,
+                session_id,
+                source,
+                timeout_ms,
+            } => {
+                let project = match project_resolution {
+                    Some(Ok(project)) => project,
+                    Some(Err(error)) => return error.into_tool_result(),
+                    None => {
+                        return ToolResult::err(
+                            "code_mode_exec_effectful requires a resolved Project",
+                        )
+                    }
+                };
+                let (result, composition) = self
+                    .code_mode_exec_effectful(
+                        project,
+                        session_id,
+                        source,
+                        timeout_ms,
+                        auth,
+                        transport,
+                        _logical_invocation_id.map(str::to_string),
+                    )
+                    .await;
+                correlation.code_mode_composition = Some(composition);
+                result
+            }
+
+            #[cfg(feature = "experimental-code-mode")]
+            ToolCall::CodeModeExecMutating {
+                project: _,
+                session_id,
+                source,
+                timeout_ms,
+            } => {
+                let project = match project_resolution {
+                    Some(Ok(project)) => project,
+                    Some(Err(error)) => return error.into_tool_result(),
+                    None => {
+                        return ToolResult::err(
+                            "code_mode_exec_mutating requires a resolved Project",
+                        )
+                    }
+                };
+                let (result, composition) = self
+                    .code_mode_exec_mutating(
+                        project,
+                        session_id,
+                        source,
+                        timeout_ms,
+                        auth,
+                        transport,
+                        _logical_invocation_id.map(str::to_string),
+                    )
+                    .await;
+                correlation.code_mode_composition = Some(composition);
+                result
             }
 
             ToolCall::ComputerObserve(_) | ToolCall::ComputerControl(_) => ToolResult::err(

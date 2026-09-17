@@ -5,6 +5,8 @@ mod agent_waits;
 mod artifacts;
 #[cfg(feature = "workspace-checkpoints")]
 mod checkpoints;
+#[cfg(feature = "experimental-code-mode")]
+mod code_mode;
 mod coding_agents;
 mod coding_tasks;
 mod common;
@@ -27,7 +29,9 @@ mod ssh_resources;
 mod testing;
 
 use common::default_output_schema;
-pub use common::{continuation_semantics_schema, suggested_tool_call_schema};
+pub use common::{
+    continuation_semantics_schema, suggested_tool_call_schema, suggested_tool_call_schema_target,
+};
 
 pub fn output_schema_for_tool(name: &str) -> Value {
     if let Some(schema) = agent_tasks::output_schema_for_tool(name) {
@@ -40,6 +44,10 @@ pub fn output_schema_for_tool(name: &str) -> Value {
         return schema;
     }
     if let Some(schema) = coding_agents::output_schema_for_tool(name) {
+        return schema;
+    }
+    #[cfg(feature = "experimental-code-mode")]
+    if let Some(schema) = code_mode::output_schema_for_tool(name) {
         return schema;
     }
     if let Some(schema) = computer::output_schema_for_tool(name) {

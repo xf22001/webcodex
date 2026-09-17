@@ -44,6 +44,206 @@ fn tool_definitions_cover_known_names_and_public_specs() {
     assert_eq!(registered_tool_names(), visible_definition_order);
 }
 
+#[cfg(feature = "experimental-code-mode")]
+#[test]
+fn experimental_code_mode_is_visible_read_only_and_feature_scoped() {
+    let definition = lookup_tool_definition("code_mode_exec").expect("code_mode_exec definition");
+    let metadata = definition.metadata();
+    assert!(definition.visibility.is_model_visible());
+    assert_eq!(metadata.effect, ToolEffect::Observe);
+    assert_eq!(metadata.risk, ToolRisk::Read);
+    assert_eq!(metadata.approval, ToolApprovalPolicy::None);
+    assert_eq!(metadata.idempotency, ToolIdempotency::PureRead);
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(45));
+    assert!(registered_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "code_mode_exec"));
+    assert!(TOOL_DISCOVERY_GROUPS
+        .iter()
+        .filter(|group| matches!(
+            group.name,
+            TOOL_DISCOVERY_GROUP_INSPECT | TOOL_DISCOVERY_GROUP_RUNTIME
+        ))
+        .all(|group| group.tools.contains(&"code_mode_exec")));
+    for intent in ["coding", "audit", "exploration"] {
+        assert!(
+            TOOL_MANIFEST_INTENTS
+                .iter()
+                .find(|profile| profile.name == intent)
+                .unwrap()
+                .tools
+                .contains(&"code_mode_exec"),
+            "{intent}"
+        );
+    }
+    assert!(is_adaptive_runtime_direct_tool("code_mode_exec"));
+}
+
+#[cfg(feature = "experimental-code-mode")]
+#[test]
+fn experimental_code_mode_effectful_has_conservative_e2a_envelope() {
+    let definition = lookup_tool_definition("code_mode_exec_effectful")
+        .expect("code_mode_exec_effectful definition");
+    let metadata = definition.metadata();
+    assert!(definition.visibility.is_model_visible());
+    assert_eq!(metadata.effect, ToolEffect::Execute);
+    assert_eq!(metadata.risk, ToolRisk::JobRun);
+    assert_eq!(metadata.approval, ToolApprovalPolicy::Standard);
+    assert_eq!(metadata.idempotency, ToolIdempotency::NonIdempotent);
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(46));
+    assert!(definition.requires_explicit_business_session());
+    assert_eq!(
+        runtime_tool_composition_policy("code_mode_exec_effectful"),
+        ToolCompositionPolicy::Denied,
+        "Code Mode must never recursively compose itself"
+    );
+    assert!(registered_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "code_mode_exec_effectful"));
+    assert!(TOOL_DISCOVERY_GROUPS
+        .iter()
+        .find(|group| group.name == TOOL_DISCOVERY_GROUP_RUNTIME)
+        .expect("runtime discovery group")
+        .tools
+        .contains(&"code_mode_exec_effectful"));
+}
+
+#[cfg(feature = "experimental-code-mode")]
+#[test]
+fn experimental_code_mode_mutating_has_conservative_e2b_envelope() {
+    let definition = lookup_tool_definition("code_mode_exec_mutating")
+        .expect("code_mode_exec_mutating definition");
+    let metadata = definition.metadata();
+    assert!(definition.visibility.is_model_visible());
+    assert_eq!(metadata.effect, ToolEffect::Mutate);
+    assert_eq!(metadata.risk, ToolRisk::ProjectWrite);
+    assert_eq!(metadata.approval, ToolApprovalPolicy::Standard);
+    assert_eq!(metadata.idempotency, ToolIdempotency::NonIdempotent);
+    assert!(
+        metadata.destructive,
+        "E2b can create/edit/delete/rename through apply_text_edits"
+    );
+    assert_eq!(
+        metadata.authority,
+        ToolAuthorityPolicy::Require(PROJECT_WRITE)
+    );
+    assert_eq!(definition.permission_risk(), PERMISSION_RISK_WRITE);
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(47));
+    assert!(definition.requires_explicit_business_session());
+    assert_eq!(
+        runtime_tool_composition_policy("code_mode_exec_mutating"),
+        ToolCompositionPolicy::Denied,
+        "Code Mode must never recursively compose itself"
+    );
+    assert!(registered_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "code_mode_exec_mutating"));
+    assert!(TOOL_DISCOVERY_GROUPS
+        .iter()
+        .find(|group| group.name == TOOL_DISCOVERY_GROUP_RUNTIME)
+        .expect("runtime discovery group")
+        .tools
+        .contains(&"code_mode_exec_mutating"));
+    assert!(CODING_INTENT_TOOL_NAMES.contains(&"code_mode_exec_mutating"));
+    assert!(is_adaptive_runtime_direct_tool("code_mode_exec_mutating"));
+}
+
+#[cfg(feature = "experimental-code-mode")]
+#[test]
+fn code_mode_composition_policy_is_canonical_closed_and_independent_from_frontend_admission() {
+    const E1_TOOLS: &[&str] = &[
+        "read_files",
+        "search_project_texts",
+        "project_overview",
+        "list_project_tracked_files",
+        "git_status",
+        "git_log",
+        "git_diff_hunks",
+        "git_review_summary",
+        "show_changes",
+    ];
+    for name in E1_TOOLS {
+        let definition = lookup_tool_definition(name).unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(
+            runtime_tool_composition_policy(name),
+            ToolCompositionPolicy::Parallel,
+            "{name}"
+        );
+        let metadata = definition.metadata();
+        assert_eq!(metadata.effect, ToolEffect::Observe, "{name}");
+        assert_eq!(metadata.risk, ToolRisk::Read, "{name}");
+    }
+
+    for name in ["cargo_check", "cargo_test", "apply_text_edits"] {
+        assert_eq!(
+            runtime_tool_composition_policy(name),
+            ToolCompositionPolicy::Sequential,
+            "{name}"
+        );
+    }
+
+    for name in [
+        "cargo_fmt",
+        "run_process",
+        "run_script",
+        "run_shell",
+        "run_job",
+        "run_detached_process",
+        "observe_jobs",
+        "apply_patch",
+        "write_project_file",
+        "code_mode_exec",
+        "code_mode_exec_effectful",
+        "code_mode_exec_mutating",
+    ] {
+        assert_eq!(
+            runtime_tool_composition_policy(name),
+            ToolCompositionPolicy::Denied,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        runtime_tool_composition_policy("future_unknown_tool"),
+        ToolCompositionPolicy::Denied
+    );
+}
+
+#[cfg(not(feature = "experimental-code-mode"))]
+#[test]
+fn experimental_code_mode_is_absent_without_feature() {
+    for name in [
+        "code_mode_exec",
+        "code_mode_exec_effectful",
+        "code_mode_exec_mutating",
+    ] {
+        assert!(lookup_tool_definition(name).is_none(), "{name}");
+        assert!(!known_tool_names().any(|known| known == name), "{name}");
+        assert!(
+            !registered_tool_specs().iter().any(|spec| spec.name == name),
+            "{name}"
+        );
+        assert!(
+            TOOL_DISCOVERY_GROUPS
+                .iter()
+                .all(|group| !group.tools.contains(&name)),
+            "{name}"
+        );
+        assert!(
+            TOOL_MANIFEST_INTENTS
+                .iter()
+                .all(|intent| !intent.tools.contains(&name)),
+            "{name}"
+        );
+        assert!(
+            TOOL_RECOMMENDED_FLOWS
+                .iter()
+                .all(|flow| !flow.tools.contains(&name)),
+            "{name}"
+        );
+        assert!(!is_adaptive_runtime_direct_tool(name), "{name}");
+    }
+}
+
 #[test]
 fn final_changes_requires_the_typed_internal_posix_runner_capability() {
     for name in ["present_changes", "changes_file_diff"] {

@@ -63,6 +63,42 @@ fn structured_execution_output(
 }
 
 #[test]
+fn suggested_tool_call_schema_recognizer_is_strict_and_structural() {
+    let canonical = suggested_tool_call_schema(
+        "git_log",
+        json!({"type": "object", "additionalProperties": false, "properties": {}}),
+        "next page",
+    );
+    assert_eq!(
+        suggested_tool_call_schema_target(&canonical),
+        Some("git_log")
+    );
+
+    let incidental = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "tool": {"type": "string", "const": "git_log"},
+            "arguments": {"type": "object"},
+            "payload": {"type": "string"}
+        },
+        "required": ["tool", "arguments"]
+    });
+    assert_eq!(suggested_tool_call_schema_target(&incidental), None);
+
+    let open_object = json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "tool": {"type": "string", "const": "git_log"},
+            "arguments": {"type": "object"}
+        },
+        "required": ["tool", "arguments"]
+    });
+    assert_eq!(suggested_tool_call_schema_target(&open_object), None);
+}
+
+#[test]
 fn observation_schemas_do_not_repeat_static_continuation_semantics() {
     let specs = registered_tool_specs();
     for name in [
@@ -2378,6 +2414,17 @@ fn finish_coding_task_output_schema_describes_ledger_validation_summary() {
     assert_permission_summary_schema_fields(&output_props["permissions"]);
     assert_job_lifecycle_summary_schema_fields(&output_props["jobs"]);
     assert_review_evidence_schema_fields(&output_props["review_evidence"]);
+    let nested_show_changes = &output_props["changes"]["properties"]["show_changes"];
+    let nested_recovery =
+        &nested_show_changes["properties"]["diff_review_handoff"]["properties"]["next_call"];
+    assert_eq!(
+        nested_recovery["properties"]["tool"]["const"], "git_diff_hunks",
+        "finish_coding_task must formally expose nested show_changes recovery"
+    );
+    assert_eq!(
+        nested_recovery["properties"]["arguments"]["additionalProperties"],
+        false
+    );
     let description = schema["properties"]["output"]["properties"]["validation"]["description"]
         .as_str()
         .unwrap();

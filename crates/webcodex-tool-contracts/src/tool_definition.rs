@@ -10,6 +10,8 @@ mod agent_waits;
 mod artifacts;
 #[cfg(feature = "workspace-checkpoints")]
 mod checkpoints;
+#[cfg(feature = "experimental-code-mode")]
+mod code_mode;
 mod coding_agents;
 mod communication;
 mod computer;
@@ -41,7 +43,7 @@ use super::registry::input_schemas::list_tools_input_schema;
 pub use super::tool_catalog::TOOL_MANIFEST_INTENTS;
 pub use super::tool_catalog::{
     available_tool_manifest_intent_names, resolve_tool_manifest_intent, CODING_INTENT_TOOL_NAMES,
-    LOCAL_CODING_TOOL_NAMES, TOOL_DISCOVERY_GROUPS, TOOL_RECOMMENDED_FLOWS,
+    TOOL_DISCOVERY_GROUPS, TOOL_RECOMMENDED_FLOWS,
 };
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_catalog::{
@@ -294,24 +296,6 @@ pub enum ToolGptActionExposure {
     /// This tool depends on MCP-only protocol semantics and must not be exposed
     /// directly or through the GPT Actions gateway.
     Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolModelSurfaceDeclaration {
-    /// Stable ordering for tools exposed directly by the adaptive runtime
-    /// surface. `None` is the default and means a model-visible runtime tool
-    /// belongs to the adaptive long tail behind `call_runtime_tool`.
-    pub adaptive_runtime_direct_rank: Option<u16>,
-    /// GPT Actions inherits Adaptive Runtime unless a concrete protocol
-    /// incompatibility is declared on the canonical ToolDefinition.
-    pub gpt_action_exposure: ToolGptActionExposure,
-}
-
-impl ToolModelSurfaceDeclaration {
-    const DEFAULT: Self = Self {
-        adaptive_runtime_direct_rank: None,
-        gpt_action_exposure: ToolGptActionExposure::Inherit,
-    };
 }
 
 /// Declarative privacy contract for the bounded Tool Audit / Session-ledger
@@ -925,15 +909,31 @@ pub struct ToolActivitySemantics {
     pub kind: ToolActivityKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCompositionPolicy {
+    Denied,
+    Sequential,
+    Parallel,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ToolDefinition {
     pub name: &'static str,
     pub audit: ToolAuditPolicy,
     pub model_spec: Option<ToolModelSpecDeclaration>,
-    pub model_surface: ToolModelSurfaceDeclaration,
+    /// Stable direct-call ordering for the one canonical Adaptive Runtime.
+    /// `None` means a model-visible tool belongs to the long tail behind
+    /// `call_runtime_tool`.
+    pub adaptive_runtime_direct_rank: Option<u16>,
+    /// GPT Actions follows canonical Adaptive routing unless the tool declares
+    /// concrete protocol incompatibility.
+    pub gpt_action_exposure: ToolGptActionExposure,
     pub operator_extension_family: Option<ToolOperatorExtensionFamily>,
     /// Optional canonical selection semantics for ordinary execution tools.
     pub execution: Option<ToolExecutionContract>,
+    /// Canonical scheduling policy for nested orchestration. This grants no
+    /// authority; orchestration frontends retain their own explicit admission.
+    pub composition: ToolCompositionPolicy,
     pub visibility: ToolVisibility,
     pub category: &'static str,
     pub metadata: ToolMetadata,
@@ -960,6 +960,11 @@ impl ToolDefinition {
         self
     }
 
+    pub const fn with_composition_policy(mut self, policy: ToolCompositionPolicy) -> Self {
+        self.composition = policy;
+        self
+    }
+
     /// Override only GPT Actions presentation text. This never changes the
     /// canonical ToolSpec schema, semantic contract, authority, or MCP copy.
     pub const fn with_gpt_action_description(mut self, description: &'static str) -> Self {
@@ -971,9 +976,9 @@ impl ToolDefinition {
     }
 
     /// Mark a canonical model-visible tool as incompatible with GPT Actions
-    /// transport while leaving every other model/runtime surface unchanged.
+    /// transport while leaving canonical runtime admission unchanged.
     pub const fn with_gpt_action_unsupported(mut self) -> Self {
-        self.model_surface.gpt_action_exposure = ToolGptActionExposure::Unsupported;
+        self.gpt_action_exposure = ToolGptActionExposure::Unsupported;
         self
     }
 
@@ -1133,9 +1138,11 @@ const fn def(
         name,
         audit,
         model_spec: None,
-        model_surface: ToolModelSurfaceDeclaration::DEFAULT,
+        adaptive_runtime_direct_rank: None,
+        gpt_action_exposure: ToolGptActionExposure::Inherit,
         operator_extension_family: None,
         execution: None,
+        composition: ToolCompositionPolicy::Denied,
         visibility,
         category,
         metadata: make_tool_metadata(
@@ -1172,10 +1179,7 @@ const fn model_spec(
 
 const fn adaptive_runtime_direct(definition: ToolDefinition, rank: u16) -> ToolDefinition {
     ToolDefinition {
-        model_surface: ToolModelSurfaceDeclaration {
-            adaptive_runtime_direct_rank: Some(rank),
-            ..definition.model_surface
-        },
+        adaptive_runtime_direct_rank: Some(rank),
         ..definition
     }
 }
@@ -1293,6 +1297,8 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     #[cfg(feature = "workspace-checkpoints")]
     checkpoints::DEFINITIONS,
     coding_agents::DEFINITIONS,
+    #[cfg(feature = "experimental-code-mode")]
+    code_mode::DEFINITIONS,
     computer::DEFINITIONS,
     diagnostics::DEFINITIONS,
     discovery::DEFINITIONS,
