@@ -267,11 +267,11 @@ fn registration_routing_summary(candidates: &BTreeMap<String, Vec<ResolvedProvid
         }));
     }
     if servers.is_empty() {
-        return Ok(json!({
+        return json!({
             "servers": servers,
             "empty": true,
             "note": "No Runner-local external MCP providers are configured. This is not a Project or Adaptive Runtime tool list. Discover Projects with list_projects via call_runtime_tool, or bootstrap with work_on_project."
-        }));
+        });
     }
     json!({"servers": servers})
 }
