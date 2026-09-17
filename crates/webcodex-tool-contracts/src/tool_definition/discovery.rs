@@ -46,7 +46,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolActivityPresentation::Support,
             super::ToolActivityInteraction::NonMeaningful,
         ),
-        "List caller-visible Projects. When Runner/Project identity is known, pass exact client_id/project; use bounded query and summary_only instead of reading the full registry.",
+        "List caller-visible Projects. Prefer this over mcp_tool action=list (local MCP providers only). Long-tail route: call via call_runtime_tool {\"tool\":\"list_projects\",\"arguments\":{...}}, not as a direct MCP tool. When Runner/Project identity is known, pass exact client_id/project; use bounded query and summary_only instead of reading the full registry. Results include project id and path for work_on_project/read_files.",
         list_projects_input_schema,
     )),
     model_spec(

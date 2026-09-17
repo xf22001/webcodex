@@ -97,6 +97,10 @@ Result 中的 recovery 字段只描述下一次**显式**调用的安全建议�
 
 hosted Server 可以通过同一个 `/mcp` 暴露 Runner-owned 本地 stdio MCP provider。有权限的 caller 使用单一 `mcp_tool` 来 list、describe、call 已配置 provider；provider process/instance identity 与 schema-revision state 都留在内部。
 
+**`mcp_tool` 不是 WebCodex 业务工具目录。** 它只列出 Runner `[mcp]` 下已配置的 external/local provider。未配置任何 provider 时，`action=list` 会成功返回 `{"servers":[]}`——这是预期结果，**不代表** Server 未连接、Runner 离线，也不代表没有已注册 Project。
+
+模型发现编程工具时优先走 Adaptive Direct（如 `work_on_project`、`read_files`、`runtime_status`、`tool_manifest`）。`list_projects` 等 long-tail 经 `call_runtime_tool` 调用，不要当 direct tool 直调（会得到 `not a direct adaptive_runtime tool`）。`runtime_status` 的 compact 投影往往只给出 `projects.count`；若需 `project id` / `path`，请显式 `list_projects` 或 `project_overview`。连接器把 `mcp_tool` 的 `servers` 误当成项目目录时，参见[排障](TROUBLESHOOTING.zh-CN.md#连接器说没有已注册项目--工作区是空的)。
+
 在 Runner 的 `[mcp]` 中配置 provider。访问需要显式 `mcp:local` permission；hosted OAuth client 通过 `webcodex connect ... --oauth-local-mcp` opt in。Provider compatibility 细节见 [Runner](RUNNER.zh-CN.md#provider-side-gateway-v1-compatibility)。
 
 ### Managed SSH resource 接入

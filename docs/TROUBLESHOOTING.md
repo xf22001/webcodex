@@ -194,6 +194,29 @@ Reconnect or restart the MCP client so it runs a fresh `initialize` and
 `tools/list`. If the server was just upgraded, verify public HTTPS reaches the
 new service and check `journalctl -u webcodex` for startup or auth errors.
 
+### Connector says “no registered projects / workspace is empty”
+
+Distinguish empty results before treating the Runtime as broken:
+
+| Call | Meaning | Empty means no Projects? |
+| --- | --- | --- |
+| `mcp_tool` `action=list` → `servers: []` | No Runner `[mcp]` local providers configured | **No** |
+| `runtime_status` compact with only `projects.count` | Projection omits ids/paths | **No** (check `count > 0`) |
+| `list_projects` via `call_runtime_tool` → `projects: []` | No Projects visible to this principal | **Yes** (or registration/permission issue) |
+
+Hosts such as ChatGPT and Gemini often call `mcp_tool list` first. An empty
+`servers` array is **not** the WebCodex project catalog and can lead the model
+to claim the workspace is empty. Drive discovery with:
+
+1. `call_runtime_tool {"tool":"list_projects","arguments":{...}}`
+2. `work_on_project` (`project` or `client_id` + `path`)
+3. `read_files` (`items: [{path, ...}]`, not `paths`)
+
+Do not call `list_projects` as a direct tool (you will get
+`not a direct adaptive_runtime tool`). For call traces and payloads, see
+[Tool Request Trace](#capture-one-failing-tool-call) and the Server audit table
+`action_events`.
+
 ### Runner is offline
 
 Run `runtime_status` or `list_runners`, then check the Runner host:

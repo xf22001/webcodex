@@ -124,6 +124,10 @@ Recovery fields in a result describe the next safe **explicit** call. They never
 
 A hosted Server can expose Runner-owned local stdio MCP providers through the same `/mcp` endpoint. Authorized callers use the single `mcp_tool` entry to list, describe, and call configured providers; provider process/instance identities and schema-revision state stay internal.
 
+**`mcp_tool` is not the WebCodex business-tool catalog.** It only lists external/local providers configured under Runner `[mcp]`. With no providers configured, `action=list` successfully returns `{"servers":[]}`. That is expected: it does **not** mean the Server is unreachable, the Runner is offline, or no Project is registered.
+
+When discovering coding tools, prefer Adaptive Direct (`work_on_project`, `read_files`, `runtime_status`, `tool_manifest`). Long-tail tools such as `list_projects` are invoked through `call_runtime_tool`, not as direct tools (direct calls return `not a direct adaptive_runtime tool`). Compact `runtime_status` projections often expose only `projects.count`; call `list_projects` or `project_overview` when the model needs a `project id` or `path`. If a connector confuses `mcp_tool`'s `servers` array with the project catalog, see [Troubleshooting](TROUBLESHOOTING.md#connector-says-no-registered-projects--workspace-is-empty).
+
 Configure local providers on the Runner under `[mcp]`. Access requires the explicit `mcp:local` permission; hosted OAuth clients opt in with `webcodex connect ... --oauth-local-mcp`. See [Runner](RUNNER.md#provider-side-gateway-v1-compatibility) for provider compatibility details.
 
 ### Managed SSH resource onboarding
