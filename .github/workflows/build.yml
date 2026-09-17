@@ -21,7 +21,7 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: manual-release-${{ github.run_id }}
+  group: manual-release
   cancel-in-progress: false
 
 jobs:
@@ -29,21 +29,19 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       arches: ${{ steps.arches.outputs.arches }}
-      tag: ${{ steps.release_tag.outputs.tag }}
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           ref: main
 
-      - name: Generate release tag
-        id: release_tag
+      - name: Capture source revision
+        id: source
         shell: bash
         run: |
           set -euo pipefail
-          commit="$(git rev-parse --short=12 HEAD)"
-          timestamp="$(date -u +'%Y%m%d%H%M%S')"
-          printf 'tag=build-%s-%s\n' "$commit" "$timestamp" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Validate architecture selection
         id: arches
@@ -73,14 +71,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          ref: main
+          fetch-depth: 1
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Validate main checkout
+      - name: Validate source checkout
         shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse --abbrev-ref HEAD)" = "main"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -99,17 +99,17 @@ jobs:
           cargo build --release --target "$target" -p webcodex --bin webcodex-server
           cargo build --release --target "$target" -p webcodex-runner
           mkdir -p dist
-          staging="dist/webcodex-${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}"
+          staging="dist/webcodex-${{ matrix.arch }}"
           mkdir -p "$staging"
           cp "target/$target/release/webcodex" "$staging/"
           cp "target/$target/release/webcodex-server" "$staging/"
           cp "target/$target/release/webcodex-runner" "$staging/"
-          tar -C "$staging" -czf "dist/webcodex-${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}.tar.gz" webcodex webcodex-server webcodex-runner
+          tar -C "$staging" -czf "dist/webcodex-${{ matrix.arch }}.tar.gz" webcodex webcodex-server webcodex-runner
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
-          path: dist/webcodex-${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}.tar.gz
+          path: dist/webcodex-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -122,10 +122,10 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish release and mark latest
+      - name: Publish latest release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.prepare.outputs.tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -135,9 +135,15 @@ jobs:
             echo "No release archives were produced." >&2
             exit 1
           fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest=true --title "$TAG"
-          else
-            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --latest --target main
+
+          if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
+
+          gh release create latest \
+            "${files[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest build" \
+            --notes "Manual build from main @ ${SOURCE_SHA}" \
+            --latest \
+            --target "$SOURCE_SHA"
