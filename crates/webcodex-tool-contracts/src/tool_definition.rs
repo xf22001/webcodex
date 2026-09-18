@@ -8,6 +8,7 @@
 mod agent_tasks;
 mod agent_waits;
 mod artifacts;
+mod browser;
 #[cfg(feature = "workspace-checkpoints")]
 mod checkpoints;
 #[cfg(feature = "experimental-code-mode")]
@@ -38,7 +39,6 @@ use super::metadata::{
     ToolIdempotency, ToolMetadata, ToolPathHint, ToolRisk, ToolSemanticContract, RUNTIME_READ,
     TOOL_PROVIDER_CONTROL,
 };
-use super::registry::input_schemas::list_tools_input_schema;
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_catalog::TOOL_MANIFEST_INTENTS;
 pub use super::tool_catalog::{
@@ -57,10 +57,9 @@ pub use super::tool_policy::is_known_tool_name;
 pub use super::tool_policy::{
     adaptive_runtime_direct_tool_definitions, exploration_tool_names,
     is_adaptive_runtime_direct_tool, is_model_visible_tool_name, lookup_tool_definition,
-    model_visible_tool_definitions, model_visible_tool_names_csv, runtime_tool_accepts_context_ack,
+    model_visible_tool_definitions, model_visible_tool_names_csv,
     runtime_tool_activity_interaction, runtime_tool_activity_semantics,
-    runtime_tool_advances_context_checkpoint, runtime_tool_approval_policy,
-    runtime_tool_captures_validation_output, runtime_tool_category,
+    runtime_tool_approval_policy, runtime_tool_captures_validation_output, runtime_tool_category,
     runtime_tool_effect_annotations, runtime_tool_execution_contract,
     runtime_tool_is_change_summary_like, runtime_tool_is_git_like, runtime_tool_is_read_like,
     runtime_tool_is_shell_like, runtime_tool_is_write_like, runtime_tool_metadata,
@@ -71,7 +70,7 @@ pub use super::tool_policy::{
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_policy::{
     is_model_hidden_tool_name, known_tool_names, model_hidden_tool_names,
-    runtime_tool_context_continuity_policy, runtime_tool_requires_explicit_business_session,
+    runtime_tool_requires_explicit_business_session,
 };
 use webcodex_core::runner_protocol::{
     RUNNER_CAPABILITY_APPLY_PATCH_MATCH_METADATA, RUNNER_CAPABILITY_ASYNC_JOBS,
@@ -89,7 +88,8 @@ use webcodex_core::runner_protocol::{
     RUNNER_CAPABILITY_LSP_CALL_HIERARCHY, RUNNER_CAPABILITY_LSP_READ_ONLY_NAVIGATION,
     RUNNER_CAPABILITY_PERSISTENT_SHELL, RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
     RUNNER_CAPABILITY_SHELL, RUNNER_CAPABILITY_SKILL_MANAGEMENT,
-    RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV, RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
+    RUNNER_CAPABILITY_SKILL_RESOURCE_EXECUTION, RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
+    RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
 };
 
 /// Runner capability or owner-boundary requirement that must hold before a
@@ -104,6 +104,9 @@ pub enum RunnerCapabilityRequirement {
     /// General native process + argv execution. This must never be inferred
     /// from shell or structured-validation support.
     StructuredProcess,
+    /// Runner-owned trusted Skill resource execution with package identity.
+    /// Never infer this from generic structured process or Skill read support.
+    SkillResourceExecution,
     /// Durable detached native process Jobs. This explicit authority is never
     /// inferred from ordinary structured process execution.
     DetachedProcess,
@@ -176,6 +179,7 @@ impl RunnerCapabilityRequirement {
             Self::OwnerOnly => "owner boundary",
             Self::Shell => RUNNER_CAPABILITY_SHELL,
             Self::StructuredProcess => RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
+            Self::SkillResourceExecution => RUNNER_CAPABILITY_SKILL_RESOURCE_EXECUTION,
             Self::DetachedProcess => RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS,
             Self::StructuredScript => RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
             Self::InternalPosixScript => RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT,
@@ -212,6 +216,7 @@ impl RunnerCapabilityRequirement {
             Self::OwnerOnly => &[],
             Self::Shell => &[RUNNER_CAPABILITY_SHELL],
             Self::StructuredProcess => &[RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV],
+            Self::SkillResourceExecution => &[RUNNER_CAPABILITY_SKILL_RESOURCE_EXECUTION],
             Self::DetachedProcess => &[RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS],
             Self::StructuredScript => &[RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD],
             Self::InternalPosixScript => &[RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT],
@@ -277,12 +282,9 @@ impl ToolVisibility {
     }
 }
 
-pub type ToolInputSchemaFactory = fn() -> serde_json::Value;
-
 #[derive(Debug, Clone, Copy)]
 pub struct ToolModelSpecDeclaration {
     pub description: &'static str,
-    pub input_schema: ToolInputSchemaFactory,
     /// Optional GPT Actions presentation copy. Canonical/MCP descriptions stay
     /// unchanged; this exists only when the Action importer's 300-character
     /// operation-description ceiling needs a deliberately shorter rendering.
@@ -497,6 +499,8 @@ impl ToolAuditResultField {
 pub enum ToolAuditSemanticResultPolicy {
     /// Project heterogeneous Computer observation results into the same sparse,
     /// privacy-preserving metadata retained by the pre-gateway read tools.
+    BrowserObservation,
+    BrowserControl,
     ComputerObservation,
     /// Project heterogeneous Computer control results into the sparse lifecycle
     /// metadata retained by the pre-gateway effect tools.
@@ -1003,6 +1007,7 @@ pub const TOOL_CATEGORY_AGENT_WAIT: &str = "agent_wait";
 pub const TOOL_CATEGORY_ARTIFACT: &str = "artifact";
 pub const TOOL_CATEGORY_CHECKPOINT: &str = "checkpoint";
 pub const TOOL_CATEGORY_CODING_AGENT: &str = "coding_agent";
+pub const TOOL_CATEGORY_BROWSER: &str = "browser";
 pub const TOOL_CATEGORY_COMPUTER: &str = "computer";
 pub const TOOL_CATEGORY_COMMUNICATION: &str = "communication";
 pub const TOOL_CATEGORY_CLEANUP: &str = "cleanup";
@@ -1019,6 +1024,7 @@ pub const TOOL_CATEGORY_SESSION: &str = "session";
 pub const TOOL_CATEGORY_VALIDATION: &str = "validation";
 
 pub const PERMISSION_RISK_ARTIFACT_WRITE: &str = "artifact_write";
+pub const PERMISSION_RISK_BROWSER_CONTROL: &str = "browser_control";
 pub const PERMISSION_RISK_DESTRUCTIVE: &str = "destructive";
 pub const PERMISSION_RISK_JOB: &str = "job";
 pub const PERMISSION_RISK_PATCH: &str = "patch";
@@ -1035,45 +1041,7 @@ pub struct ToolEffectAnnotations {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContextCheckpointPolicy {
-    Never,
-    OnModelFacingResult,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolContextContinuityPolicy {
-    pub accepts_context_ack: bool,
-    pub checkpoint: ContextCheckpointPolicy,
-}
-
-impl ToolContextContinuityPolicy {
-    pub const CONSERVATIVE: Self = Self {
-        accepts_context_ack: true,
-        checkpoint: ContextCheckpointPolicy::OnModelFacingResult,
-    };
-
-    /// Ordinary observations can be repeated without checkpoint recovery.
-    pub const REOBSERVABLE: Self = Self {
-        accepts_context_ack: false,
-        checkpoint: ContextCheckpointPolicy::Never,
-    };
-
-    pub const RECOVERY_ONLY: Self = Self {
-        accepts_context_ack: true,
-        checkpoint: ContextCheckpointPolicy::Never,
-    };
-
-    pub const fn advances_context_checkpoint(self) -> bool {
-        matches!(
-            self.checkpoint,
-            ContextCheckpointPolicy::OnModelFacingResult
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolDefinitionPolicy {
-    pub context_continuity: ToolContextContinuityPolicy,
     pub change_summary_like: bool,
     pub captures_validation_output: bool,
     pub git_like: bool,
@@ -1085,7 +1053,6 @@ pub struct ToolDefinitionPolicy {
 
 impl ToolDefinitionPolicy {
     const DEFAULT: Self = Self {
-        context_continuity: ToolContextContinuityPolicy::CONSERVATIVE,
         change_summary_like: false,
         captures_validation_output: false,
         git_like: false,
@@ -1162,15 +1129,10 @@ const fn def(
     }
 }
 
-const fn model_spec(
-    definition: ToolDefinition,
-    description: &'static str,
-    input_schema: ToolInputSchemaFactory,
-) -> ToolDefinition {
+const fn model_spec(definition: ToolDefinition, description: &'static str) -> ToolDefinition {
     ToolDefinition {
         model_spec: Some(ToolModelSpecDeclaration {
             description,
-            input_schema,
             gpt_action_description: None,
         }),
         ..definition
@@ -1230,27 +1192,6 @@ bool_policy_modifier!(change_summary_like, change_summary_like);
 
 bool_policy_modifier!(git_like, git_like);
 
-const fn context_continuity(
-    definition: ToolDefinition,
-    context_continuity: ToolContextContinuityPolicy,
-) -> ToolDefinition {
-    ToolDefinition {
-        policy: ToolDefinitionPolicy {
-            context_continuity,
-            ..definition.policy
-        },
-        ..definition
-    }
-}
-
-const fn context_reobservable(definition: ToolDefinition) -> ToolDefinition {
-    context_continuity(definition, ToolContextContinuityPolicy::REOBSERVABLE)
-}
-
-const fn context_recovery_only(definition: ToolDefinition) -> ToolDefinition {
-    context_continuity(definition, ToolContextContinuityPolicy::RECOVERY_ONLY)
-}
-
 const fn permission_risk(
     definition: ToolDefinition,
     permission_risk: &'static str,
@@ -1299,6 +1240,7 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     coding_agents::DEFINITIONS,
     #[cfg(feature = "experimental-code-mode")]
     code_mode::DEFINITIONS,
+    browser::DEFINITIONS,
     computer::DEFINITIONS,
     diagnostics::DEFINITIONS,
     discovery::DEFINITIONS,
@@ -1319,7 +1261,7 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     edits::DEFINITIONS,
 ];
 
-const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[context_reobservable(model_spec(
+const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[model_spec(
     def(
         "list_tools",
         ToolAuditPolicy::TYPED_CANONICAL,
@@ -1345,5 +1287,4 @@ const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[context_reobservable(model_spe
         ToolActivityInteraction::NonMeaningful,
     ),
     "List runtime tools. Full output includes schemas and may be large; use summary_only with category, features, or limit for bounded GPT Action discovery.",
-    list_tools_input_schema,
-))];
+)];

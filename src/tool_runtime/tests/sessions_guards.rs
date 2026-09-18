@@ -562,7 +562,7 @@ async fn read_only_session_allows_read_files_and_records_success() {
             include_workspace: Some(false),
             include_checkpoints: Some(false),
             include_validation: Some(false),
-            summary_only: false,
+            diagnostic: true,
             limit: None,
         })
         .await;
@@ -1103,11 +1103,11 @@ fn project_tool_schemas_include_optional_session_id() {
         );
         assert_eq!(
             session_hint["properties"]["attention_reason"]["enum"],
-            json!(["high_priority_guidance_requires_ack"])
+            json!(["session_message_requires_ack"])
         );
         assert_eq!(
             session_hint["properties"]["attention_instruction"]["enum"],
-            json!(["High-priority Session guidance is pending. Read session_discussion_summary before continuing."])
+            json!(["A Session message requiring acknowledgement is pending. Read session_discussion_summary before continuing."])
         );
         for optional in [
             "attention_required",

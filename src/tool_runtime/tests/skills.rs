@@ -4,9 +4,7 @@ use super::super::kernel::{
     ToolProtocolCapabilities, ToolTransport,
 };
 use super::super::permissions::{AuthorityMode, PermissionEvaluator};
-use super::super::sessions::{
-    SessionContextRevisionAck, SessionTransport, ToolCallRecorderMetadata,
-};
+use super::super::sessions::{SessionTransport, ToolCallRecorderMetadata};
 use super::super::{ToolCall, ToolResult, ToolRuntime};
 use super::support::*;
 use crate::runner_protocol::{RunnerCapabilities, RunnerResultRequest};
@@ -16,8 +14,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use webcodex_core::runner_skill::{
-    RunnerSkillDescriptor, RunnerSkillListResponse, RunnerSkillReadResponse, RunnerSkillRequest,
-    RunnerSkillResolveResponse, RunnerSkillSource, RUNNER_SKILL_RESPONSE_FORMAT,
+    RunnerSkillDescriptor, RunnerSkillExecutionRequest, RunnerSkillListResponse,
+    RunnerSkillReadResponse, RunnerSkillRequest, RunnerSkillResolveResponse, RunnerSkillSource,
+    RUNNER_SKILL_EXECUTION_REQUEST_KIND, RUNNER_SKILL_RESPONSE_FORMAT,
 };
 
 fn write_skill(root: &Path, package: &str, name: &str, description: &str, body: &str) {
@@ -56,7 +55,6 @@ async fn call_kernel_with_local_agent(
                         record_oauth_scope_denials: false,
                         host_file_import_trust: HostFileImportTrust::Untrusted,
                     },
-                    true,
                     sidecar_capable,
                 )
                 .await
@@ -340,7 +338,6 @@ async fn call_kernel_with_fake_operator_store(
                         host_file_import_trust: HostFileImportTrust::Untrusted,
                     },
                     true,
-                    true,
                 )
                 .await
         }
@@ -602,6 +599,40 @@ async fn call_kernel_with_fake_operator_store(
                     })
                     .await
                     .unwrap();
+            } else if request.kind == RUNNER_SKILL_EXECUTION_REQUEST_KIND {
+                kinds.push(request.kind.clone());
+                let execution = serde_json::from_str::<RunnerSkillExecutionRequest>(
+                    request
+                        .content
+                        .as_deref()
+                        .expect("typed Runner Skill execution request"),
+                )
+                .unwrap();
+                let state = operator.lock().unwrap().clone();
+                let script = match execution.expected_source {
+                    RunnerSkillSource::Configured => state
+                        .configured
+                        .as_ref()
+                        .filter(|skill| skill.skill_id == execution.skill_id)
+                        .map(|skill| skill.resource_text.clone()),
+                    RunnerSkillSource::Managed => state
+                        .managed
+                        .as_ref()
+                        .filter(|skill| skill.skill_id == execution.skill_id)
+                        .map(|skill| skill.resource_text.clone()),
+                }
+                .expect("fake Runner package source for Skill execution");
+                let (exit_code, stdout, stderr) =
+                    run_runner_skill_resource_request_locally(&request, &script);
+                complete_patch_agent_request(
+                    runtime,
+                    client_id,
+                    &request.request_id,
+                    exit_code,
+                    &stdout,
+                    &stderr,
+                )
+                .await;
             } else {
                 kinds.push(request.kind.clone());
                 let (exit_code, stdout, stderr) = run_runner_shell_request_locally(&request);
@@ -1804,7 +1835,6 @@ async fn skill_resource_read_revalidates_definition_after_resource_io() {
                         host_file_import_trust: HostFileImportTrust::Untrusted,
                     },
                     true,
-                    true,
                 )
                 .await
         }
@@ -1987,7 +2017,6 @@ async fn skill_surface_sidecar_privacy_and_authority_are_fenced() {
                 ..Default::default()
             },
             ToolProtocolCapabilities {
-                context_continuity: true,
                 context_sidecar: false,
                 ..Default::default()
             },
@@ -2089,7 +2118,6 @@ async fn skill_surface_sidecar_privacy_and_authority_are_fenced() {
         },
         vec!["skills.catalog".to_string()],
         ToolCallRecorderMetadata {
-            ack_session_context_revision: SessionContextRevisionAck::Revision(0),
             ..Default::default()
         },
     )
@@ -2202,6 +2230,7 @@ async fn configured_skill_resource_executes_without_model_source_roundtrip_and_f
         RunnerCapabilities {
             file_read: true,
             skill_runtime: true,
+            skill_resource_execution: true,
             shell: true,
             structured_process_argv: true,
             ..Default::default()
@@ -2329,6 +2358,7 @@ async fn run_skill_resource_denies_project_content_and_requires_managed_package_
         RunnerCapabilities {
             file_read: true,
             skill_runtime: true,
+            skill_resource_execution: true,
             shell: true,
             structured_process_argv: true,
             ..Default::default()

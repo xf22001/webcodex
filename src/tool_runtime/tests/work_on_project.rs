@@ -102,6 +102,29 @@ async fn call_hygiene_in_window_with_local_runner(
     auth: &crate::auth::AuthContext,
     window_id: &str,
 ) -> crate::tool_runtime::kernel::ToolCallOutcome {
+    call_hygiene_in_window_with_local_runner_transport(
+        runtime,
+        client_id,
+        project,
+        recording_session_id,
+        business_session_id,
+        auth,
+        window_id,
+        ToolTransport::Mcp,
+    )
+    .await
+}
+
+async fn call_hygiene_in_window_with_local_runner_transport(
+    runtime: &ToolRuntime,
+    client_id: &str,
+    project: &str,
+    recording_session_id: Option<&str>,
+    business_session_id: Option<&str>,
+    auth: &crate::auth::AuthContext,
+    window_id: &str,
+    transport: ToolTransport,
+) -> crate::tool_runtime::kernel::ToolCallOutcome {
     let runtime_for_task = runtime.clone();
     let project = project.to_string();
     let recording_session_id = recording_session_id.map(str::to_string);
@@ -121,7 +144,7 @@ async fn call_hygiene_in_window_with_local_runner(
                     arguments,
                 },
                 ToolCallContext {
-                    transport: ToolTransport::Mcp,
+                    transport,
                     session_id: recording_session_id.as_deref(),
                     auth: Some(&auth),
                     window: Some(&window),
@@ -132,19 +155,38 @@ async fn call_hygiene_in_window_with_local_runner(
             .await
     });
 
-    // Agent-backed hygiene is asynchronous: service its synthetic Runner
-    // requests instead of waiting for each 30-second production script timeout.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // These tests exercise Session/window recording semantics, not Git or shell
+    // integration. Complete the one expected hygiene diagnostic in-memory so a
+    // missed fixture response cannot fall through to the 30-second production
+    // script timeout. The absolute deadline is a real wall-clock test bound.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !task.is_finished() {
         assert!(
             std::time::Instant::now() < deadline,
-            "window-correlation hygiene call did not finish within 30 seconds for {client_id}"
+            "window-correlation hygiene fixture did not finish within 2 seconds for {client_id}"
         );
         if let Some(request) = probe_patch_agent_request(runtime, client_id).await {
             assert_eq!(request.kind, "run_internal_posix_script");
-            complete_agent_request_by_running_locally(runtime, client_id, request).await;
+            let script = request
+                .script
+                .as_ref()
+                .expect("hygiene diagnostics must use the typed internal script payload");
+            assert_eq!(
+                script.script,
+                crate::tool_runtime::hygiene::hygiene_diagnostic_command(),
+                "Session fixture must not hide an unexpected hygiene subprocess"
+            );
+            complete_patch_agent_request(
+                runtime,
+                client_id,
+                &request.request_id,
+                0,
+                "\n@@WEBCODEX_HYGIENE_STATUS@@0\n",
+                "",
+            )
+            .await;
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     }
     task.await.unwrap()
@@ -168,6 +210,7 @@ fn work_on_project_call_with_extensions(
         instruction: instruction.to_string(),
         include_project_instructions: true,
         include_workflow_guidance: true,
+        guidance_profile: Default::default(),
         include_extension_catalog,
         session_id: None,
     }
@@ -266,6 +309,7 @@ fn work_on_project_call_with_projections(
         instruction: instruction.to_string(),
         include_project_instructions,
         include_workflow_guidance,
+        guidance_profile: Default::default(),
         include_extension_catalog: false,
         session_id: session_id.map(str::to_string),
     }
@@ -286,6 +330,7 @@ fn path_work_on_project_call(
         instruction: instruction.to_string(),
         include_project_instructions: true,
         include_workflow_guidance: true,
+        guidance_profile: Default::default(),
         include_extension_catalog: false,
         session_id: session_id.map(str::to_string),
     }
@@ -307,6 +352,7 @@ fn worktree_work_on_project_call(
         instruction: instruction.to_string(),
         include_project_instructions: true,
         include_workflow_guidance: true,
+        guidance_profile: Default::default(),
         include_extension_catalog: false,
         session_id: session_id.map(str::to_string),
     }
@@ -860,7 +906,7 @@ fn valid_work_on_project_projection_input() -> serde_json::Value {
             "clean": true,
             "conflicts": 0,
         },
-        "workflow": crate::tool_runtime::startup_brief::builtin_coding_workflow_projection(),
+        "workflow": crate::tool_runtime::startup_brief::builtin_coding_workflow_projection(Default::default()),
         "instructions": {
             "status": "loaded",
             "sources": [],
@@ -1797,7 +1843,7 @@ async fn work_on_project_without_session_id_always_creates_fresh_session() {
             .any(|warning| warning == "semantic_navigation_unavailable")));
     assert_eq!(
         result.output["workflow"],
-        crate::tool_runtime::startup_brief::builtin_coding_workflow_projection()
+        crate::tool_runtime::startup_brief::builtin_coding_workflow_projection(Default::default())
     );
     let model_protocol = &result.output["workflow"]["model_protocol"];
     assert!(model_protocol["session_recording"]
@@ -1893,25 +1939,17 @@ async fn work_on_project_without_session_id_always_creates_fresh_session() {
         .unwrap()
         .events
         .len();
-    let ordinary_window = crate::client_window::ClientWindow::for_test(
+    let ordinary = call_hygiene_in_window_with_local_runner_transport(
+        &runtime,
+        "wop-create",
+        &project,
+        None,
+        None,
+        &auth,
         "ordinary_project_tool_without_explicit_session_is_unrecorded",
-    );
-    let ordinary = runtime
-        .call_tool_with_context(
-            ToolCallRequest {
-                tool_name: "workspace_hygiene_check".to_string(),
-                arguments: json!({"project": project}),
-            },
-            ToolCallContext {
-                transport: ToolTransport::Api,
-                session_id: None,
-                auth: Some(&auth),
-                window: Some(&ordinary_window),
-                record_oauth_scope_denials: true,
-                host_file_import_trust: HostFileImportTrust::Untrusted,
-            },
-        )
-        .await;
+        ToolTransport::Api,
+    )
+    .await;
     assert!(ordinary.success, "{:?}", ordinary.error_status);
     assert_eq!(
         runtime
@@ -2399,6 +2437,7 @@ async fn managed_worktree_invalid_arguments_and_authority_fail_before_runner_mut
             instruction: "must fail before resolution".to_string(),
             include_project_instructions: true,
             include_workflow_guidance: true,
+            guidance_profile: Default::default(),
             include_extension_catalog: false,
             session_id: None,
         })
@@ -3120,7 +3159,7 @@ async fn work_on_project_continues_exact_session_and_appends_instruction() {
     assert_eq!(first.output["workflow"], continued.output["workflow"]);
     assert_eq!(
         continued.output["workflow"],
-        crate::tool_runtime::startup_brief::builtin_coding_workflow_projection()
+        crate::tool_runtime::startup_brief::builtin_coding_workflow_projection(Default::default())
     );
 
     // Explicit resume reuses exactly one Session and appends one instruction.
@@ -4052,7 +4091,7 @@ async fn work_on_project_sizes_and_runner_request_reduction_are_stable() {
         "workflow-omitted projection regressed above the context budget: {workflow_omitted_bytes} bytes"
     );
     // The sparse projection itself remains below 1 KiB when static workflow
-    // guidance is omitted. With Session ACK/recording/sidecar guidance plus the
+    // guidance is omitted. With Session recording/sidecar guidance plus the
     // current validation/finalization guidance included, this fixture stays within
     // the dedicated sparse budgets below. Keep the default tightly
     // bounded and still far below the standard startup hard cap while leaving
@@ -4558,4 +4597,136 @@ async fn coding_workflow_standard_and_full_accept_valid_repository_overview() {
                 panic!("{detail:?} coding workflow diagnostic must match strict schema: {error}")
             });
     }
+}
+
+#[tokio::test]
+async fn work_on_project_guidance_profile_is_request_local_and_not_durable() {
+    let root = tempfile::tempdir().unwrap();
+    seed_coding_repository(root.path(), "profile-independent project rule");
+    let state = tempfile::tempdir().unwrap();
+    let ledger = state.path().join("sessions.json");
+    let runtime = ToolRuntime::new_for_tests().with_session_ledger(&ledger);
+    let project =
+        register_runner_project_at_path(&runtime, "wop-profile", "demo", root.path()).await;
+    let auth = auth_context(None, true);
+    let first = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-profile",
+        work_on_project_call(&project, "root objective", None),
+        Some(&auth),
+        "same-window",
+    )
+    .await;
+    assert!(first.success, "{:?}", first.error);
+    assert_eq!(
+        first.output["workflow"]["tool_strategy"]["profile"],
+        "direct"
+    );
+    let session_id = first.output["session_id"].as_str().unwrap().to_string();
+    let before =
+        serde_json::to_value(runtime.sessions.summary(&session_id, Some(50)).unwrap()).unwrap();
+    let mut cases = vec![(Some("direct"), true), (Some("direct"), false)];
+    #[cfg(feature = "experimental-code-mode")]
+    cases.extend([(Some("code_mode"), true), (Some("code_mode"), false)]);
+    cases.push((None, true)); // Same Window/Session must not remember the last profile.
+    let mut baseline = None;
+    let mut requests_baseline = None;
+    for (profile, include) in cases {
+        let mut args = json!({"project": project, "instruction": "continue the task", "session_id": session_id, "include_workflow_guidance": include, "include_extension_catalog": false});
+        if let Some(profile) = profile {
+            args["guidance_profile"] = json!(profile);
+        }
+        let call = ToolCall::from_tool_name("work_on_project", args).unwrap();
+        let audit =
+            crate::tool_runtime::tool_audit::ToolCallAuditProjection::session_log_arguments(&call);
+        assert!(
+            audit.get("guidance_profile").is_none(),
+            "presentation selection must not leak into Session event arguments"
+        );
+        let (mut result, mut requests) = dispatch_recording_startup_requests(
+            &runtime,
+            "wop-profile",
+            call,
+            Some(&auth),
+            "same-window",
+        )
+        .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output["session_id"], session_id);
+        assert_eq!(result.output["continuation"], "resumed_explicitly");
+        if include {
+            assert_eq!(
+                result.output["workflow"]["tool_strategy"]["profile"],
+                profile.unwrap_or("direct")
+            );
+        } else {
+            assert!(result.output.get("workflow").is_none());
+        }
+        let schema = crate::tool_runtime::registry::output_schema_for_tool("work_on_project");
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(
+            &json!({"success":true,"output":result.output}),
+            &schema,
+        )
+        .unwrap();
+        assert!(serde_json::to_vec(&result.output).unwrap().len() < 30 * 1024);
+        result.output.as_object_mut().unwrap().remove("workflow");
+        if let Some(expected) = &baseline {
+            assert_eq!(
+                &result.output, expected,
+                "profile/omission may change only workflow projection"
+            );
+        } else {
+            baseline = Some(result.output);
+        }
+        requests.sort();
+        if let Some(expected) = &requests_baseline {
+            assert_eq!(
+                &requests, expected,
+                "profile must not change startup probes"
+            );
+        } else {
+            requests_baseline = Some(requests);
+        }
+    }
+    let after =
+        serde_json::to_value(runtime.sessions.summary(&session_id, Some(50)).unwrap()).unwrap();
+    for field in [
+        "session_id",
+        "project",
+        "title",
+        "mode",
+        "guards",
+        "execution_context",
+    ] {
+        assert_eq!(before[field], after[field], "{field}");
+    }
+    assert_eq!(
+        runtime
+            .sessions
+            .active_session_count_for_test(Some(&project)),
+        1
+    );
+    runtime.sessions.flush_persistence();
+    let persisted = fs::read_to_string(&ledger).unwrap();
+    for absent in [
+        "guidance_profile",
+        "tool_strategy",
+        "webcodex.coding_workflow",
+        "code_mode",
+    ] {
+        assert!(
+            !persisted.contains(absent),
+            "profile must not become durable business state: {absent}"
+        );
+    }
+    let restored = ToolRuntime::new_for_tests().with_session_ledger(&ledger);
+    assert_eq!(
+        restored
+            .sessions
+            .summary(&session_id, Some(50))
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("root objective")
+    );
 }

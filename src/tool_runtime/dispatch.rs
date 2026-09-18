@@ -8,6 +8,7 @@ use super::session_context::{
 use super::{permissions, session_context, sessions, ToolCall, ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::tool_runtime::project_resolution::{ProjectResolverError, ResolvedProject};
+use crate::tool_runtime::tool_audit::ToolCallAuditProjection;
 use serde_json::Value;
 
 /// Add the Phase A lifecycle tuple to a definite pre-execution structured
@@ -1239,7 +1240,7 @@ impl ToolRuntime {
         if model_facing {
             let session_output =
                 super::tool_audit::session_log_result_for_tool(tool_name, &result.output);
-            let recorded = self.sessions.record_model_facing_tool_call_finished(
+            self.sessions.record_tool_call_finished(
                 start,
                 success,
                 &session_output,
@@ -1247,9 +1248,6 @@ impl ToolRuntime {
                 error_kind,
             );
             add_session_hint(result, &self.sessions, session_id);
-            if let Some(recorded) = recorded.as_ref() {
-                session_context::add_session_context_continuity(result, recorded);
-            }
             if let Some(ack) = ack_observation {
                 session_context::add_session_attention_projection(
                     result,
@@ -1817,6 +1815,26 @@ impl ToolRuntime {
                 )
             }
 
+            ToolCall::PostPeerMessage {
+                peer_id,
+                kind,
+                message,
+                tags,
+                priority,
+                requires_ack,
+            } => self.post_peer_message_tool(
+                peer_id,
+                kind,
+                message,
+                tags,
+                priority,
+                requires_ack,
+                auth,
+                window,
+                trusted_recording_session_id,
+                trusted_recording_session_project,
+            ),
+
             call @ (ToolCall::StartSession { .. }
             | ToolCall::SessionSummary { .. }
             | ToolCall::UpdateSessionContext { .. }
@@ -1873,15 +1891,7 @@ impl ToolRuntime {
             }
 
             call @ ToolCall::SessionHandoffSummary { .. } => {
-                let context_continuity_capable = protocol_capabilities.context_continuity
-                    && super::tool_definition::runtime_tool_accepts_context_ack(call.tool_name());
-                self.dispatch_handoff_tool(
-                    call,
-                    auth,
-                    context_continuity_capable,
-                    trusted_recording_session_id,
-                )
-                .await
+                self.dispatch_handoff_tool(call, auth).await
             }
 
             #[cfg(feature = "workspace-checkpoints")]
@@ -1982,6 +1992,9 @@ impl ToolRuntime {
                 result
             }
 
+            ToolCall::BrowserObserve(_) | ToolCall::BrowserAct(_) => ToolResult::err(
+                "Browser gateways must pass action-sensitive specialized governance".to_string(),
+            ),
             ToolCall::ComputerObserve(_) | ToolCall::ComputerControl(_) => ToolResult::err(
                 "Computer gateways must pass action-sensitive specialized governance".to_string(),
             ),
@@ -2246,7 +2259,12 @@ impl ToolRuntime {
                 lifecycle,
                 offset,
                 limit,
-            } => self.list_goals(auth, lifecycle, offset, limit),
+            } => self.list_goals(
+                auth,
+                lifecycle.map(|value| value.as_str().to_string()),
+                offset,
+                limit,
+            ),
 
             ToolCall::UpdateGoal {
                 goal_id,
@@ -2262,7 +2280,7 @@ impl ToolRuntime {
                 expected_revision,
                 title,
                 objective,
-                lifecycle,
+                lifecycle.map(|value| value.as_str().to_string()),
                 terminal_reason,
                 idempotency_key,
             ),
@@ -2610,6 +2628,54 @@ impl ToolRuntime {
                 binding_id,
             ),
 
+            ToolCall::PresentJobTerminalContinuation { wait_id } => {
+                self.present_job_terminal_continuation(auth, wait_id).await
+            }
+
+            ToolCall::JobTerminalContinuationBind {
+                wait_id,
+                binding_id,
+            } => {
+                self.job_terminal_continuation_bind_for_window(auth, window, wait_id, binding_id)
+                    .await
+            }
+
+            ToolCall::JobTerminalContinuationState {
+                wait_id,
+                binding_id,
+            } => {
+                self.job_terminal_continuation_state_for_window(auth, window, wait_id, binding_id)
+                    .await
+            }
+
+            ToolCall::JobTerminalContinuationPrepare {
+                wait_id,
+                binding_id,
+            } => {
+                self.job_terminal_continuation_prepare_for_window(auth, window, wait_id, binding_id)
+                    .await
+            }
+
+            ToolCall::JobTerminalContinuationFinish {
+                wait_id,
+                binding_id,
+                attempt_id,
+                outcome,
+            } => {
+                self.job_terminal_continuation_finish_for_window(
+                    auth, window, wait_id, binding_id, attempt_id, outcome,
+                )
+                .await
+            }
+
+            ToolCall::JobTerminalContinuationUnbind {
+                wait_id,
+                binding_id,
+            } => {
+                self.job_terminal_continuation_unbind_for_window(auth, window, wait_id, binding_id)
+                    .await
+            }
+
             ToolCall::DetachAgentEndpoint { endpoint_id } => {
                 self.detach_agent_endpoint(auth, endpoint_id)
             }
@@ -2870,6 +2936,7 @@ impl ToolRuntime {
             call @ (ToolCall::RunJob { .. }
             | ToolCall::StopJob { .. }
             | ToolCall::ObserveJobs { .. }
+            | ToolCall::WaitForJobTerminal { .. }
             | ToolCall::ListJobs { .. }
             | ToolCall::JobTail { .. }) => self.dispatch_job_tool(call, auth, ssh_resource).await,
 

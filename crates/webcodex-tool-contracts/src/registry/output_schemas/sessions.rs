@@ -4,15 +4,12 @@ use webcodex_core::workflow_session_contract::{
     MAX_MODEL_VALIDATION_ASSERTION_NAME_CHARS,
 };
 
-use super::super::input_schemas::{
-    session_execution_context_schema, session_guards_schema, session_lifecycle_schema,
-    session_mode_schema,
-};
 use super::common::{
     array_schema, cargo_test_count_assertion_schema, continuation_feedback_schema,
     evidence_history_schema, evidence_integrity_schema, handoff_brief_schema,
     job_lifecycle_summary_schema, nullable_schema, open_object_schema, permission_summary_schema,
-    schema_type, task_outcome_schema, validation_delta_schema, wrapped_output_schema,
+    schema_type, session_execution_context_schema, session_guards_schema, session_lifecycle_schema,
+    session_mode_schema, task_outcome_schema, validation_delta_schema, wrapped_output_schema,
 };
 
 pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
@@ -113,6 +110,62 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             (
                 "events",
                 array_schema(open_object_schema("Bounded session event."), "Recent events."),
+            ),
+            (
+                "events_total",
+                schema_type(
+                    "integer",
+                    "Total events ever observed for this Session, including events already evicted by durable retention.",
+                ),
+            ),
+            (
+                "events_retained",
+                schema_type(
+                    "integer",
+                    "Events currently retained in the durable Session ledger before model-facing tail slicing.",
+                ),
+            ),
+            (
+                "events_evicted",
+                schema_type(
+                    "integer",
+                    "Events already evicted by the durable per-Session retention bound.",
+                ),
+            ),
+            (
+                "retention_truncated",
+                schema_type(
+                    "boolean",
+                    "True only when durable Session history has actually been evicted.",
+                ),
+            ),
+            (
+                "ledger_first_retained_sequence",
+                schema_type(
+                    "integer",
+                    "Zero-based absolute sequence of the first event still retained in the durable ledger.",
+                ),
+            ),
+            (
+                "events_returned",
+                schema_type(
+                    "integer",
+                    "Number of events returned in this bounded summary response.",
+                ),
+            ),
+            (
+                "events_truncated",
+                schema_type(
+                    "boolean",
+                    "True when the Session has observed more events than this response returns, whether from response slicing or durable eviction.",
+                ),
+            ),
+            (
+                "first_retained_sequence",
+                schema_type(
+                    "integer",
+                    "Legacy-named zero-based absolute sequence of the first event returned in this response.",
+                ),
             ),
             (
                 "messages",
@@ -220,6 +273,13 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 schema_type("string", "Created wc_msg_* message id."),
             ),
             ("message", open_object_schema("Created session message.")),
+        ])),
+        "post_peer_message" => Some(wrapped_output_schema(vec![
+            ("success", schema_type("boolean", "Always true on success.")),
+            ("message_id", schema_type("string", "Created durable wc_msg_* peer message id.")),
+            ("sender_peer_id", schema_type("string", "Principal-scoped sender window identity.")),
+            ("recipient_peer_id", schema_type("string", "Principal-scoped recipient window identity.")),
+            ("requires_ack", schema_type("boolean", "Whether omission of the request-scoped ACK causes re-projection.")),
         ])),
         "list_session_messages" => Some(wrapped_output_schema(vec![
             ("success", schema_type("boolean", "Always true on success.")),
@@ -372,8 +432,8 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
         ])),
         "session_handoff_summary" => Some(wrapped_output_schema(vec![
             (
-                "summary_only",
-                schema_type("boolean", "True only for compact summary_only output."),
+                "diagnostic",
+                schema_type("boolean", "True only when detailed evidence was explicitly requested."),
             ),
             (
                 "session_id",
@@ -387,7 +447,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "workspace_clean",
                 schema_type(
                     "boolean",
-                    "Compact summary_only workspace cleanliness verdict.",
+                    "Diagnostic workspace cleanliness verdict.",
                 ),
             ),
             (
@@ -396,7 +456,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "hygiene_clean",
-                schema_type("boolean", "Compact summary_only hygiene cleanliness verdict."),
+                schema_type("boolean", "Diagnostic hygiene cleanliness verdict."),
             ),
             (
                 "collaboration",
@@ -565,15 +625,15 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "validation",
-                open_object_schema("Ledger-derived validation-like tool-call summary with status/reason: not_run, passed, failed, mixed, inconclusive, expected, or unknown. `expected` means a pre-declared negative/observation result matched without proving validator pass. Parser version 3 provides bounded structured diagnostics from bounded validation metadata using canonical diagnostics and failed_test_details fields only. Full and summary_only closeout preserve the same validation evidence. Does not include stdout/stderr bodies and performs no root-cause inference; parser.available remains false when session ledger events lack those fields. latest_status and historical_failures retain the existing final-state and resolved-history semantics."),
+                open_object_schema("Ledger-derived validation-like tool-call summary available only in diagnostic=true handoff output, with status/reason: not_run, passed, failed, mixed, inconclusive, expected, or unknown. `expected` means a pre-declared negative/observation result matched without proving validator pass. Parser version 3 provides bounded structured diagnostics from bounded validation metadata using canonical diagnostics and failed_test_details fields only. Does not include stdout/stderr bodies and performs no root-cause inference; parser.available remains false when session ledger events lack those fields. latest_status and historical_failures retain the existing final-state and resolved-history semantics."),
             ),
             (
                 "review_evidence",
-                review_evidence_schema("Ledger-derived non-cargo review evidence summary for full and summary_only outputs. Counts successful read/search/diff/workspace/hygiene inspection tools from the session ledger and exposes bounded tools for compact explainability. For docs-only or read-only audit tasks, validation.status may remain not_run while review_evidence.total is greater than zero. Does not include file contents, stdout/stderr, diff hunks, command text, tokens, secrets, or raw input payloads. Does not change validation.status or make the verdict pass."),
+                review_evidence_schema("Ledger-derived non-cargo review evidence summary available only in diagnostic=true handoff output. Counts successful read/search/diff/workspace/hygiene inspection tools from the session ledger and exposes bounded tools for compact explainability. For docs-only or read-only audit tasks, validation.status may remain not_run while review_evidence.total is greater than zero. Does not include file contents, stdout/stderr, diff hunks, command text, tokens, secrets, or raw input payloads. Does not change validation.status or make the verdict pass."),
             ),
             (
                 "verdict",
-                open_object_schema("Legacy aggregate closeout verdict for full and summary_only output: task_outcome fail or evidence_integrity error maps to blocking fail; otherwise task_outcome warn or evidence_integrity warning maps to non-blocking warn; otherwise pass. Resolved evidence history alone does not lower the verdict."),
+                open_object_schema("Legacy aggregate closeout verdict retained only in diagnostic=true handoff output: task_outcome fail or evidence_integrity error maps to blocking fail; otherwise task_outcome warn or evidence_integrity warning maps to non-blocking warn; otherwise pass. Resolved evidence history alone does not lower the verdict."),
             ),
             (
                 "task_outcome",
@@ -603,7 +663,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "continuation_feedback",
-                continuation_feedback_schema("Deterministic continuation feedback for normal and summary_only handoff. A read-only attempt summary plus validation delta over existing handoff evidence; never an LLM summary, never an Agent loop, never a new verdict, and it never re-runs validation, mutates the ledger, refreshes activity, or consumes guidance."),
+                continuation_feedback_schema("Deterministic continuation feedback retained only in diagnostic=true handoff output. A read-only attempt summary plus validation delta over existing handoff evidence; never an LLM summary, never an Agent loop, never a new verdict, and it never re-runs validation, mutates the ledger, refreshes activity, or consumes guidance."),
             ),
             (
                 "handoff_brief",

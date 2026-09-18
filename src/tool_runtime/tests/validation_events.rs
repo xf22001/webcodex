@@ -101,7 +101,7 @@ async fn completed_run_job_validation_enters_handoff_from_job_authority() {
     let assertion_name = "direct run job validation";
     let expected_identity =
         crate::tool_runtime::tool_audit::assertion_validation_identity(assertion_name);
-    let (call, recorder_metadata) = ToolCall::from_tool_name_with_recorder_metadata(
+    let (call, recorder_metadata) = crate::tool_runtime::parse_tool_call_with_recorder_metadata(
         "run_job",
         json!({
             "project": project,
@@ -165,7 +165,7 @@ async fn completed_run_job_validation_enters_handoff_from_job_authority() {
                 include_workspace: Some(false),
                 include_checkpoints: Some(false),
                 include_validation: Some(true),
-                summary_only: true,
+                diagnostic: true,
                 limit: Some(20),
             },
             Some(&auth),
@@ -216,7 +216,7 @@ async fn promoted_run_process_cargo_test_materializes_canonical_validation_evide
     let assertion_name = "promoted process validation";
     let expected_identity =
         crate::tool_runtime::tool_audit::assertion_validation_identity(assertion_name);
-    let (call, recorder_metadata) = ToolCall::from_tool_name_with_recorder_metadata(
+    let (call, recorder_metadata) = crate::tool_runtime::parse_tool_call_with_recorder_metadata(
         "run_process",
         json!({
             "project": project,
@@ -348,6 +348,7 @@ async fn finish_coding_task_validation_available_when_ledger_has_validation_even
                 session_id: None,
                 include_project_instructions: true,
                 include_workflow_guidance: true,
+                guidance_profile: Default::default(),
                 include_extension_catalog: false,
             },
             Some(&auth),
@@ -510,7 +511,7 @@ async fn finish_coding_task_validation_available_when_ledger_has_validation_even
                 include_workspace: Some(false),
                 include_checkpoints: Some(false),
                 include_validation: Some(true),
-                summary_only: false,
+                diagnostic: true,
                 limit: None,
             },
             Some(&auth),
@@ -534,7 +535,7 @@ async fn finish_coding_task_validation_available_when_ledger_has_validation_even
                 include_workspace: Some(false),
                 include_checkpoints: Some(false),
                 include_validation: Some(true),
-                summary_only: true,
+                diagnostic: true,
                 limit: None,
             },
             Some(&auth),

@@ -40,9 +40,8 @@ use super::model::{
     CodingSessionError, CodingSessionOutcome, CodingSessionRequest, ColdSessionRecord,
     CompleteSessionMessageInput, CompleteSessionMessageOutcome, PersistedSessionLedger,
     PersistedSessionRecord, PersistedSessionSnapshot, PersistentShellEventEvidence,
-    PostSessionMessageInput, RecordedModelFacingToolCall, ReplaceSessionMessageInput,
-    ReplaceSessionMessageOutcome, SessionCloseError, SessionCloseOutcome,
-    SessionContextRevisionAck, SessionCounts, SessionCreateOptions, SessionEvent,
+    PostSessionMessageInput, ReplaceSessionMessageInput, ReplaceSessionMessageOutcome,
+    SessionCloseError, SessionCloseOutcome, SessionCounts, SessionCreateOptions, SessionEvent,
     SessionExecutionContext, SessionExecutionContextUpdateError,
     SessionExecutionContextUpdateOutcome, SessionGuardDenial, SessionGuards, SessionLifecycle,
     SessionLifecycleDenial, SessionMessage, SessionMessageClosureKind, SessionMessageError,
@@ -518,7 +517,6 @@ impl SessionStore {
                 messages: VecDeque::new(),
                 events: VecDeque::new(),
                 events_observed: 0,
-                context_revision: 0,
                 git_baseline_tree: None,
                 repository_edit_observed: false,
                 materialized_validation_job_ids: VecDeque::new(),
@@ -782,7 +780,6 @@ impl SessionStore {
                     messages: VecDeque::new(),
                     events: VecDeque::from([Arc::new(event)]),
                     events_observed: 1,
-                    context_revision: 0,
                     git_baseline_tree,
                     repository_edit_observed: false,
                     materialized_validation_job_ids: VecDeque::new(),
@@ -966,12 +963,13 @@ impl SessionStore {
         inner.contains_session(session_id)
     }
 
-    pub fn context_revision(&self, session_id: &str) -> Option<u64> {
-        let inner = self.inner.lock().expect("session store mutex poisoned");
-        inner
-            .sessions
-            .get(session_id)
-            .map(StoredSession::context_revision)
+    /// Internal consistency fence for assembling recovery evidence. Event mutations
+    /// advance events_observed; collaboration mutations advance
+    /// message_observation_revision. Never serialized or accepted from a caller.
+    pub fn handoff_revision(&self, session_id: &str) -> Option<(u64, u64)> {
+        self.with_record_for_query(session_id, |record, _| {
+            (record.events_observed, record.message_observation_revision)
+        })
     }
 
     pub fn session_project(&self, session_id: &str) -> Option<Option<String>> {
@@ -1204,7 +1202,11 @@ impl SessionStore {
         if !is_valid_session_id(session_id) {
             return None;
         }
-        let pre_call_context_revision = self.context_revision(session_id)?;
+        // Preserve the existing fail-closed Session boundary. Evicted or unknown
+        // Sessions cannot be revived by appending a tool event.
+        if !self.contains_session(session_id) {
+            return None;
+        }
         let now = now_ts();
         let event_id = format!("{EVENT_ID_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let project = extract_project(arguments);
@@ -1216,11 +1218,6 @@ impl SessionStore {
         let diff_review_like = diff_review_like_for_tool(tool_name, arguments);
         let input_summary = Some(session_input_summary_for_tool(tool_name, arguments));
         let expectation = metadata.expectation;
-        let ack_session_context_revision = if contract.accepts_context_ack {
-            metadata.ack_session_context_revision
-        } else {
-            SessionContextRevisionAck::Unsupported
-        };
         let start = ToolCallStart {
             event_id: event_id.clone(),
             call_id: call_id.clone(),
@@ -1244,15 +1241,12 @@ impl SessionStore {
             started_instant: Instant::now(),
             permission: None,
             expectation: expectation.clone(),
-            pre_call_context_revision,
-            advances_context_checkpoint: contract.advances_context_checkpoint,
-            ack_session_context_revision,
         };
         self.push_event(SessionEvent {
             event_id,
             session_id: session_id.to_string(),
             kind: "tool_call_started".to_string(),
-            context_revision: None,
+            legacy_context_revision: None,
             context_result_summary: None,
             call_id: Some(call_id),
             logical_invocation_id: metadata.logical_invocation_id,
@@ -1377,111 +1371,7 @@ impl SessionStore {
         })
     }
 
-    fn push_model_facing_event(
-        &self,
-        mut event: SessionEvent,
-        pre_call_context_revision: u64,
-        ack_session_context_revision: SessionContextRevisionAck,
-        advances_context_checkpoint: bool,
-    ) -> Option<RecordedModelFacingToolCall> {
-        let session_id = event.session_id.clone();
-        let outcome = {
-            let mut inner = self.inner.lock().expect("session store mutex poisoned");
-            let max_events = inner.max_events_per_session;
-            let stored = inner.sessions.get_mut(&session_id)?;
-            let project_instructions = match stored {
-                StoredSession::Cold(cold) => cold.project_instructions.clone(),
-                StoredSession::Hot(_) => None,
-            };
-            let mut materialized = match stored {
-                StoredSession::Hot(_) => None,
-                StoredSession::Cold(cold) => materialize_cold_session(cold, max_events),
-            };
-            let record = match stored {
-                StoredSession::Hot(record) => record,
-                StoredSession::Cold(_) => materialized.as_mut()?,
-            };
-            if record.context_revision < pre_call_context_revision {
-                return None;
-            }
-            // Recover only the checkpoint prefix that existed immediately before
-            // this result. Non-checkpoint model-facing events stay in the ledger
-            // without consuming a context revision.
-            let pre_response_context_revision = record.context_revision;
-            let context_revision = if advances_context_checkpoint {
-                pre_response_context_revision.checked_add(1)?
-            } else {
-                pre_response_context_revision
-            };
-            let recovery_start = match ack_session_context_revision {
-                SessionContextRevisionAck::Revision(revision)
-                    if revision <= pre_call_context_revision =>
-                {
-                    revision
-                }
-                // Missing, malformed, and future ACKs prove no caller-held
-                // prefix. Response projection requests explicit current-state
-                // recovery instead of replaying retained history
-                // as though revision zero had been explicitly acknowledged.
-                _ => pre_response_context_revision,
-            };
-            let recovery_events = record
-                .events
-                .iter()
-                .filter_map(|candidate| {
-                    let candidate_revision = candidate.context_revision?;
-                    (candidate_revision > recovery_start
-                        && candidate_revision <= pre_response_context_revision)
-                        .then(|| candidate.as_ref().clone())
-                })
-                .collect::<Vec<_>>();
-            let expected_recovery_count = match ack_session_context_revision {
-                SessionContextRevisionAck::Revision(revision)
-                    if revision <= pre_call_context_revision =>
-                {
-                    pre_response_context_revision.saturating_sub(revision)
-                }
-                _ => 0,
-            };
-            let history_lost = expected_recovery_count > recovery_events.len() as u64;
-            event.context_revision = advances_context_checkpoint.then_some(context_revision);
-            if advances_context_checkpoint {
-                record.context_revision = context_revision;
-            }
-            record.updated_at = record.updated_at.max(event.timestamp);
-            if event_observes_repository_edit(&event) {
-                record.repository_edit_observed = true;
-            }
-            record.events.push_back(Arc::new(event));
-            record.events_observed = record.events_observed.saturating_add(1);
-            while record.events.len() > max_events {
-                record.events.pop_front();
-            }
-            let outcome = RecordedModelFacingToolCall {
-                session_id: session_id.clone(),
-                context_revision,
-                pre_response_context_revision,
-                checkpoint_advanced: advances_context_checkpoint,
-                pre_call_context_revision,
-                ack_session_context_revision,
-                recovery_events,
-                history_lost,
-            };
-            if let Some(record) = materialized.as_ref() {
-                let persisted = PersistedSessionRecord::from_record(record, max_events);
-                let cold = cold_session_from_persisted(&persisted, project_instructions).ok()?;
-                *stored = StoredSession::Cold(cold);
-            }
-            inner.touch(&session_id);
-            outcome
-        };
-        self.persist_after_mutation();
-        Some(outcome)
-    }
-
-    /// Append a finished ledger event that is not itself returned as a model-facing
-    /// ToolResult (for example a pre-kernel parsing/scope failure or an internal
-    /// nested operation). It deliberately does not advance model context continuity.
+    /// Append a finished tool-call ledger event through the canonical event path.
     pub fn record_tool_call_finished(
         &self,
         start: Option<ToolCallStart>,
@@ -1490,35 +1380,10 @@ impl SessionStore {
         error: Option<&str>,
         error_kind: Option<&str>,
     ) -> Option<String> {
-        let (event, _, _, _) =
-            Self::tool_call_finished_event(start, success, output, error, error_kind)?;
+        let event = Self::tool_call_finished_event(start, success, output, error, error_kind)?;
         let event_id = event.event_id.clone();
         self.push_event(event);
         Some(event_id)
-    }
-
-    /// Append a finished model-facing ToolResult and atomically advance the
-    /// Session-local context revision only for a ToolDefinition checkpoint.
-    pub fn record_model_facing_tool_call_finished(
-        &self,
-        start: Option<ToolCallStart>,
-        success: bool,
-        output: &Value,
-        error: Option<&str>,
-        error_kind: Option<&str>,
-    ) -> Option<RecordedModelFacingToolCall> {
-        let (
-            event,
-            pre_call_context_revision,
-            ack_session_context_revision,
-            advances_context_checkpoint,
-        ) = Self::tool_call_finished_event(start, success, output, error, error_kind)?;
-        self.push_model_facing_event(
-            event,
-            pre_call_context_revision,
-            ack_session_context_revision,
-            advances_context_checkpoint,
-        )
     }
 
     fn tool_call_finished_event(
@@ -1527,11 +1392,8 @@ impl SessionStore {
         output: &Value,
         error: Option<&str>,
         error_kind: Option<&str>,
-    ) -> Option<(SessionEvent, u64, SessionContextRevisionAck, bool)> {
+    ) -> Option<SessionEvent> {
         let start = start?;
-        let pre_call_context_revision = start.pre_call_context_revision;
-        let ack_session_context_revision = start.ack_session_context_revision;
-        let advances_context_checkpoint = start.advances_context_checkpoint;
         let finished_at = now_ts();
         let duration_ms = start
             .started_instant
@@ -1591,7 +1453,7 @@ impl SessionStore {
             event_id,
             session_id: start.session_id,
             kind: "tool_call_finished".to_string(),
-            context_revision: None,
+            legacy_context_revision: None,
             context_result_summary: context_result_summary_for_tool_result(
                 &start.tool_name,
                 output,
@@ -1648,12 +1510,7 @@ impl SessionStore {
             previous_execution_context: None,
             execution_context_changed: None,
         };
-        Some((
-            event,
-            pre_call_context_revision,
-            ack_session_context_revision,
-            advances_context_checkpoint,
-        ))
+        Some(event)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1799,7 +1656,7 @@ impl SessionStore {
             kind: "validation_job_terminal".to_string(),
             logical_invocation_id: None,
             logical_invocation_role: None,
-            context_revision: None,
+            legacy_context_revision: None,
             context_result_summary: None,
             timestamp,
             transport: "job_terminal".to_string(),
@@ -2314,7 +2171,7 @@ fn coding_instruction_event(
         event_id: event_id.to_string(),
         session_id: session_id.to_string(),
         kind: "task_instruction".to_string(),
-        context_revision: None,
+        legacy_context_revision: None,
         context_result_summary: None,
         call_id: None,
         timestamp: now,
@@ -2405,7 +2262,7 @@ fn coding_agent_lifecycle_event(
         event_id: format!("{EVENT_ID_PREFIX}{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
         kind: bound_summary_string(kind),
-        context_revision: None,
+        legacy_context_revision: None,
         context_result_summary: None,
         call_id: None,
         timestamp: now,
@@ -2466,7 +2323,7 @@ fn session_closed_system_event(session_id: &str, now: i64) -> SessionEvent {
         event_id: format!("{EVENT_ID_PREFIX}{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
         kind: "session_closed".to_string(),
-        context_revision: None,
+        legacy_context_revision: None,
         context_result_summary: None,
         call_id: None,
         timestamp: now,
@@ -2535,7 +2392,7 @@ fn session_execution_context_updated_event(
         event_id: format!("{EVENT_ID_PREFIX}{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
         kind: "session_execution_context_updated".to_string(),
-        context_revision: None,
+        legacy_context_revision: None,
         context_result_summary: None,
         call_id: None,
         timestamp: now,
@@ -2683,6 +2540,10 @@ fn summarize_record(
         counts,
         events,
         events_total: observed_total,
+        events_retained: retained_total,
+        events_evicted: observed_total.saturating_sub(retained_total),
+        retention_truncated: observed_total > retained_total,
+        ledger_first_retained_sequence: observed_total.saturating_sub(retained_total),
         events_returned,
         events_truncated: observed_total > events_returned,
         first_retained_sequence: observed_total.saturating_sub(events_returned),
@@ -2791,14 +2652,6 @@ impl SessionStoreInner {
         let record = stored
             .hot_mut()
             .expect("active session message mutation must stay hot");
-        if requires_ack
-            && (input.kind != super::model::SessionMessageKind::Guidance
-                || input.priority != super::model::SessionMessagePriority::High)
-        {
-            return Err(SessionMessageError::InvalidInput(
-                "requires_ack is only valid for high-priority guidance".to_string(),
-            ));
-        }
         let message = validate_message_text(input.message)?;
         let tags = validate_message_tags(input.tags)?;
         if let Some(reply_to) = input.reply_to.as_deref() {
@@ -2875,8 +2728,6 @@ impl SessionStoreInner {
             let Some(index) = record.messages.iter().position(|message| {
                 message.message_id == *message_id
                     && message.status == SessionMessageStatus::Open
-                    && message.kind == super::model::SessionMessageKind::Guidance
-                    && message.priority == super::model::SessionMessagePriority::High
                     && message.requires_ack
             }) else {
                 outcome.ignored_count += 1;
@@ -3224,7 +3075,7 @@ impl SessionStoreInner {
         }
         if snapshot.requires_ack && !current_request_acknowledged {
             return Err(SessionMessageError::InvalidInput(
-                "requires_ack guidance must be acknowledged on the same request before wrapper resolution"
+                "requires_ack message must be acknowledged on the same request before wrapper resolution"
                     .to_string(),
             ));
         }

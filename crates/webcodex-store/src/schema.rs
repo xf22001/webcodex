@@ -376,6 +376,7 @@ impl Database {
         // the current columns above; existing databases receive the same shape
         // through this additive, idempotent migration.
         Self::ensure_action_event_window_schema(&mut conn)?;
+        Self::ensure_action_event_observability_views(&mut conn)?;
 
         // Durable Agent identity and Conversation state are an independent
         // communication domain. Workflow Session and project Memory ledgers
@@ -389,6 +390,10 @@ impl Database {
         // AgentWait is a one-shot durable interest in future source facts. Sources
         // reference AgentTasks, while the Wait itself owns no source-domain authority.
         Self::ensure_agent_wait_schema(&mut conn)?;
+
+        // Generic Job terminal attention has its own authority model and bounded
+        // one-shot store; it deliberately does not reuse Durable Agent waits.
+        Self::ensure_job_terminal_wait_schema(&mut conn)?;
 
         // Agent Wake is the shared durable continuation/outbox domain. Initialize it
         // after AgentTask and AgentWait so every source foreign key is enforceable.
@@ -451,7 +456,47 @@ impl Database {
                 ON action_event_workflow_links(workflow_session_id, linked_at_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_action_events_window_started
                 ON action_events(client_window_key, window_started_at_ms DESC)
-                WHERE client_window_key IS NOT NULL;";
+                WHERE client_window_key IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS window_peer_messages (
+                message_id TEXT PRIMARY KEY,
+                principal_kind TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                sender_window_key TEXT NOT NULL,
+                recipient_window_key TEXT NOT NULL,
+                sender_peer_id TEXT NOT NULL,
+                recipient_peer_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                message TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                requires_ack INTEGER NOT NULL CHECK(requires_ack IN (0, 1)),
+                created_at_ms INTEGER NOT NULL,
+                sender_session_id TEXT,
+                sender_project TEXT,
+                first_projected_at_ms INTEGER,
+                last_projected_at_ms INTEGER,
+                projection_count INTEGER NOT NULL DEFAULT 0,
+                first_ack_observed_at_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_window_peer_messages_recipient
+                ON window_peer_messages(
+                    principal_kind, principal_id, recipient_window_key,
+                    requires_ack, first_projected_at_ms, created_at_ms
+                );
+
+            CREATE TABLE IF NOT EXISTS window_peer_discoveries (
+                principal_kind TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                observer_window_key TEXT NOT NULL,
+                peer_window_key TEXT NOT NULL,
+                project TEXT NOT NULL,
+                first_projected_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(
+                    principal_kind, principal_id, observer_window_key,
+                    peer_window_key, project
+                )
+            );";
 
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -471,6 +516,102 @@ impl Database {
             .context("create ActionAudit Window correlation schema")?;
         tx.commit()
             .context("commit ActionAudit Window schema migration")?;
+        Ok(())
+    }
+
+    fn ensure_action_event_observability_views(conn: &mut Connection) -> anyhow::Result<()> {
+        // Views are derived observability contracts over the canonical ActionAudit row.
+        // Creation is idempotent and introduces no second telemetry write path.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_action_events_operation_started
+                 ON action_events(operation, started_at DESC)
+                 WHERE operation IS NOT NULL;
+             CREATE VIEW IF NOT EXISTS code_mode_action_traces AS
+             SELECT
+                 event_id,
+                 session_id AS action_session_id,
+                 started_at,
+                 ended_at,
+                 duration_ms AS outer_duration_ms,
+                 operation,
+                 project,
+                 status,
+                 http_status,
+                 principal_kind,
+                 principal_user_id,
+                 client_window_key,
+                 client_window_source,
+                 server_trace_id,
+                 request_observed_at_ms,
+                 response_handed_at_ms,
+                 CASE
+                     WHEN request_observed_at_ms IS NOT NULL
+                      AND response_handed_at_ms IS NOT NULL
+                      AND response_handed_at_ms >= request_observed_at_ms
+                     THEN response_handed_at_ms - request_observed_at_ms
+                 END AS service_ms,
+                 window_transition_kind,
+                 response_streaming,
+                 window_continuity_eligible,
+                 window_meaningful,
+                 json_extract(summary_json, '$.model_ergonomics.duration_ms')
+                     AS model_runtime_duration_ms,
+                 json_extract(summary_json, '$.model_ergonomics.serialized_result_bytes')
+                     AS serialized_result_bytes,
+                 json_extract(summary_json, '$.model_ergonomics.context_recovery_bytes')
+                     AS context_recovery_bytes,
+                 json_extract(summary_json, '$.model_ergonomics.session_recovery_event_count')
+                     AS session_recovery_event_count,
+                 json_extract(summary_json, '$.model_ergonomics.session_recovery_truncated')
+                     AS session_recovery_truncated,
+                 json_extract(summary_json, '$.model_ergonomics.session_history_lost')
+                     AS session_history_lost,
+                 CASE
+                     WHEN json_type(summary_json, '$.code_mode_composition') = 'object' THEN 1
+                     ELSE 0
+                 END AS composition_available,
+                 json_extract(summary_json, '$.code_mode_composition.input_bytes') AS input_bytes,
+                 json_extract(summary_json, '$.code_mode_composition.returned_bytes') AS returned_bytes,
+                 json_extract(summary_json, '$.code_mode_composition.nested_raw_result_bytes_total')
+                     AS nested_raw_result_bytes_total,
+                 json_extract(summary_json, '$.code_mode_composition.nested_calls') AS nested_calls,
+                 json_extract(summary_json, '$.code_mode_composition.nested_successes')
+                     AS nested_successes,
+                 json_extract(summary_json, '$.code_mode_composition.nested_failures')
+                     AS nested_failures,
+                 json_extract(summary_json, '$.code_mode_composition.max_in_flight')
+                     AS max_in_flight,
+                 json_extract(summary_json, '$.code_mode_composition.duration_ms')
+                     AS composition_duration_ms,
+                 json_extract(summary_json, '$.code_mode_composition.slot_wait_ms') AS slot_wait_ms,
+                 json_extract(summary_json, '$.code_mode_composition.consequential_calls')
+                     AS consequential_calls,
+                 json_extract(summary_json, '$.code_mode_composition.known_results') AS known_results,
+                 json_extract(summary_json, '$.code_mode_composition.job_handoffs') AS job_handoffs,
+                 json_extract(summary_json, '$.code_mode_composition.outcome_unknown') AS outcome_unknown,
+                 json_extract(summary_json, '$.code_mode_composition.nested_tool_counts')
+                     AS nested_tool_counts_json
+             FROM action_events
+             WHERE operation IN (
+                 'code_mode_exec', 'code_mode_exec_effectful', 'code_mode_exec_mutating'
+             );
+             CREATE VIEW IF NOT EXISTS code_mode_nested_tool_usage AS
+             SELECT
+                 traces.event_id,
+                 traces.action_session_id,
+                 traces.started_at,
+                 traces.operation,
+                 traces.project,
+                 traces.status,
+                 tools.key AS tool_name,
+                 CAST(tools.value AS INTEGER) AS calls
+             FROM code_mode_action_traces AS traces
+             JOIN json_each(traces.nested_tool_counts_json) AS tools
+             WHERE tools.key IS NOT NULL
+               AND tools.type = 'integer'
+               AND CAST(tools.value AS INTEGER) >= 0;",
+        )
+        .context("create ActionAudit observability views")?;
         Ok(())
     }
 
@@ -630,6 +771,113 @@ mod schema_normalization_tests {
 #[cfg(test)]
 mod action_event_window_migration_tests {
     use super::*;
+
+    #[test]
+    fn code_mode_observability_views_flatten_current_and_historical_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("code-mode-observability.db");
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn_for_tests();
+        conn.execute(
+            "INSERT INTO action_sessions (session_id, status, created_at, updated_at)
+             VALUES ('audit-session', 'open', 1, 1)",
+            [],
+        )
+        .unwrap();
+        for (event_id, operation, status, summary_json) in [
+            (
+                "old-composition",
+                "code_mode_exec",
+                "success",
+                r#"{"transport":"mcp","code_mode_composition":{"nested_calls":2,"nested_successes":2,"nested_failures":0,"max_in_flight":1,"duration_ms":10,"slot_wait_ms":0,"returned_bytes":120,"nested_raw_result_bytes_total":500,"nested_tool_counts":{"read_files":2},"consequential_calls":0,"known_results":0,"job_handoffs":0,"outcome_unknown":0}}"#,
+            ),
+            (
+                "current-composition",
+                "code_mode_exec_effectful",
+                "success",
+                r#"{"transport":"mcp","model_ergonomics":{"duration_ms":19,"serialized_result_bytes":777},"code_mode_composition":{"nested_calls":1,"nested_successes":1,"nested_failures":0,"max_in_flight":1,"duration_ms":20,"slot_wait_ms":3,"input_bytes":42,"returned_bytes":90,"nested_raw_result_bytes_total":250,"nested_tool_counts":{"cargo_check":1},"consequential_calls":1,"known_results":1,"job_handoffs":0,"outcome_unknown":0}}"#,
+            ),
+            (
+                "pre-composition",
+                "code_mode_exec_mutating",
+                "failed",
+                r#"{"transport":"mcp"}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO action_events (
+                    event_id, session_id, started_at, ended_at, duration_ms,
+                    endpoint, operation, action_name, status,
+                    changed_files_json, ids_json, summary_json
+                 ) VALUES (?1, 'audit-session', 10, 20, 10, '/mcp', ?2, 'toolsCall', ?3,
+                           '[]', '{}', ?4)",
+                rusqlite::params![event_id, operation, status, summary_json],
+            )
+            .unwrap();
+        }
+
+        let aggregate: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*), sum(composition_available),
+                        sum(coalesce(input_bytes, 0)), sum(coalesce(nested_calls, 0))
+                 FROM code_mode_action_traces",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(aggregate, (3, 2, 42, 3));
+        conn.execute(
+            "UPDATE action_events
+             SET request_observed_at_ms = 100, response_handed_at_ms = 140
+             WHERE event_id = 'current-composition'",
+            [],
+        )
+        .unwrap();
+        let outer: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT service_ms, model_runtime_duration_ms, serialized_result_bytes
+                 FROM code_mode_action_traces WHERE event_id = 'current-composition'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outer, (40, 19, 777));
+
+        let mut statement = conn
+            .prepare(
+                "SELECT tool_name, calls FROM code_mode_nested_tool_usage
+                 ORDER BY tool_name",
+            )
+            .unwrap();
+        let usage = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            usage,
+            vec![
+                ("cargo_check".to_string(), 1),
+                ("read_files".to_string(), 2)
+            ]
+        );
+        drop(statement);
+        drop(conn);
+        drop(db);
+
+        let reopened = Database::open(&path).unwrap();
+        let conn = reopened.conn_for_tests();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM code_mode_action_traces", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            3,
+            "derived views must reopen idempotently without losing rows"
+        );
+    }
 
     #[test]
     fn legacy_action_events_upgrade_additively_and_remain_readable() {

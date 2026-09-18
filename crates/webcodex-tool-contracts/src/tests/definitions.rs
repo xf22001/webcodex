@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn tool_definition_source_has_no_module_wide_dead_code_allowance() {
+    let source = include_str!("../tool_definition.rs");
+    assert!(
+        !source.contains("#![allow(dead_code)]"),
+        "tool_definition.rs must not use a module-wide dead_code allowance"
+    );
+}
+
+#[test]
 fn tool_definitions_cover_known_names_and_public_specs() {
     let definition_names = tool_definitions()
         .map(|definition| definition.name)
@@ -90,7 +99,7 @@ fn experimental_code_mode_effectful_has_conservative_e2a_envelope() {
     assert_eq!(metadata.risk, ToolRisk::JobRun);
     assert_eq!(metadata.approval, ToolApprovalPolicy::Standard);
     assert_eq!(metadata.idempotency, ToolIdempotency::NonIdempotent);
-    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(46));
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(105));
     assert!(definition.requires_explicit_business_session());
     assert_eq!(
         runtime_tool_composition_policy("code_mode_exec_effectful"),
@@ -128,7 +137,7 @@ fn experimental_code_mode_mutating_has_conservative_e2b_envelope() {
         ToolAuthorityPolicy::Require(PROJECT_WRITE)
     );
     assert_eq!(definition.permission_risk(), PERMISSION_RISK_WRITE);
-    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(47));
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(65));
     assert!(definition.requires_explicit_business_session());
     assert_eq!(
         runtime_tool_composition_policy("code_mode_exec_mutating"),
@@ -318,6 +327,11 @@ fn tool_definitions_are_activity_semantics_ssot() {
         "agent_continuation_wake_prepare",
         "agent_continuation_wake_finish",
         "agent_continuation_unbind",
+        "job_terminal_continuation_bind",
+        "job_terminal_continuation_state",
+        "job_terminal_continuation_prepare",
+        "job_terminal_continuation_finish",
+        "job_terminal_continuation_unbind",
     ] {
         assert_eq!(
             runtime_tool_activity_interaction(name),
@@ -803,6 +817,9 @@ fn run_skill_resource_contract_distinguishes_live_configured_and_managed_fences(
         "resource bytes are read at execution",
         "expected_package_revision",
         "immutable package",
+        "package-relative helpers",
+        "__file__",
+        "requested project cwd",
     ] {
         assert!(
             run_spec.contains(phrase),
@@ -835,6 +852,9 @@ fn run_skill_resource_contract_distinguishes_live_configured_and_managed_fences(
         "resource bytes are read at execution",
         "expected_package_revision",
         "immutable package",
+        "package-relative helpers",
+        "__file__",
+        "requested project cwd",
     ] {
         assert!(
             model_description.contains(phrase),
@@ -854,5 +874,52 @@ fn run_skill_resource_contract_distinguishes_live_configured_and_managed_fences(
             action_description.contains(phrase),
             "run_skill_resource GPT Action description must describe {phrase:?}: {action_description}"
         );
+    }
+}
+
+#[cfg(feature = "experimental-code-mode")]
+#[test]
+fn code_mode_discovery_ranks_inspection_before_specialized_effects_without_changing_admission() {
+    let position = |name| {
+        CODING_INTENT_TOOL_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .unwrap()
+    };
+    assert!(position("code_mode_exec") < position("code_mode_exec_mutating"));
+    assert!(position("apply_text_edits") < position("code_mode_exec_mutating"));
+    assert!(position("code_mode_exec") < position("code_mode_exec_effectful"));
+    assert!(position("cargo_test") < position("code_mode_exec_effectful"));
+    for (name, group) in [
+        ("code_mode_exec", TOOL_DISCOVERY_GROUP_INSPECT),
+        ("code_mode_exec_effectful", TOOL_DISCOVERY_GROUP_VALIDATION),
+        ("code_mode_exec_mutating", TOOL_DISCOVERY_GROUP_EDIT),
+    ] {
+        assert!(TOOL_DISCOVERY_GROUPS
+            .iter()
+            .find(|candidate| candidate.name == group)
+            .unwrap()
+            .tools
+            .contains(&name));
+        assert!(is_adaptive_runtime_direct_tool(name));
+        assert_eq!(
+            runtime_tool_composition_policy(name),
+            ToolCompositionPolicy::Denied
+        );
+    }
+    let specs = registered_tool_specs();
+    let read = specs
+        .iter()
+        .find(|spec| spec.name == "code_mode_exec")
+        .unwrap();
+    for phrase in [
+        "direct tool for one simple observation",
+        "Promise.all only for independent",
+        "sequential inside one cell",
+        "before text(value)",
+        "never a raw-result dump",
+        "outer-output limit",
+    ] {
+        assert!(read.description.contains(phrase), "{phrase}");
     }
 }

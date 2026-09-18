@@ -68,7 +68,12 @@ to be needed, tightly related, and an existing primitive naturally supports the
 batch. Examples include several related `read_files` ranges, independent search
 queries, or a short bounded `run_shell` chain of predetermined observations.
 Result-dependent follow-ups stay sequential so the next call can incorporate the
-new evidence. Do not preload unrelated data or combine permission, mutation,
+new evidence. In direct strategy the model chooses each follow-up across calls;
+with explicitly selected Code Mode guidance, an admitted read-only cell can inspect
+results and perform dependent follow-ups sequentially inside the same cell. Only
+independent observations run concurrently. Keep intermediate child results inside
+the cell and project compact decision evidence before `text(...)`; batching raw
+results into one output does not save model context. Do not preload unrelated data or combine permission, mutation,
 validation, commit, publish, deploy, or restart boundaries merely to reduce call
 count.
 
@@ -218,8 +223,8 @@ secondary to the tool result.
 This is a presentation/projection rule, not permission to weaken the underlying
 protocol. In particular:
 
-- missing Context ACK may return explicit recovery guidance;
-- the Host must not invent or automatically inject an ACK on WebCodex's behalf;
+- missing task context is recovered explicitly with `session_handoff_summary`;
+- collaboration ACKs require request-scoped retained-message proof;
 - a ClientWindow must not select a Workflow Session;
 - support metadata must not become execution authority.
 
@@ -245,7 +250,7 @@ Keep these concepts distinct:
 - **refine** — issue a new observation with changed bounded parameters, such as a
   larger result or hunk limit;
 - **recovery** — repair a failed/lost/invalid state using domain-proven evidence;
-- **checkpoint/ACK** — model-context coherence; not a cursor and not authority.
+- **collaboration ACK** — request-scoped retained-message proof; not a cursor or authority.
 
 Do not advertise a continuation that cannot recover the omitted information. Do
 not turn `outcome_unknown` into retry permission. Do not create a universal cursor

@@ -23,14 +23,15 @@ mod client_window;
 mod config;
 mod console_web;
 mod db;
-mod job_observation;
+pub(crate) use webcodex_core::job_observation;
 mod job_receipts;
+mod job_terminal_attention;
 mod json_digest;
 mod json_measurement;
 mod mcp;
 mod mcp_gateway;
 mod model_surface;
-mod models;
+pub(crate) use webcodex_store::models;
 mod oauth_http;
 mod openapi;
 mod pairing_http;
@@ -45,7 +46,7 @@ mod runner_tokens_http;
 mod runner_ws;
 mod runtime_console_http;
 mod runtime_http;
-mod server_instance;
+pub(crate) use webcodex_store::ServerInstanceGuard;
 mod server_listener;
 mod server_shutdown;
 mod ssh_resource_gateway;
@@ -75,7 +76,6 @@ pub(crate) use config::parse_env_file_line;
 pub use config::Config;
 pub use config::OAuth2Config;
 pub use db::{Database, RotateResult};
-pub use models::{ActionEventRecord, ActionSessionRecord};
 pub(crate) use openapi::openapi_json;
 pub(crate) use runner_http::{
     runner_job_update, runner_offline, runner_persistent_shell_result, runner_poll,
@@ -86,6 +86,7 @@ pub use startup::{
     is_project_command, run_project_command, run_regular_server_tunnel, CliCommandOutput,
     RegularServerTunnelOptions,
 };
+pub use webcodex_store::models::{ActionEventRecord, ActionSessionRecord};
 
 // ============================================================================
 // Main
@@ -240,12 +241,16 @@ only for local/trusted-network demos."
     }
     std::fs::create_dir_all(&config.data_dir)?;
     let db = Database::open(&config.db_path())?;
-    let server_instance_guard = server_instance::ServerInstanceGuard::acquire(&db)?;
+    let server_instance_guard = ServerInstanceGuard::acquire(&db)?;
     db.recover_agent_wakes_for_server_takeover(
         &server_instance_guard,
         chrono::Utc::now().timestamp_millis(),
     )
     .map_err(anyhow::Error::from)?;
+    // Any E3 delivery that crossed its durable dispatch fence in the old
+    // process has an unknowable Host outcome; never retry it silently.
+    db.recover_job_terminal_deliveries_after_restart(chrono::Utc::now().timestamp())
+        .map_err(anyhow::Error::from)?;
     tracing::info!("Database initialized at {:?}", config.db_path());
 
     // Set max payload size to 2MB for text messages
@@ -259,7 +264,15 @@ only for local/trusted-network demos."
     // login form to the consent decision. PAT/bootstrap plaintext is never
     // stored here — only the resolved user identity.
     let authorize_session_store = Arc::new(oauth_http::AuthorizeSessionStore::new());
-    let runner_registry = Arc::new(job_receipts::production_registry(db.clone()).await);
+    let job_terminal_continuations =
+        job_terminal_attention::JobTerminalContinuationController::new(db.clone());
+    let runner_registry = Arc::new(
+        job_receipts::production_registry_with_terminal_attention(
+            db.clone(),
+            job_terminal_continuations.clone(),
+        )
+        .await,
+    );
     // Root HTTP admission consults this process-local state before any
     // side-effecting handler can run. It closes the small race between the
     // authoritative drain transition and Salvo consuming its stop command.
@@ -275,6 +288,7 @@ only for local/trusted-network demos."
             .with_window_activity_database(db.clone())
             .with_memory_database(db.clone())
             .with_communication_database(db.clone())
+            .with_job_terminal_attention(db.clone(), job_terminal_continuations)
             .with_session_ledger(config.session_ledger_path())
             .with_persistent_coding_agent_observation_state(&runtime_state_dir)
             .map_err(std::io::Error::other)?;

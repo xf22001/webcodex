@@ -5,6 +5,7 @@
 //! generate prose summaries, parse validation output, or hide underlying tool
 //! payloads.
 
+use crate::tool_runtime::tool_audit::ToolCallAuditProjection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -37,7 +38,7 @@ use super::startup_brief::{
     StartupPluginsCatalog, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
 };
 use super::tool_catalog::TOOL_RECOMMENDED_FLOWS;
-use super::tool_inputs::{SessionMode, StartupDetail};
+use super::tool_inputs::{CodingGuidanceProfile, SessionMode, StartupDetail};
 use super::tool_result::{RecoveryKind, ToolResult};
 use super::unknown_session_result;
 use super::validation_events::skipped_validation_summary;
@@ -95,6 +96,7 @@ enum CodingProjectSource {
 
 #[derive(Debug, Clone, Copy)]
 struct CodingStartupOptions {
+    guidance_profile: CodingGuidanceProfile,
     tool_name: &'static str,
     detail: StartupDetail,
     include_repository_overview: bool,
@@ -107,6 +109,7 @@ impl CodingStartupOptions {
     #[cfg(test)]
     fn diagnostic(detail: StartupDetail) -> Self {
         Self {
+            guidance_profile: CodingGuidanceProfile::Direct,
             detail,
             tool_name: "work_on_project",
             include_repository_overview: true,
@@ -119,8 +122,10 @@ impl CodingStartupOptions {
     fn work_on_project(
         include_project_instructions: bool,
         include_extension_catalog: bool,
+        guidance_profile: CodingGuidanceProfile,
     ) -> Self {
         Self {
+            guidance_profile,
             detail: StartupDetail::Standard,
             tool_name: "work_on_project",
             include_repository_overview: false,
@@ -1197,6 +1202,7 @@ impl ToolRuntime {
         let project_resolution_value =
             serde_json::to_value(&project_resolution).unwrap_or_else(|_| json!({}));
         let startup_brief = build_startup_brief(StartupBriefInput {
+            guidance_profile: startup.guidance_profile,
             detail,
             requested_project: &project,
             project_resolution: &project_resolution_value,
@@ -1329,6 +1335,7 @@ impl ToolRuntime {
         session_id: Option<String>,
         include_project_instructions: bool,
         include_workflow_guidance: bool,
+        guidance_profile: CodingGuidanceProfile,
         include_extension_catalog: bool,
         auth: Option<&AuthContext>,
         trusted_recording_session_id: Option<&str>,
@@ -1432,6 +1439,7 @@ impl ToolRuntime {
                 CodingStartupOptions::work_on_project(
                     include_project_instructions,
                     include_extension_catalog,
+                    guidance_profile,
                 ),
                 session_id.clone(),
                 None,
@@ -1460,6 +1468,7 @@ impl ToolRuntime {
             projected_project,
             result.output,
             include_workflow_guidance,
+            guidance_profile,
             Some(correlation),
         )
     }
@@ -1620,7 +1629,7 @@ impl ToolRuntime {
                     Some(include_workspace),
                     Some(true),
                     Some(include_validation_summary),
-                    summary_only,
+                    true,
                     Some(20),
                     auth,
                 )
@@ -1768,6 +1777,7 @@ impl ToolRuntime {
             jobs: output.get("jobs"),
             guidance_available,
             existing_suggested_actions: output.get("suggested_next_actions"),
+            session_changed_during_snapshot: false,
         });
         let decision = finish_decision_output(&output);
         if summary_only {
@@ -2457,6 +2467,7 @@ pub(crate) fn project_work_on_project_output_with_workflow(
         project,
         output,
         include_workflow_guidance,
+        CodingGuidanceProfile::Direct,
         None,
     )
 }
@@ -2467,13 +2478,20 @@ pub(crate) fn project_work_on_project_output_with_correlation_for_test(
     output: Value,
     correlation: &mut ToolCallCorrelation,
 ) -> ToolResult {
-    project_work_on_project_output_with_workflow_inner(project, output, true, Some(correlation))
+    project_work_on_project_output_with_workflow_inner(
+        project,
+        output,
+        true,
+        CodingGuidanceProfile::Direct,
+        Some(correlation),
+    )
 }
 
 fn project_work_on_project_output_with_workflow_inner(
     project: String,
     output: Value,
     include_workflow_guidance: bool,
+    guidance_profile: CodingGuidanceProfile,
     correlation: Option<&mut ToolCallCorrelation>,
 ) -> ToolResult {
     let permission = output.get("permission").cloned();
@@ -2545,7 +2563,7 @@ fn project_work_on_project_output_with_workflow_inner(
             None,
         );
     }
-    if projection.workflow != builtin_coding_workflow_projection() {
+    if projection.workflow != builtin_coding_workflow_projection(guidance_profile) {
         return work_on_project_projection_failed(
             "workflow",
             "canonical built-in coding workflow contract",

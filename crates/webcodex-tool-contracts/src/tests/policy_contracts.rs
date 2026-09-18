@@ -1,93 +1,6 @@
 use super::*;
 
 #[test]
-fn tool_definitions_are_context_continuity_ssot() {
-    use crate::metadata::ToolEffect;
-    use crate::tool_definition::{
-        runtime_tool_accepts_context_ack, runtime_tool_advances_context_checkpoint,
-        runtime_tool_context_continuity_policy,
-    };
-    use crate::tool_policy::lookup_tool_definition;
-
-    for (name, accepts_ack, advances_checkpoint) in [
-        ("read_files", false, false),
-        ("search_project_texts", false, false),
-        ("tool_manifest", false, false),
-        ("show_changes", false, false),
-        ("work_on_project", false, false),
-        ("session_handoff_summary", true, false),
-        ("list_jobs", false, false),
-        ("runtime_status", false, false),
-        ("workspace_hygiene_check", false, false),
-        ("git_diff_hunks", false, false),
-        ("hover", false, false),
-        ("apply_text_edits", true, true),
-        ("apply_patch", true, true),
-        ("cargo_test", true, true),
-        ("cargo_check", true, true),
-        ("cargo_fmt", true, true),
-        ("run_shell", true, true),
-        ("run_script", true, true),
-        ("run_process", true, true),
-        ("observe_jobs", true, true),
-    ] {
-        let definition =
-            lookup_tool_definition(name).unwrap_or_else(|| panic!("missing definition for {name}"));
-        let direct = definition.context_continuity_policy();
-        assert_eq!(
-            runtime_tool_context_continuity_policy(name),
-            direct,
-            "{name}"
-        );
-        assert_eq!(direct.accepts_context_ack, accepts_ack, "{name}");
-        assert_eq!(
-            direct.advances_context_checkpoint(),
-            advances_checkpoint,
-            "{name}"
-        );
-        assert_eq!(
-            runtime_tool_accepts_context_ack(name),
-            accepts_ack,
-            "{name}"
-        );
-        assert_eq!(
-            runtime_tool_advances_context_checkpoint(name),
-            advances_checkpoint,
-            "{name}"
-        );
-    }
-
-    assert_eq!(
-        lookup_tool_definition("work_on_project")
-            .unwrap()
-            .metadata()
-            .effect,
-        ToolEffect::Mutate
-    );
-    assert_eq!(
-        lookup_tool_definition("show_changes")
-            .unwrap()
-            .metadata()
-            .effect,
-        ToolEffect::Observe
-    );
-    assert_eq!(
-        lookup_tool_definition("observe_jobs")
-            .unwrap()
-            .metadata()
-            .effect,
-        ToolEffect::Observe
-    );
-    assert!(!runtime_tool_advances_context_checkpoint("show_changes"));
-    assert!(runtime_tool_advances_context_checkpoint("observe_jobs"));
-
-    assert!(runtime_tool_accepts_context_ack("unknown_open_world_tool"));
-    assert!(runtime_tool_advances_context_checkpoint(
-        "unknown_open_world_tool"
-    ));
-}
-
-#[test]
 fn tool_definitions_are_session_evidence_policy_ssot() {
     use crate::tool_definition::{
         exploration_tool_names, runtime_tool_session_evidence_policy,
@@ -661,7 +574,7 @@ fn required_runner_capability_matches_metadata_risk_table() {
         (
             "run_skill_resource",
             ToolRisk::JobRun,
-            RunnerCapabilityRequirement::StructuredProcess,
+            RunnerCapabilityRequirement::SkillResourceExecution,
         ),
         (
             "run_detached_process",

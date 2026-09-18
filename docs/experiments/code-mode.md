@@ -29,6 +29,18 @@ The root `experimental-code-mode` feature enables:
 
 Without that feature, `code_mode_exec`, `code_mode_exec_effectful`, and `code_mode_exec_mutating` are absent from the canonical `ToolDefinition`, `ToolSpec`, `ToolCall`, discovery, Adaptive Runtime, OpenAPI, and MCP surfaces. The default `webcodex-code-mode` crate contains only lightweight transport-neutral contracts and does not compile or link V8.
 
+## Workflow guidance selection
+
+Select `work_on_project(guidance_profile="code_mode", ...)` for orchestration
+strategy guidance. The default `direct` strategy does not teach Code Mode.
+[The shared coding workflow](../CODING_WORKFLOW.md#tool-strategy-guidance) remains
+one workflow; the request-local selection is not authority or durable Session state.
+Read-only inspection has higher default selection value than effectful or mutating
+composition: catalog intent/rank puts the latter beside validation and guarded edit
+capabilities, after their ordinary canonical primitives. All three retain their
+existing availability, admission and canonical metadata. No new recommended flow
+is injected into ordinary direct startup.
+
 ## Architecture
 
 Dependency direction is intentionally narrow:
@@ -66,7 +78,7 @@ webcodex-code-mode (V8 thread)
 
 `webcodex-code-mode` does not depend on the root WebCodex crate, `ToolRuntime`, `AuthContext`, `RunnerRegistry`, or Session storage. It owns only one-shot JavaScript execution, JSON/V8 conversion, bounded output, nested-call scheduling, termination, and the transport-neutral `CodeModeHost` callback contract.
 
-The root-side canonical callback implementation is intentionally no longer V8-specific. `CanonicalOrchestrationHost` owns the reusable authority-preserving nested-tool boundary; `V8CodeModeHost` only adapts the Code Mode crate's request/response types. Canonical target, recorder, context/ACK, result-expectation, and private wrapper fields are denied by the host itself; a frontend policy may add restrictions but cannot opt those Server-owned fields back in. This is an E1.x architectural probe, not a new workflow engine or stable extension API.
+The root-side canonical callback implementation is intentionally no longer V8-specific. `CanonicalOrchestrationHost` owns the reusable authority-preserving nested-tool boundary; `V8CodeModeHost` only adapts the Code Mode crate's request/response types. Canonical target, recorder, context sidecars/message ACK, result-expectation, and private wrapper fields are denied by the host itself; a frontend policy may add restrictions but cannot opt those Server-owned fields back in. This is an E1.x architectural probe, not a new workflow engine or stable extension API.
 
 The V8 integration follows the minimal runtime/thread, Promise callback, microtask-checkpoint, JSON conversion, and thread-safe isolate termination patterns used by OpenAI Codex's Apache-2.0-licensed code-mode implementation. WebCodex E1 does not copy Codex's persistent cells, remote sessions, stored values, media, module ecosystem, notification protocol, or full Code Mode subsystem.
 
@@ -91,7 +103,10 @@ Native Tool Plugins remain capability providers. A future reusable TypeScript co
 
 ## JavaScript API
 
-The global API is deliberately small:
+The global API is deliberately small. In this schematic example,
+`shouldReadMore` and `compactEvidence` are task-specific JavaScript helpers defined
+inside the cell, not host APIs. `compactEvidence` selects relevant paths, small
+supporting excerpts and unresolved failures; it does not return raw child results:
 
 ```javascript
 const status = await tools.git_status({});
@@ -114,9 +129,9 @@ if (hits.success && shouldReadMore(hits.output)) {
   const detail = await tools.read_files({
     items: [{ path: "src/tool_runtime/kernel.rs", start_line: 1, limit: 80 }]
   });
-  text({ status: status.output, detail: detail.output });
+  text(compactEvidence({ status, files, hits, detail }));
 } else {
-  text({ status: status.output, files: files.output, hits: hits.output });
+  text(compactEvidence({ status, files, hits }));
 }
 ```
 
@@ -174,7 +189,6 @@ JavaScript never selects its Project or Workflow Session. Nested arguments are r
 project
 session_id
 recording_session_id
-ack_session_context_revision
 ack_session_message_ids
 context_request
 session_message_resolution
@@ -261,14 +275,32 @@ nested_failures
 max_in_flight
 duration_ms
 slot_wait_ms
+input_bytes
 returned_bytes
 nested_raw_result_bytes_total
 nested_tool_counts
 ```
 
-`nested_raw_result_bytes_total` is the sum of serialized canonical child `ToolResult` sizes before JavaScript selection/projection. Together with `returned_bytes`, it gives a direct projection/compression ratio without retaining any nested payload. `slot_wait_ms` measures only time waiting for the process-wide V8 execution permit, so it can be separated from the remaining Code Mode interval. Tracing RuntimeMetrics exposes the same observations as `code_mode_nested_raw_result_bytes_total` and `code_mode_slot_wait_seconds`; the durable composition summary keeps the millisecond field above. `nested_tool_counts` is limited to the explicit admitted tool set. Composition telemetry never stores JavaScript source, nested arguments, nested outputs, paths, queries, commands, credentials, raw Window identity, or arbitrary nested error text. RuntimeMetrics remains fail-open: metrics failure cannot change the `ToolResult`.
+`input_bytes` is the UTF-8 byte length of the bounded JavaScript program, without retaining the source body. `nested_raw_result_bytes_total` is the sum of serialized canonical child `ToolResult` sizes before JavaScript selection/projection. Together with `returned_bytes`, these fields make input/output and projection/compression pressure directly measurable without retaining nested payloads. `slot_wait_ms` measures only time waiting for the process-wide V8 execution permit, so it can be separated from the remaining Code Mode interval. Tracing RuntimeMetrics exposes the same observations, including `code_mode_input_bytes`, `code_mode_nested_raw_result_bytes_total`, and `code_mode_slot_wait_seconds`; the durable composition summary keeps the millisecond fields above. `nested_tool_counts` is limited to the explicit admitted tool set. Composition telemetry never stores JavaScript source, nested arguments, nested outputs, paths, queries, commands, credentials, raw Window identity, or arbitrary nested error text. RuntimeMetrics remains fail-open: metrics failure cannot change the `ToolResult`.
 
 Nested canonical calls deliberately use no fabricated `ClientWindow`. One host/model-visible `code_mode_exec` request therefore remains one meaningful outer Window call, while the Runtime Console can project the bounded child summary from that outer ActionAudit row. This lets operators distinguish WebCodex-owned outer service time, Code Mode internal time, and the following outside-WebCodex inter-call gap without reclassifying nested calls as host round trips.
+
+The SQLite ActionAudit schema also exposes two derived read-only views for offline/dogfood analysis. `code_mode_action_traces` keeps one row for every Code Mode outer attempt, including historical rows that predate composition telemetry, and flattens the bounded composition scalars together with outer request→handoff `service_ms`, exact serialized model-facing `ToolResult` bytes, Window correlation, and Session-recovery metadata. `code_mode_nested_tool_usage` expands only the bounded `nested_tool_counts` map. They are created idempotently from canonical `action_events` schema on database open and then queried as ordinary SQLite views, rather than maintained through a second telemetry write path. Typical analysis is therefore direct SQL such as:
+
+```sql
+SELECT operation, count(*) AS attempts,
+       avg(service_ms) AS avg_service_ms,
+       avg(composition_duration_ms) AS avg_inner_ms,
+       sum(serialized_result_bytes) AS model_bytes,
+       sum(nested_calls) AS nested_calls
+FROM code_mode_action_traces
+GROUP BY operation;
+
+SELECT tool_name, sum(calls) AS calls
+FROM code_mode_nested_tool_usage
+GROUP BY tool_name
+ORDER BY calls DESC;
+```
 
 ## Validation evidence
 
@@ -374,9 +406,9 @@ If JavaScript throws or times out after consequential dispatch, the parent failu
 
 ### Session and Job continuation
 
-Each nested validator records its own ordinary canonical `tool_call_started` / `tool_call_finished`, validation, permission/scope, and Job evidence in the exact outer Workflow Session. The parent is not a fake validation event and does not compress children into one transaction. Server-owned nested fields, including Project/Session selection, context ACK, Session-message resolution, result expectations, and private `__webcodex_*` fields, remain forbidden inside JavaScript.
+Each nested validator records its own ordinary canonical `tool_call_started` / `tool_call_finished`, validation, permission/scope, and Job evidence in the exact outer Workflow Session. The parent is not a fake validation event and does not compress children into one transaction. Server-owned nested fields, including Project/Session selection, context sidecars, Session-message resolution, result expectations, and private `__webcodex_*` fields, remain forbidden inside JavaScript.
 
-Unlike re-observable E1, consequential E2a participates in normal Session continuity. After already-started children have drained, the outer response is decorated from the latest monotonic Session state; it never fabricates an ACK and never derives authority from `ClientWindow`.
+Unlike re-observable E1, consequential E2a participates in normal Session checkpointing. After already-started children have drained, the outer response is recorded against the latest monotonic Server-owned Session state; no caller-visible checkpoint token is synthesized, and no authority is derived from `ClientWindow`.
 
 `observe_jobs` remains intentionally outside nested E2a. A validator uses a short sync grace, may return its existing Job handoff, and Code Mode returns. The model then observes that exact Job through ordinary `observe_jobs`, including `wake_on=all_terminal` for a predetermined set when later work genuinely depends on all of them.
 
@@ -408,6 +440,18 @@ The minimum mutation cases are: one real `read_files -> read_revision -> apply_t
 
 Capture both call economy and effect truth: outer model-facing calls, nested calls, canonical edit calls, Runner file-write requests, Code Mode duration, `slot_wait_ms`, nested raw result bytes, returned bytes, consequential-call counters, known results, outcome uncertainty, and mutation `state_changed`. The value hypothesis is specifically whether one adaptive E2b call can replace the direct sequence `read_files -> model decision -> apply_text_edits -> model decision -> read/show_changes` without weakening canonical authority or evidence. Do not infer generic mutation safety or model-level speedup from local runtime tests alone.
 
+### E3 v1 + H1: generic asynchronous Job terminal attention with an explicit Host carrier
+
+E3 remains outside Code Mode as the model-visible `wait_for_job_terminal` Job operation. It registers one bounded caller-owned one-shot wait for one exact existing public `job_id`; keyed replay returns the same durable wait, and the operation cannot start, retry, stop, replace, or redispatch the execution. Canonical RunnerRegistry terminal truth is the only trigger. The event is deliberately sparse (Job id, terminal status, bounded outcome, wait identity) and never carries stdout/stderr, command text, paths, environment, validation bodies, credentials, or observation tokens. `observe_jobs` remains the explicit details/recovery surface.
+
+E3-H1 supplies the missing ordinary-Job Host carrier as a Job-native MCP App, not a Durable Agent lifecycle. `present_job_terminal_continuation(wait_id)` is the only new model-visible presentation operation. It requires one exact wait and independently re-authorizes the wait and underlying Job; it never infers identity from Project, Workflow Session, ClientWindow, Window Peer, credential, or recent activity. The App-only bind/state/prepare/finish/unbind protocol is ModelHidden. ClientWindow is used only as hashed Host routing continuity and never as Job or Session authority, while Window Peer messages are not used for wake delivery at all.
+
+Durable wait/event state survives Store reopen and can be reconciled from the same Runner Job or retained terminal receipts. H1 adds only a process-local one-carrier-per-wait View binding. `automatic_resume_available` is exact-wait truth: false with no eligible binding, true only for the specifically bound wait, false for unrelated waits, false after unbind/staleness, and false after Server restart until rebind. A pending terminal wait may rebind after restart; a pre-restart prepared attempt is conservatively recovered as `delivery_unknown` and is never blindly resent.
+
+The App is a bounded pull bridge, not Server push. It privately observes the exact wait, prepares through the existing durable `pending -> prepared` fence, calls `ui/message` at one dispatch site, then records `dispatch_accepted` or `delivery_unknown`. Response loss or teardown after prepare never reopens pending for a retry. The automatic Host message is sparse and payload-free; logs/details stay behind `observe_jobs`. Deterministic Rust and JavaScript Host-harness tests prove this topology without model-facing completion polling, but they are not live ChatGPT auto-resume proof.
+
+E3/H1 are not added to any Code Mode allowlist. E1 remains read-only, E2a still hands off the same canonical validation Job, and E2b remains one guarded mutation with no validation/Job access. `wait_for_job_terminal`, the presentation tool, the five App-only coordination operations, and `observe_jobs` all remain outside child allowlists. Nested Job waiting and E2c remain out of scope. The remaining H1 verification boundary is a separately authorized 0916 candidate deployment from the then-current `main` plus H1, followed by a real long-Job test with no model `observe_jobs` call before the Host-generated continuation turn.
+
 ### Current stage sequence
 
 ```text
@@ -416,7 +460,8 @@ E2a  structured validation + Job/effect foundation
 E2b  guarded structured mutation: E1 reads + one apply_text_edits attempt
 E2c  decide whether validation and mutation should coexist in one cell;
      consider selective process/shell only with telemetry
-E3   Async Event Delivery
+E3   implemented generic asynchronous Job terminal attention v1
+H1   source-complete Job-native MCP App Host carrier; live candidate deployment pending
 E4   product/stability decision
 ```
 
@@ -436,4 +481,4 @@ E1 intentionally has no:
 - Windows/macOS Code Mode packaging guarantee;
 - stable compatibility promise.
 
-The implemented stage sequence is documented above. Current E2b remains deliberately narrower than nested validation, multiple mutation attempts, generic shell/process orchestration, global/direct-write serialization, finer-than-Project mutation locking, nested Job waiting, Async Event Delivery, or a stable product commitment.
+The implemented stage sequence is documented above. Current E2b remains deliberately narrower than nested validation, multiple mutation attempts, generic shell/process orchestration, global/direct-write serialization, finer-than-Project mutation locking, nested Job waiting, or a stable product commitment. E3 is a separate generic Job capability and does not expand the E1/E2a/E2b child-tool allowlists.

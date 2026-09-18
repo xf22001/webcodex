@@ -162,7 +162,8 @@ fn dispatch_recorded(
     tokio::spawn(async move {
         let auth = auth_context(None, true);
         let (call, metadata) =
-            ToolCall::from_tool_name_with_recorder_metadata(tool_name, arguments).unwrap();
+            crate::tool_runtime::parse_tool_call_with_recorder_metadata(tool_name, arguments)
+                .unwrap();
         runtime
             .dispatch_with_auth_transport_options_and_metadata(
                 call,
@@ -200,6 +201,7 @@ async fn persistent_shell_handoff(runtime: &ToolRuntime, session_id: &str) -> To
                     "session_id": session_id,
                     "include_workspace": false,
                     "include_checkpoints": false,
+                    "diagnostic": true,
                 }),
             )
             .unwrap(),

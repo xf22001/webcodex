@@ -1489,9 +1489,7 @@ async fn read_files_records_one_outer_session_event_and_keeps_metadata_outer_onl
 
 #[tokio::test]
 async fn read_files_direct_session_overlay_pressure_keeps_final_response_under_hard_cap() {
-    use crate::tool_runtime::sessions::{
-        SessionContextRevisionAck, SessionTransport, ToolCallRecorderMetadata,
-    };
+    use crate::tool_runtime::sessions::{SessionTransport, ToolCallRecorderMetadata};
     use webcodex_core::runtime_contract::MODEL_INSPECTION_MAX_RESULT_BYTES as MAX_SERIALIZED_OUTPUT_BYTES;
 
     let root = tempfile::tempdir().unwrap();
@@ -1501,10 +1499,7 @@ async fn read_files_direct_session_overlay_pressure_keeps_final_response_under_h
     let session = runtime
         .sessions
         .start_session(Some(project.clone()), Some("direct final cap".to_string()));
-    assert_eq!(
-        seed_model_facing_recovery_events(&runtime, &session.session_id, &project, 20),
-        20
-    );
+    seed_recovery_events(&runtime, &session.session_id, &project, 20);
     let auth = auth_context(None, true);
 
     let task = tokio::spawn({
@@ -1530,7 +1525,6 @@ async fn read_files_direct_session_overlay_pressure_keeps_final_response_under_h
                     Some(&auth),
                     SessionTransport::Mcp,
                     ToolCallRecorderMetadata {
-                        ack_session_context_revision: SessionContextRevisionAck::Revision(0),
                         ..Default::default()
                     },
                 )
@@ -1561,7 +1555,6 @@ async fn read_files_outer_recording_session_preserves_complete_sparse_shape() {
         HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
         ToolProtocolCapabilities, ToolTransport,
     };
-    use crate::tool_runtime::sessions::SessionContextRevisionAck;
 
     let root = tempfile::tempdir().unwrap();
     let runtime = ToolRuntime::new_for_tests();
@@ -1596,11 +1589,9 @@ async fn read_files_outer_recording_session_preserves_complete_sparse_shape() {
                         host_file_import_trust: HostFileImportTrust::Untrusted,
                     },
                     ToolInvocationMetadata {
-                        ack_session_context_revision: SessionContextRevisionAck::Revision(0),
                         ..Default::default()
                     },
                     ToolProtocolCapabilities {
-                        context_continuity: true,
                         context_sidecar: true,
                         ..Default::default()
                     },
@@ -1619,10 +1610,6 @@ async fn read_files_outer_recording_session_preserves_complete_sparse_shape() {
     assert!(result.output.get("session_context_revision").is_none());
     assert!(result.output.get("session_continuity").is_none());
     assert!(result.output.get("session_recovery").is_none());
-    assert_eq!(
-        runtime.sessions.context_revision(&session.session_id),
-        Some(0)
-    );
     for omitted in [
         "project",
         "requested_count",
@@ -1742,8 +1729,7 @@ async fn read_files_ignores_context_ack_and_preserves_bounded_attention() {
         ToolProtocolCapabilities, ToolTransport,
     };
     use crate::tool_runtime::sessions::{
-        PostSessionMessageInput, SessionContextRevisionAck, SessionMessageKind,
-        SessionMessagePriority,
+        PostSessionMessageInput, SessionMessageKind, SessionMessagePriority,
     };
     use webcodex_workspace::file_read_range::MAX_SERIALIZED_OUTPUT_BYTES;
 
@@ -1755,14 +1741,8 @@ async fn read_files_ignores_context_ack_and_preserves_bounded_attention() {
         Some(project.clone()),
         Some("bounded recovery overlays".to_string()),
     );
-    assert_eq!(
-        seed_model_facing_recovery_events(&runtime, &session.session_id, &project, 50),
-        50
-    );
-    assert_eq!(
-        seed_large_changed_path_recovery_events(&runtime, &session.session_id, &project, 50,),
-        100
-    );
+    seed_recovery_events(&runtime, &session.session_id, &project, 50);
+    seed_large_changed_path_events(&runtime, &session.session_id, &project, 50);
     for kind in [
         SessionMessageKind::Guidance,
         SessionMessageKind::Question,
@@ -1816,9 +1796,11 @@ async fn read_files_ignores_context_ack_and_preserves_bounded_attention() {
         "purpose": "test",
         "assertion_name": assertion_name,
     });
-    let (_, recorder_metadata) =
-        ToolCall::from_tool_name_with_recorder_metadata("run_process", validation_request.clone())
-            .unwrap();
+    let (_, recorder_metadata) = crate::tool_runtime::parse_tool_call_with_recorder_metadata(
+        "run_process",
+        validation_request.clone(),
+    )
+    .unwrap();
     let audited = crate::tool_runtime::tool_audit::session_log_arguments_for_tool_request(
         "run_process",
         &validation_request,
@@ -1875,11 +1857,10 @@ async fn read_files_ignores_context_ack_and_preserves_bounded_attention() {
                     },
                     ToolInvocationMetadata {
                         context_request: vec!["webcodex.workflow".to_string()],
-                        ack_session_context_revision: SessionContextRevisionAck::Revision(0),
+
                         ..Default::default()
                     },
                     ToolProtocolCapabilities {
-                        context_continuity: true,
                         context_sidecar: true,
                         ..Default::default()
                     },
@@ -1927,7 +1908,6 @@ async fn read_files_outer_recording_session_keeps_final_response_under_hard_cap(
         HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
         ToolProtocolCapabilities, ToolTransport,
     };
-    use crate::tool_runtime::sessions::SessionContextRevisionAck;
     use webcodex_core::runtime_contract::MODEL_INSPECTION_MAX_RESULT_BYTES as MAX_SERIALIZED_OUTPUT_BYTES;
 
     let root = tempfile::tempdir().unwrap();
@@ -1938,10 +1918,7 @@ async fn read_files_outer_recording_session_keeps_final_response_under_hard_cap(
         Some(project.clone()),
         Some("final response cap".to_string()),
     );
-    assert_eq!(
-        seed_model_facing_recovery_events(&runtime, &session.session_id, &project, 20),
-        20
-    );
+    seed_recovery_events(&runtime, &session.session_id, &project, 20);
     let auth = auth_context(None, true);
     let arguments = json!({
         "project": project,
@@ -1974,11 +1951,9 @@ async fn read_files_outer_recording_session_keeps_final_response_under_hard_cap(
                         host_file_import_trust: HostFileImportTrust::Untrusted,
                     },
                     ToolInvocationMetadata {
-                        ack_session_context_revision: SessionContextRevisionAck::Revision(0),
                         ..Default::default()
                     },
                     ToolProtocolCapabilities {
-                        context_continuity: true,
                         context_sidecar: true,
                         ..Default::default()
                     },

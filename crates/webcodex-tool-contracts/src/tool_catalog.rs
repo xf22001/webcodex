@@ -57,6 +57,8 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "workspace_checkpoint_list",
             #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_show",
+            "browser_observe",
+            "browser_act",
             "computer_observe",
             "computer_control",
             "computer_save_snapshot",
@@ -167,6 +169,8 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "cargo_check",
             "cargo_test",
             "go_test",
+            #[cfg(feature = "experimental-code-mode")]
+            "code_mode_exec_effectful",
             "validation_summary",
         ],
     },
@@ -182,6 +186,8 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "apply_unified_diff",
             "write_project_file",
             "save_project_artifact",
+            #[cfg(feature = "experimental-code-mode")]
+            "code_mode_exec_mutating",
             "read_project_artifact_metadata",
             "read_project_artifact",
             "import_conversation_files_to_project",
@@ -235,6 +241,8 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "run_job",
             "stop_job",
             "observe_jobs",
+            "wait_for_job_terminal",
+            "present_job_terminal_continuation",
             "list_jobs",
         ],
     },
@@ -248,6 +256,7 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "update_session_context",
             "close_session",
             "post_session_message",
+            "post_peer_message",
             "list_session_messages",
             "get_session_assignment",
             "observe_session_messages",
@@ -427,6 +436,12 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
         ],
     },
     ToolRecommendedFlow {
+        name: "browser",
+        summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, observe pages/semantic snapshots, act only through opaque identities, then re-observe after navigation or uncertain effects.",
+        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot and browser_act for the closed launch/new_page/navigate/click/input_text/key/close actions. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
+        tools: &["browser_observe", "browser_act"],
+    },
+    ToolRecommendedFlow {
         name: "computer_observe",
         summary: "Computer observe: one guaranteed read-only gateway for Runner/desktop discovery, accessibility inspection, clipboard read, and window/display snapshots. Choose a closed action; no control effects are admitted.",
         manifest_purpose:
@@ -461,7 +476,7 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "handoff",
-        summary: "Handoff: use session_summary / session_handoff_summary; coordinator posts a todo, worker reads it once with get_session_assignment, then passes its fence to complete_session_message. Use observe_session_messages only for later generic deltas.",
+        summary: "Handoff/recovery only: use session_summary for lightweight ledger reads. Use session_handoff_summary only for missing task context or explicit transfer, never routine progress polling. Coordinator posts a todo; worker reads it with get_session_assignment and completes with that fence.",
         manifest_purpose: "Coordinate independent Workflow Sessions through atomic assignment snapshots, required assignment-fenced completions, and explicit generic message-state delta observation without sharing execution history, authority, subscriptions, or automatic wake-up.",
         tools: &[
             "session_summary",
@@ -490,10 +505,6 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
     "project_artifact",
     #[cfg(feature = "experimental-code-mode")]
     "code_mode_exec",
-    #[cfg(feature = "experimental-code-mode")]
-    "code_mode_exec_effectful",
-    #[cfg(feature = "experimental-code-mode")]
-    "code_mode_exec_mutating",
     // Distinct semantic navigation capabilities remain useful even though they
     // are long-tail Adaptive gateway targets.
     "document_symbols",
@@ -506,6 +517,8 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
     // Canonical edit plus contextual/multi-hunk specialist.
     "apply_text_edits",
     "apply_patch",
+    #[cfg(feature = "experimental-code-mode")]
+    "code_mode_exec_mutating",
     // Ordinary execution plus program-like multi-stage specialist.
     "run_process",
     "run_script",
@@ -516,6 +529,8 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
     "cargo_check",
     "cargo_test",
     "go_test",
+    #[cfg(feature = "experimental-code-mode")]
+    "code_mode_exec_effectful",
     // Worktree and committed-range review.
     "git_review_summary",
     "git_diff_hunks",

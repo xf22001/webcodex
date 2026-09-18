@@ -99,6 +99,34 @@ fn suggested_tool_call_schema_recognizer_is_strict_and_structural() {
 }
 
 #[test]
+fn session_summary_output_schema_exposes_durable_retention_separately_from_response_slicing() {
+    let schema = output_schema_for_tool("session_summary");
+    let properties = schema["properties"]["output"]["properties"]
+        .as_object()
+        .expect("session_summary output properties");
+
+    for field in [
+        "events_total",
+        "events_retained",
+        "events_evicted",
+        "ledger_first_retained_sequence",
+        "events_returned",
+        "first_retained_sequence",
+    ] {
+        assert_eq!(properties[field]["type"], "integer", "{field}");
+    }
+    for field in ["retention_truncated", "events_truncated"] {
+        assert_eq!(properties[field]["type"], "boolean", "{field}");
+    }
+    assert!(properties["retention_truncated"]["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("durable Session history")));
+    assert!(properties["events_truncated"]["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("response")));
+}
+
+#[test]
 fn observation_schemas_do_not_repeat_static_continuation_semantics() {
     let specs = registered_tool_specs();
     for name in [
@@ -330,6 +358,49 @@ fn agent_continuation_projection_schema_requires_strict_nullable_restart_recover
     assert!(recovery_variants
         .iter()
         .any(|variant| variant["type"] == "null"));
+}
+
+#[test]
+fn job_terminal_continuation_output_schemas_are_sparse_and_private_app_payload_is_bounded() {
+    let present = output_schema_for_tool("present_job_terminal_continuation");
+    let projection = &present["properties"]["output"]["properties"]["job_terminal_continuation"];
+    assert_eq!(projection["additionalProperties"], false);
+    let properties = projection["properties"].as_object().unwrap();
+    for required in [
+        "wait_id",
+        "job_id",
+        "state",
+        "delivery_state",
+        "terminal_status",
+        "terminal_outcome",
+        "automatic_resume_available",
+        "expires_at",
+        "fallback_tool",
+    ] {
+        assert!(properties.contains_key(required), "missing {required}");
+    }
+    for forbidden in [
+        "stdout",
+        "stderr",
+        "command",
+        "environment",
+        "cwd",
+        "path",
+        "client_window",
+        "session_id",
+        "principal_digest",
+        "binding_id",
+    ] {
+        assert!(!properties.contains_key(forbidden), "leaked {forbidden}");
+    }
+
+    let prepare = output_schema_for_tool("job_terminal_continuation_prepare");
+    let automatic_message = &prepare["properties"]["output"]["properties"]["app_protocol"]
+        ["properties"]["automatic_message"];
+    assert_eq!(automatic_message["type"], "string");
+    assert_eq!(automatic_message["maxLength"], 1024);
+    let serialized = serde_json::to_string(&prepare).unwrap();
+    assert!(!serialized.contains("binding_id"));
 }
 
 #[test]
@@ -2502,8 +2573,8 @@ fn session_handoff_summary_schema_exposes_ledger_validation_summary() {
         "session_handoff_summary input schema should include include_validation"
     );
     assert!(
-        input_props.contains_key("summary_only"),
-        "session_handoff_summary input schema should include summary_only"
+        input_props.contains_key("diagnostic"),
+        "session_handoff_summary input schema should include diagnostic"
     );
 
     let schema = output_schema_for_tool("session_handoff_summary");
@@ -2595,7 +2666,7 @@ fn session_handoff_summary_schema_exposes_ledger_validation_summary() {
     for phrase in [
         "ledger-derived",
         "non-cargo review evidence",
-        "summary_only",
+        "diagnostic",
         "read/search/diff/workspace/hygiene",
         "bounded tools",
         "does not include file contents",

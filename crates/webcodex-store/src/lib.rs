@@ -21,9 +21,13 @@ mod communication;
 mod connection_observation;
 mod goal;
 mod job_receipts;
+mod job_terminal_wait;
+#[cfg(test)]
+mod job_terminal_wait_tests;
 mod memory;
 pub mod models;
 mod oauth;
+mod peer_collaboration;
 mod schema;
 mod server_instance;
 mod window_activity;
@@ -70,6 +74,14 @@ pub use self::goal::{
     MAX_GOAL_LIST_LIMIT, MAX_GOAL_OBJECTIVE_BYTES, MAX_GOAL_TERMINAL_REASON_BYTES,
     MAX_GOAL_TITLE_CHARS, WORKFLOW_SESSION_ID_PREFIX,
 };
+pub use self::job_terminal_wait::{
+    JobTerminalDeliveryPrepared, JobTerminalDeliveryState, JobTerminalFact,
+    JobTerminalSourceIdentity, JobTerminalWaitMatch, JobTerminalWaitMutation,
+    JobTerminalWaitPrincipal, JobTerminalWaitRecord, JobTerminalWaitState,
+    JobTerminalWaitStoreError, NewJobTerminalWait, JOB_TERMINAL_DELIVERY_ATTEMPT_ID_PREFIX,
+    JOB_TERMINAL_WAIT_ID_PREFIX, MAX_JOB_TERMINAL_WAITS_GLOBAL,
+    MAX_JOB_TERMINAL_WAITS_PER_PRINCIPAL, MAX_JOB_TERMINAL_WAITS_PER_SOURCE,
+};
 #[allow(unused_imports)]
 pub use self::memory::{
     canonicalize_memory_tags, memory_catalog_revision, valid_memory_catalog_revision,
@@ -88,6 +100,10 @@ pub use self::memory::{
     validate_memory_summary, MAX_MEMORIES_PER_PROJECT, MEMORY_SCOPE_IDENTITY_ATTRIBUTED,
 };
 pub use self::oauth::RotateResult;
+pub use self::peer_collaboration::{
+    NewPeerMessage, PeerAttentionBatch, PeerMessageRecord, PeerProjectionRollback,
+    RecentProjectPeerRecord, MAX_PEER_DISCOVERY_LIMIT, MAX_PEER_MESSAGE_LIMIT,
+};
 pub use self::server_instance::ServerInstanceGuard;
 pub use self::window_activity::{MAX_WINDOW_ACTIVITY_LIMIT, MAX_WINDOW_LINK_LIMIT};
 
