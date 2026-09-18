@@ -31,6 +31,7 @@ Product direction: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 - User outcomes, scope, prohibitions, and acceptance conditions are hard constraints. Suggested files and steps are guidance unless explicitly mandatory; adapt them to verified code and conventions.
 - Follow existing architecture and naming. Avoid unrelated cleanup, duplicate representations, speculative compatibility, and broad refactors without a current need.
+- **xiaofei Workflow policy:** Keep `.github/workflows/` limited to the workflow files already owned by `xiaofei` (currently `build.yml`). When merging `main` into `xiaofei`, do **not** add newly introduced `main` workflows such as `ci.yml`. If `main` changes compilation/build parameters, those parameter changes may be selectively incorporated by updating the existing `xiaofei` workflow; do not import additional workflow files. Before committing a merge, verify the final `.github/workflows/` tree and diff.
 - For cross-layer features, map the authoritative path before editing and complete it end to end. Update affected enums, registries, schemas, adapters, and projections; do not touch unrelated interfaces merely because they exist.
 - Use compiler, type, schema, and exhaustiveness failures to locate missing integration before broadening validation.
 - Add focused tests where practical and update documentation when public behavior or operations change.
