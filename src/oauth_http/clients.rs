@@ -92,6 +92,9 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("redirect_uri cannot be empty".to_string());
     }
+    if trimmed.chars().any(|ch| ch.is_ascii_control()) {
+        return Err("redirect_uri must not contain ASCII control characters".to_string());
+    }
     let parsed =
         url::Url::parse(trimmed).map_err(|_| "redirect_uri is not a valid URL".to_string())?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
