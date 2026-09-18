@@ -386,12 +386,16 @@ async fn oauth_clients_update_redirect_uri(
 ) {
     let Some(auth) = depot.obtain::<AuthContext>().ok() else {
         res.status_code(StatusCode::UNAUTHORIZED);
-        res.render(Json(serde_json::json!({"error": "authenticated user required"})));
+        res.render(Json(
+            serde_json::json!({"error": "authenticated user required"}),
+        ));
         return;
     };
     if !is_authorize_identity_allowed(auth) {
         res.status_code(StatusCode::FORBIDDEN);
-        res.render(Json(serde_json::json!({"error": "OAuth2 access tokens cannot manage OAuth clients"})));
+        res.render(Json(
+            serde_json::json!({"error": "OAuth2 access tokens cannot manage OAuth clients"}),
+        ));
         return;
     }
     let Some(db) = crate::auth::get_db(depot) else {
@@ -403,7 +407,9 @@ async fn oauth_clients_update_redirect_uri(
         Ok(body) => body,
         Err(e) => {
             res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(serde_json::json!({"error": "invalid request body", "detail": e.to_string()})));
+            res.render(Json(
+                serde_json::json!({"error": "invalid request body", "detail": e.to_string()}),
+            ));
             return;
         }
     };
@@ -422,7 +428,9 @@ async fn oauth_clients_update_redirect_uri(
         }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(serde_json::json!({"error": "failed to read client", "detail": e.to_string()})));
+            res.render(Json(
+                serde_json::json!({"error": "failed to read client", "detail": e.to_string()}),
+            ));
             return;
         }
     };
@@ -443,18 +451,23 @@ async fn oauth_clients_update_redirect_uri(
     } else {
         if !contains {
             res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(serde_json::json!({"error": "redirect_uri is not registered"})));
+            res.render(Json(
+                serde_json::json!({"error": "redirect_uri is not registered"}),
+            ));
             return;
         }
         if redirects.len() <= 1 {
             res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(serde_json::json!({"error": "OAuth client must retain at least one redirect_uri"})));
+            res.render(Json(
+                serde_json::json!({"error": "OAuth client must retain at least one redirect_uri"}),
+            ));
             return;
         }
         redirects.retain(|uri| uri != &redirect_uri);
     }
     let updated = redirects.join("\n");
-    match db.update_oauth_client_redirect_uris(&current.client_id, &current.redirect_uris, &updated) {
+    match db.update_oauth_client_redirect_uris(&current.client_id, &current.redirect_uris, &updated)
+    {
         Ok(true) => {
             apply_oauth_no_store_headers(res);
             res.render(Json(serde_json::json!({
@@ -465,7 +478,9 @@ async fn oauth_clients_update_redirect_uri(
         }
         Ok(false) => {
             res.status_code(StatusCode::CONFLICT);
-            res.render(Json(serde_json::json!({"error": "OAuth client changed or is no longer active"})));
+            res.render(Json(
+                serde_json::json!({"error": "OAuth client changed or is no longer active"}),
+            ));
         }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);

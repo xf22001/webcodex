@@ -605,12 +605,18 @@ async fn oauth_client_redirect_uri_management_preserves_client_secret_and_tokens
     assert_eq!(add_body["changed"], true);
     assert_eq!(add_body["tokens_revoked"], false);
 
-    let stored = db.get_oauth_client_by_client_id(&client.client_id).unwrap().unwrap();
+    let stored = db
+        .get_oauth_client_by_client_id(&client.client_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.client_secret_hash, client.client_secret_hash);
-    assert_eq!(stored.redirect_uris_vec(), vec![
-        "https://example.com/callback",
-        "https://example.com/new-callback",
-    ]);
+    assert_eq!(
+        stored.redirect_uris_vec(),
+        vec![
+            "https://example.com/callback",
+            "https://example.com/new-callback",
+        ]
+    );
     let access = db
         .get_oauth_access_token_by_hash(&hash_token(&access_token))
         .unwrap()
@@ -633,9 +639,15 @@ async fn oauth_client_redirect_uri_management_preserves_client_secret_and_tokens
     assert_eq!(remove_body["changed"], true);
     assert_eq!(remove_body["tokens_revoked"], false);
 
-    let stored = db.get_oauth_client_by_client_id(&client.client_id).unwrap().unwrap();
+    let stored = db
+        .get_oauth_client_by_client_id(&client.client_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.client_secret_hash, client.client_secret_hash);
-    assert_eq!(stored.redirect_uris_vec(), vec!["https://example.com/callback"]);
+    assert_eq!(
+        stored.redirect_uris_vec(),
+        vec!["https://example.com/callback"]
+    );
     let access = db
         .get_oauth_access_token_by_hash(&hash_token(&access_token))
         .unwrap()
