@@ -180,27 +180,6 @@ exception，而不是静默截断 schema。
 刚升级，确认 public HTTPS 已指向新 service，并检查 `journalctl -u webcodex`
 中是否有 startup 或 auth errors。
 
-### 连接器说「没有已注册项目 / 工作区是空的」
-
-先区分两类空结果：
-
-| 调用 | 含义 | 空时是否表示没有项目 |
-| --- | --- | --- |
-| `mcp_tool` `action=list` → `servers: []` | Runner 未配置 local MCP provider | **否** |
-| `runtime_status` compact 只有 `projects.count` | 投影未展开 id/path | **否**（去查 count 是否 > 0） |
-| `list_projects`（经 `call_runtime_tool`）→ `projects: []` | 当前 principal 可见项目为空 | **是**（或权限/注册问题） |
-
-ChatGPT / Gemini 等 host 若先调 `mcp_tool list` 得到空数组，容易把 `servers` 误当成
-业务工具目录，从而回复「没有项目」。请引导模型：
-
-1. `call_runtime_tool {"tool":"list_projects","arguments":{...}}`  
-2. `work_on_project`（`project` 或 `client_id`+`path`）  
-3. `read_files`（`items: [{path, ...}]`，不是 `paths`）
-
-并确认 `list_projects` 不要当 direct tool 直调（会得到
-`not a direct adaptive_runtime tool`）。审计与完整 payload 见
-[Tool Request Trace](#捕获一次失败的-tool-call) 与 Server 审计表 `action_events`。
-
 ### Runner offline
 
 先运行 `runtime_status` 或 `list_runners`，再在 Runner host 上检查：

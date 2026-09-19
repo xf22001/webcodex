@@ -252,15 +252,11 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
         "validation_summary" => Some(validation_summary_tool_output_schema()),
         "present_work_result" | "work_result_state" => Some(wrapped_output_schema(vec![(
             "work_result",
-            open_object_schema("Bounded deterministic Work Result projection for one exact project-scoped Workflow Session."),
-        )])),
-        "present_changes" => Some(wrapped_output_schema(vec![(
-            "changes",
-            open_object_schema("Bounded Final Changes V3 metadata bound to one frozen project/session presentation snapshot."),
+            open_object_schema("Bounded Work Result for one exact project-scoped Workflow Session. Initial presentation may include frozen final_changes; explicit state reads return only live workspace, validation, and review domains."),
         )])),
         "changes_file_diff" => Some(wrapped_output_schema(vec![(
             "changes_file_diff",
-            open_object_schema("Bounded lazy unified diff for one exact path in a frozen Final Changes snapshot."),
+            open_object_schema("Bounded lazy unified diff for one advertised path in the initial Work Result frozen snapshot."),
         )])),
         "post_session_message" => Some(wrapped_output_schema(vec![
             ("success", schema_type("boolean", "Always true on success.")),
@@ -698,10 +694,10 @@ fn validation_evidence_schema() -> Value {
     fn current_validation_evidence_schema() -> Value {
         json!({
             "type": "object",
-            "description": "Current workspace validation evidence for the current attempt after the latest trusted material workspace-content change. Historical ledger failures remain separately visible and are not erased by this projection.",
+            "description": "Current-attempt validation candidates after observed changes. Execution success without current-source proof is unproven, never passed; historical results remain separately visible.",
             "additionalProperties": false,
             "properties": {
-                "status": {"type": "string", "enum": ["passed", "failed", "inconclusive", "expected", "stale", "not_run", "unknown"]},
+                "status": {"type": "string", "enum": ["unproven", "failed", "inconclusive", "expected", "stale", "not_run", "unknown"]},
                 "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 "latest_status": {"type": "string", "enum": ["passed", "failed", "inconclusive", "expected", "not_run", "unknown"]},
                 "events_total": {"type": "integer", "minimum": 0},
@@ -824,6 +820,7 @@ fn validation_event_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
+            "source_state": super::common::validation_source_state_schema(),
             "tool_name": { "type": "string", "enum": ["cargo_fmt", "cargo_check", "cargo_test", "go_test", "run_process", "run_script", "run_shell", "run_job"] },
             "identity": { "type": "string", "maxLength": 256 },
             "assertion_name": { "type": "string", "minLength": 1, "maxLength": MAX_MODEL_VALIDATION_ASSERTION_NAME_CHARS },

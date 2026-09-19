@@ -1,11 +1,49 @@
 use crate::activity::ActivityEntry;
 use crate::desktop_shell;
-use crate::error::DesktopError;
+use crate::error::{DesktopError, DesktopResult};
 use crate::models::{DesktopStateSnapshot, ProjectSelection, TunnelProxyMode};
 use crate::state::AppState;
 use crate::tray;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
+
+#[tauri::command]
+pub async fn save_mcp_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::mcp_providers::McpProviderRequest,
+) -> DesktopResult<DesktopStateSnapshot> {
+    project_state_result(&app, state.save_mcp_provider(request).await)
+}
+
+#[tauri::command]
+pub async fn remove_mcp_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    expected_revision: u64,
+) -> DesktopResult<DesktopStateSnapshot> {
+    project_state_result(&app, state.remove_mcp_provider(id, expected_revision).await)
+}
+
+#[tauri::command]
+pub async fn save_tunnel_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::tunnel_config::TunnelProfileRequest,
+) -> DesktopResult<DesktopStateSnapshot> {
+    project_state_result(&app, state.save_tunnel_profile(request).await)
+}
+
+#[tauri::command]
+pub async fn tunnel_profile_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: crate::connection_id::TunnelProfileId,
+    action: crate::state::ConnectionAction,
+) -> DesktopResult<DesktopStateSnapshot> {
+    project_state_result(&app, state.tunnel_profile_action(profile_id, action).await)
+}
 
 #[tauri::command]
 pub async fn update_tunnel_config(
@@ -263,4 +301,66 @@ pub async fn get_bounded_activity(
     state: State<'_, AppState>,
 ) -> Result<Vec<ActivityEntry>, DesktopError> {
     Ok(state.activity())
+}
+
+#[tauri::command]
+pub async fn get_runner_settings(
+    state: State<'_, AppState>,
+) -> Result<crate::webcodex::settings::RunnerSettings, DesktopError> {
+    state.runner_settings().await
+}
+#[tauri::command]
+pub async fn update_runner_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::webcodex::settings::SettingsUpdate,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.update_runner_settings(request).await)
+}
+#[tauri::command]
+pub async fn restart_owned_runner(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target: crate::webcodex::settings::SettingsTarget,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.restart_owned_runner(target).await)
+}
+
+#[tauri::command]
+pub fn get_computer_permissions(
+    app: AppHandle,
+) -> crate::platform::permissions::ComputerPermissions {
+    use tauri::Manager;
+    let mut permissions = crate::platform::permissions::probe();
+    permissions.foreground = app
+        .get_webview_window(crate::desktop_shell::MAIN_WINDOW_LABEL)
+        .is_some_and(|window| {
+            window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+        });
+    permissions
+}
+#[tauri::command]
+pub fn request_computer_permission(
+    app: AppHandle,
+    action: crate::platform::permissions::PermissionAction,
+) -> Result<crate::platform::permissions::ComputerPermissions, DesktopError> {
+    crate::platform::permissions::request(action)?;
+    Ok(get_computer_permissions(app))
+}
+
+#[tauri::command]
+pub async fn add_runner_plugin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::webcodex::settings::PluginAddRequest,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.add_runner_plugin(request).await)
+}
+
+#[tauri::command]
+pub async fn workspace_query(
+    state: State<'_, AppState>,
+    request: crate::workspace::WorkspaceRequest,
+) -> Result<serde_json::Value, DesktopError> {
+    state.workspace_query(request).await
 }

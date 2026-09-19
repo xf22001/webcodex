@@ -45,7 +45,7 @@ fn structured_execution_output(
                     "job_id": job_id.expect("promoted Job id"),
                     "after_observation_token": "observation"
                 }],
-                "wait_secs": 100,
+                "wait_secs": webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS,
                 "wake_on": "terminal"
             }
         });
@@ -292,6 +292,64 @@ fn inspection_truthfulness_schemas_keep_typed_missing_and_canonical_diff_recover
     }
 }
 
+#[test]
+fn search_batch_omitted_summary_schema_is_bounded_and_content_free() {
+    let schema = output_schema_for_tool("search_project_texts");
+    let result = json!({
+        "success": true,
+        "output": {
+            "project": "agent:oe:demo",
+            "requested_count": 4,
+            "returned_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "items": [],
+            "output_truncated": true,
+            "truncation_reason": "batch_response_budget",
+            "remaining_summaries": [
+                {"index": 0, "success": true, "result_mode": "matches", "returned_match_count": 0, "truncated": false},
+                {"index": 1, "success": true, "result_mode": "files_with_matches", "returned_file_count": 4, "truncated": false},
+                {"index": 2, "success": true, "result_mode": "count", "total_matches": 17, "truncated": false},
+                {"index": 3, "success": false, "reason_code": "timeout", "failure_stage": "agent_transport", "detail_code": "timeout"}
+            ],
+            "suggested_call": {
+                "tool": "search_project_texts",
+                "arguments": {
+                    "project": "agent:oe:demo",
+                    "queries": [
+                        {"pattern": "needle-0"},
+                        {"pattern": "needle-1", "result_mode": "files_with_matches"},
+                        {"pattern": "needle-2", "result_mode": "count"},
+                        {"pattern": "needle-3"}
+                    ]
+                }
+            }
+        },
+        "error": null
+    });
+    test_support::validate_schema_instance(&result, &schema).unwrap();
+
+    let mut content_leak = result.clone();
+    content_leak["output"]["remaining_summaries"][0]["path"] = json!("src/private.rs");
+    assert!(test_support::validate_schema_instance(&content_leak, &schema).is_err());
+    let mut raw_error = result.clone();
+    raw_error["output"]["remaining_summaries"][3]["error"] = json!("raw backend body");
+    assert!(test_support::validate_schema_instance(&raw_error, &schema).is_err());
+    let mut incomplete_failure = result.clone();
+    incomplete_failure["output"]["remaining_summaries"][3]
+        .as_object_mut()
+        .unwrap()
+        .remove("failure_stage");
+    assert!(test_support::validate_schema_instance(&incomplete_failure, &schema).is_err());
+
+    let full = &schema["properties"]["output"]["anyOf"][0]["anyOf"][0];
+    let summaries = &full["properties"]["remaining_summaries"];
+    assert_eq!(summaries["maxItems"], 8);
+    let description = summaries["description"].as_str().unwrap();
+    assert!(description.contains("supplementary"));
+    assert!(description.contains("canonical whole-query continuation"));
+}
+
 fn continuation_feedback_subschema(specs: &[ToolSpec], tool: &str) -> Value {
     let spec = spec_named(specs, tool);
     spec.output_schema["properties"]["output"]["properties"]["continuation_feedback"].clone()
@@ -358,6 +416,50 @@ fn agent_continuation_projection_schema_requires_strict_nullable_restart_recover
     assert!(recovery_variants
         .iter()
         .any(|variant| variant["type"] == "null"));
+}
+
+#[test]
+fn agent_identity_listing_readiness_schema_is_sparse_and_non_authoritative() {
+    let schema = output_schema_for_tool("list_agent_identities");
+    let agent = &schema["properties"]["output"]["properties"]["agents"]["items"];
+    assert_eq!(agent["additionalProperties"], false);
+    let properties = agent["properties"].as_object().unwrap();
+    assert_eq!(
+        properties["production_auto_resume_available"]["type"],
+        "boolean"
+    );
+    let description = properties["production_auto_resume_available"]["description"]
+        .as_str()
+        .unwrap();
+    for semantic in [
+        "continuation readiness only",
+        "does not mean idle",
+        "reserve capacity",
+        "execution authority",
+        "guarantee immediate Host scheduling",
+    ] {
+        assert!(
+            description.contains(semantic),
+            "missing semantic: {semantic}"
+        );
+    }
+    assert!(agent["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "production_auto_resume_available"));
+    for forbidden in [
+        "client_window",
+        "client_window_key",
+        "window_hash",
+        "binding_id",
+        "consume_token",
+        "claim_fence",
+        "credential",
+        "transport",
+    ] {
+        assert!(!properties.contains_key(forbidden), "leaked {forbidden}");
+    }
 }
 
 #[test]
@@ -1395,7 +1497,7 @@ fn key_tool_output_schemas_include_expected_fields() {
         );
         assert_eq!(
             continuation["properties"]["arguments"]["properties"]["wait_secs"]["const"],
-            webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS
+            webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS
         );
         assert_eq!(
             continuation["properties"]["arguments"]["properties"]["wake_on"]["const"],
@@ -2744,9 +2846,13 @@ fn assert_outcome_model_schema_fields(output_props: &serde_json::Map<String, Val
 }
 
 #[test]
-fn agent_wait_model_schema_separates_matches_from_durable_bookkeeping() {
+fn agent_wait_model_schema_preserves_bounded_join_sources_without_private_bookkeeping() {
     let specs = registered_tool_specs();
     let wait_id = "wc_agent_wait_ERERERERERERERER".to_string();
+    let source = serde_json::json!({
+        "kind": "agent_task_terminal",
+        "task_id": "wc_agent_task_IiIiIiIiIiIiIiIi".to_string(),
+    });
     let matched = serde_json::json!({
         "task_id": "wc_agent_task_IiIiIiIiIiIiIiIi".to_string(),
         "task_attempt_id": "wc_agent_task_attempt_MzMzMzMzMzMzMzMz".to_string(),
@@ -2759,23 +2865,42 @@ fn agent_wait_model_schema_separates_matches_from_durable_bookkeeping() {
     ] {
         let schema = &spec_named(&specs, tool).output_schema["properties"]["output"]["properties"]
             ["agent_wait"];
-        for state in ["waiting", "triggered", "resumed", "cancelled"] {
-            let mut wait = serde_json::json!({"wait_id": wait_id, "state": state});
-            if matches!(state, "triggered" | "resumed") {
-                wait["matches"] = serde_json::json!([matched]);
-            }
-            test_support::validate_schema_instance(&wait, schema).unwrap();
-            let mut duplicate = wait.clone();
-            duplicate["match_count"] = serde_json::json!(1);
-            assert!(test_support::validate_schema_instance(&duplicate, schema).is_err());
-            if matches!(state, "triggered" | "resumed") {
-                let mut missing = wait.clone();
-                missing.as_object_mut().unwrap().remove("matches");
-                assert!(test_support::validate_schema_instance(&missing, schema).is_err());
-                wait["matches"][0]["sequence"] = serde_json::json!(1);
-                assert!(test_support::validate_schema_instance(&wait, schema).is_err());
-            }
+        let wait = serde_json::json!({
+            "wait_id": wait_id,
+            "goal_id": null,
+            "state": "waiting",
+            "mode": "all",
+            "source_count": 2,
+            "match_count": 1,
+            "sources": [source, {"kind":"agent_task_terminal","task_id":"wc_agent_task_7u7u7u7u7u7u7u7u"}],
+            "matches": [matched]
+        });
+        test_support::validate_schema_instance(&wait, schema).unwrap();
+        for required in [
+            "goal_id",
+            "mode",
+            "source_count",
+            "match_count",
+            "sources",
+            "matches",
+        ] {
+            let mut missing = wait.clone();
+            missing.as_object_mut().unwrap().remove(required);
+            assert!(test_support::validate_schema_instance(&missing, schema).is_err());
         }
+        let mut scoped = wait.clone();
+        scoped["goal_id"] = serde_json::json!("wc_goal_GoGoGoGoGoGoGoGo");
+        test_support::validate_schema_instance(&scoped, schema).unwrap();
+        assert_eq!(
+            schema["properties"]["goal_id"]["anyOf"][0]["pattern"],
+            "^wc_goal_[A-Za-z0-9_-]{16}$"
+        );
+        let mut private_source = wait.clone();
+        private_source["sources"][0]["ordinal"] = serde_json::json!(0);
+        assert!(test_support::validate_schema_instance(&private_source, schema).is_err());
+        let mut private_match = wait.clone();
+        private_match["matches"][0]["sequence"] = serde_json::json!(1);
+        assert!(test_support::validate_schema_instance(&private_match, schema).is_err());
     }
 }
 

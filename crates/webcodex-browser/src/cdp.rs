@@ -3,6 +3,7 @@ use crate::types::{
     MAX_PAGES_PER_BROWSER, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_NODES, REQUEST_TIMEOUT,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,24 @@ pub(crate) trait BrowserBackend: Send {
         backend_node_id: i64,
         text: &str,
     ) -> BrowserResult<()>;
+    fn select_option(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        option: &str,
+    ) -> BrowserResult<()>;
+    fn set_value(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        value: &str,
+    ) -> BrowserResult<()>;
+    fn upload_file(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        path: &Path,
+    ) -> BrowserResult<()>;
     fn key(&mut self, target_id: &str, key: BrowserKey) -> BrowserResult<()>;
     fn close_page(&mut self, target_id: &str) -> BrowserResult<()>;
     fn shutdown(&mut self, timeout: Duration) -> BrowserResult<()>;
@@ -51,7 +70,16 @@ pub(crate) struct BackendPage {
 pub(crate) struct BackendNode {
     pub(crate) role: String,
     pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) value: Option<String>,
+    pub(crate) group_key: Option<String>,
+    pub(crate) group_role: Option<String>,
+    pub(crate) group_label: Option<String>,
+    pub(crate) checked: Option<String>,
+    pub(crate) selected: Option<bool>,
+    pub(crate) required: Option<bool>,
+    pub(crate) disabled: Option<bool>,
+    pub(crate) read_only: Option<bool>,
     pub(crate) backend_node_id: Option<i64>,
     pub(crate) actionable: bool,
 }
@@ -368,6 +396,119 @@ impl CdpBackend {
         }
         Ok(pages)
     }
+
+    fn call_element_function_until(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        function_declaration: &'static str,
+        argument: &str,
+        deadline: Instant,
+    ) -> BrowserResult<()> {
+        // Remote object ids are scoped to the DevTools session that created
+        // them. Keep resolveNode and callFunctionOn on one page websocket.
+        let endpoint = self
+            .page_endpoint_until(target_id, deadline)
+            .map_err(pre_dispatch_error)?;
+        let mut websocket =
+            open_loopback_websocket(&endpoint, deadline).map_err(pre_dispatch_error)?;
+        let resolved = cdp_call_on_websocket_until(
+            &mut websocket,
+            &mut self.next_id,
+            "DOM.resolveNode",
+            json!({ "backendNodeId": backend_node_id }),
+            false,
+            deadline,
+        )
+        .map_err(pre_dispatch_error)?;
+        let object_id = resolved
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                BrowserError::not_started(
+                    "element_not_actionable",
+                    "CDP could not resolve the current form control",
+                )
+            })?;
+        let result = cdp_call_on_websocket_until(
+            &mut websocket,
+            &mut self.next_id,
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": function_declaration,
+                "arguments": [{ "value": argument }],
+                "returnByValue": true,
+                "userGesture": true,
+            }),
+            true,
+            deadline,
+        )?;
+        if result.get("exceptionDetails").is_some() {
+            return Err(BrowserError::uncertain(
+                "form_control_script_failed",
+                "form-control effect raised after dispatch",
+                "snapshot",
+            ));
+        }
+        let outcome = result.pointer("/result/value").ok_or_else(|| {
+            BrowserError::uncertain(
+                "form_control_result_invalid",
+                "form-control effect returned no bounded result",
+                "snapshot",
+            )
+        })?;
+        if outcome.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        if outcome.get("mutated").and_then(Value::as_bool) == Some(true) {
+            return Err(BrowserError::uncertain(
+                "form_control_outcome_unknown",
+                "form-control state changed before its postcondition failed",
+                "snapshot",
+            ));
+        }
+        let kind = outcome
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("form_control_rejected");
+        let (kind, message) = match kind {
+            "element_not_select" => (
+                "element_not_select",
+                "target element is not a native select control",
+            ),
+            "option_not_found" => (
+                "option_not_found",
+                "no native option matched the exact value or visible label",
+            ),
+            "option_ambiguous" => (
+                "option_ambiguous",
+                "more than one native option matched the requested visible label",
+            ),
+            "option_disabled" => ("option_disabled", "the requested native option is disabled"),
+            "control_disabled" => (
+                "control_disabled",
+                "target native form control is disabled or read-only",
+            ),
+            "element_not_value_control" => (
+                "element_not_value_control",
+                "target element does not support exact Browser value assignment",
+            ),
+            "unsupported_value_control" => (
+                "unsupported_value_control",
+                "target input type is not supported by exact structured value assignment",
+            ),
+            "invalid_control_value" => (
+                "invalid_control_value",
+                "Browser rejected, normalized, or constraint-invalidated the requested native control value",
+            ),
+            _ => (
+                "form_control_rejected",
+                "Browser rejected the requested form-control effect before mutation",
+            ),
+        };
+        Err(BrowserError::not_started(kind, message))
+    }
 }
 
 impl BrowserBackend for CdpBackend {
@@ -433,23 +574,45 @@ impl BrowserBackend for CdpBackend {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let raw_by_id = raw_nodes
+            .iter()
+            .filter_map(|node| {
+                node.get("nodeId")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_string(), node))
+            })
+            .collect::<HashMap<_, _>>();
         let mut nodes = Vec::new();
         let mut truncated = raw_nodes.len() > MAX_SNAPSHOT_NODES;
         let mut estimated_bytes = 0usize;
-        for raw in raw_nodes.into_iter().take(MAX_SNAPSHOT_NODES) {
-            let role = ax_value(&raw, "role").unwrap_or_else(|| "generic".to_string());
+        for raw in raw_nodes.iter().take(MAX_SNAPSHOT_NODES) {
+            let role = ax_value(raw, "role").unwrap_or_else(|| "generic".to_string());
             if role == "RootWebArea" {
                 continue;
             }
-            let name = ax_value(&raw, "name");
-            let value = ax_value(&raw, "value");
+            let name = ax_value(raw, "name");
+            let description = ax_value(raw, "description");
+            let value = ax_value(raw, "value");
+            let group = ax_group_context(raw, &raw_by_id);
+            let checked = ax_property_string(raw, "checked");
+            let selected = ax_property_bool(raw, "selected");
+            let required = ax_property_bool(raw, "required");
+            let disabled = ax_property_bool(raw, "disabled");
+            let read_only = ax_property_bool(raw, "readonly");
             let backend_node_id = raw.get("backendDOMNodeId").and_then(Value::as_i64);
             let actionable = is_actionable(&role) && backend_node_id.is_some();
             estimated_bytes = estimated_bytes
                 .saturating_add(role.len())
                 .saturating_add(name.as_deref().map(str::len).unwrap_or(0))
+                .saturating_add(description.as_deref().map(str::len).unwrap_or(0))
                 .saturating_add(value.as_deref().map(str::len).unwrap_or(0))
-                .saturating_add(64);
+                .saturating_add(
+                    group
+                        .as_ref()
+                        .map(|(_, role, label)| role.len() + label.len())
+                        .unwrap_or(0),
+                )
+                .saturating_add(128);
             if estimated_bytes > MAX_SNAPSHOT_BYTES {
                 truncated = true;
                 break;
@@ -457,7 +620,16 @@ impl BrowserBackend for CdpBackend {
             nodes.push(BackendNode {
                 role,
                 name,
+                description,
                 value,
+                group_key: group.as_ref().map(|(key, _, _)| key.clone()),
+                group_role: group.as_ref().map(|(_, role, _)| role.clone()),
+                group_label: group.map(|(_, _, label)| label),
+                checked,
+                selected,
+                required,
+                disabled,
+                read_only,
                 backend_node_id,
                 actionable,
             });
@@ -521,6 +693,16 @@ impl BrowserBackend for CdpBackend {
 
     fn click(&mut self, target_id: &str, backend_node_id: i64) -> BrowserResult<()> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
+        // CDP mouse coordinates are viewport-relative. Ensure off-screen
+        // controls are visible before deriving the box-model click point.
+        self.page_call_until(
+            target_id,
+            "DOM.scrollIntoViewIfNeeded",
+            json!({ "backendNodeId": backend_node_id }),
+            false,
+            deadline,
+        )
+        .map_err(pre_dispatch_error)?;
         let model = self
             .page_call_until(
                 target_id,
@@ -596,6 +778,125 @@ impl BrowserBackend for CdpBackend {
             target_id,
             "Input.insertText",
             json!({ "text": text }),
+            true,
+            deadline,
+        )
+        .map(|_| ())
+        .map_err(|error| post_effect_error(error, "snapshot"))
+    }
+
+    fn select_option(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        option: &str,
+    ) -> BrowserResult<()> {
+        const SELECT_OPTION: &str = r#"function(requested) {
+            if (!(this instanceof HTMLSelectElement)) {
+                return { ok: false, kind: "element_not_select" };
+            }
+            if (this.disabled) {
+                return { ok: false, kind: "control_disabled" };
+            }
+            const options = Array.from(this.options);
+            let matches = options.filter((item) => item.value === requested);
+            if (matches.length === 0) {
+                matches = options.filter((item) => item.text.trim() === requested);
+            }
+            if (matches.length === 0) {
+                return { ok: false, kind: "option_not_found" };
+            }
+            if (matches.length !== 1) {
+                return { ok: false, kind: "option_ambiguous" };
+            }
+            if (matches[0].disabled) {
+                return { ok: false, kind: "option_disabled" };
+            }
+            const selectedValue = matches[0].value;
+            this.value = selectedValue;
+            this.dispatchEvent(new Event("input", { bubbles: true }));
+            this.dispatchEvent(new Event("change", { bubbles: true }));
+            if (this.value !== selectedValue) {
+                return { ok: false, kind: "select_postcondition_failed", mutated: true };
+            }
+            return { ok: true };
+        }"#;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        self.call_element_function_until(
+            target_id,
+            backend_node_id,
+            SELECT_OPTION,
+            option,
+            deadline,
+        )
+    }
+
+    fn set_value(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        value: &str,
+    ) -> BrowserResult<()> {
+        const SET_VALUE: &str = r#"function(requested) {
+            if (!(this instanceof HTMLInputElement)) {
+                return { ok: false, kind: "element_not_value_control" };
+            }
+            if (this.disabled || this.readOnly) {
+                return { ok: false, kind: "control_disabled" };
+            }
+            const type = (this.type || "text").toLowerCase();
+            const structuredTypes = new Set([
+                "date", "datetime-local", "month", "week", "time", "number", "range", "color"
+            ]);
+            if (!structuredTypes.has(type)) {
+                return { ok: false, kind: "unsupported_value_control" };
+            }
+            const probe = document.createElement("input");
+            probe.type = type;
+            for (const attribute of ["min", "max", "step"]) {
+                if (this.hasAttribute(attribute)) {
+                    probe.setAttribute(attribute, this.getAttribute(attribute));
+                }
+            }
+            probe.value = requested;
+            if (probe.value !== requested || !probe.checkValidity()) {
+                return { ok: false, kind: "invalid_control_value" };
+            }
+            this.value = requested;
+            if (this.value !== requested) {
+                return { ok: false, kind: "value_postcondition_failed", mutated: true };
+            }
+            this.dispatchEvent(new Event("input", { bubbles: true }));
+            this.dispatchEvent(new Event("change", { bubbles: true }));
+            if (this.value !== requested) {
+                return { ok: false, kind: "value_postcondition_failed", mutated: true };
+            }
+            return { ok: true };
+        }"#;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        self.call_element_function_until(target_id, backend_node_id, SET_VALUE, value, deadline)
+    }
+
+    fn upload_file(
+        &mut self,
+        target_id: &str,
+        backend_node_id: i64,
+        path: &Path,
+    ) -> BrowserResult<()> {
+        let upload_path = path.to_str().ok_or_else(|| {
+            BrowserError::not_started(
+                "upload_path_unrepresentable",
+                "Browser upload path is not representable as a CDP UTF-8 path",
+            )
+        })?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        self.page_call_until(
+            target_id,
+            "DOM.setFileInputFiles",
+            json!({
+                "files": [upload_path],
+                "backendNodeId": backend_node_id,
+            }),
             true,
             deadline,
         )
@@ -706,6 +1007,55 @@ fn ax_value(node: &Value, key: &str) -> Option<String> {
         .map(|value| clip_bytes(value, MAX_NODE_TEXT_BYTES))
 }
 
+fn ax_property<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+    node.get("properties")?
+        .as_array()?
+        .iter()
+        .find(|property| property.get("name").and_then(Value::as_str) == Some(name))?
+        .get("value")?
+        .get("value")
+}
+
+fn ax_property_bool(node: &Value, name: &str) -> Option<bool> {
+    match ax_property(node, name)? {
+        Value::Bool(value) => Some(*value),
+        Value::String(value) if value == "true" => Some(true),
+        Value::String(value) if value == "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn ax_property_string(node: &Value, name: &str) -> Option<String> {
+    match ax_property(node, name)? {
+        Value::String(value) => Some(clip_bytes(value, MAX_NODE_TEXT_BYTES)),
+        Value::Bool(value) => Some(value.to_string()),
+        value if value.is_number() => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn ax_group_context(
+    node: &Value,
+    by_id: &HashMap<String, &Value>,
+) -> Option<(String, String, String)> {
+    let mut parent_id = node.get("parentId").and_then(Value::as_str);
+    for _ in 0..8 {
+        let id = parent_id?;
+        let parent = by_id.get(id)?;
+        let role = ax_value(parent, "role").unwrap_or_default();
+        let name = ax_value(parent, "name").unwrap_or_default();
+        if matches!(
+            role.as_str(),
+            "group" | "radiogroup" | "combobox" | "listbox"
+        ) && !name.trim().is_empty()
+        {
+            return Some((id.to_string(), role, name));
+        }
+        parent_id = parent.get("parentId").and_then(Value::as_str);
+    }
+    None
+}
+
 fn is_actionable(role: &str) -> bool {
     matches!(
         role,
@@ -713,13 +1063,13 @@ fn is_actionable(role: &str) -> bool {
             | "link"
             | "textbox"
             | "searchbox"
+            | "DateTime"
             | "combobox"
             | "checkbox"
             | "radio"
             | "switch"
             | "menuitem"
             | "tab"
-            | "option"
     )
 }
 
@@ -884,11 +1234,22 @@ fn cdp_call_until(
     effect: bool,
     deadline: Instant,
 ) -> BrowserResult<Value> {
+    let mut websocket = open_loopback_websocket(endpoint, deadline)?;
+    cdp_call_on_websocket_until(&mut websocket, next_id, method, params, effect, deadline)
+}
+
+fn cdp_call_on_websocket_until(
+    websocket: &mut WebSocket<TcpStream>,
+    next_id: &mut u64,
+    method: &str,
+    params: Value,
+    effect: bool,
+    deadline: Instant,
+) -> BrowserResult<Value> {
     let id = *next_id;
     *next_id = next_id.saturating_add(1);
-    let mut websocket = open_loopback_websocket(endpoint, deadline)?;
     let request = json!({ "id": id, "method": method, "params": params }).to_string();
-    configure_socket_timeout(&mut websocket, remaining_before_dispatch(deadline)?)?;
+    configure_socket_timeout(websocket, remaining_before_dispatch(deadline)?)?;
     websocket
         .send(Message::Text(request.into()))
         .map_err(|error| {
@@ -919,7 +1280,7 @@ fn cdp_call_until(
                 )
             });
         }
-        configure_socket_timeout(&mut websocket, remaining)?;
+        configure_socket_timeout(websocket, remaining)?;
         match websocket.read() {
             Ok(Message::Text(text)) => {
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -985,6 +1346,20 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use tungstenite::{accept, Message};
+
+    #[test]
+    fn form_control_roles_needed_for_structured_fill_are_actionable() {
+        for role in ["textbox", "combobox", "DateTime"] {
+            assert!(
+                is_actionable(role),
+                "{role} should project an element identity"
+            );
+        }
+        assert!(
+            !is_actionable("option"),
+            "native option nodes are semantic choices; the owning combobox carries select_option authority"
+        );
+    }
 
     fn fake_cdp_server(reply: Option<Value>) -> (Url, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1112,6 +1487,130 @@ Connection: close
             crate::types::ExecutionState::OutcomeUnknown
         );
         assert_eq!(partial.recovery_action, Some("snapshot"));
+    }
+
+    #[test]
+    fn ax_form_metadata_extracts_group_and_control_state() {
+        let raw_nodes = vec![
+            json!({
+                "nodeId":"group-1",
+                "role":{"value":"group"},
+                "name":{"value":"是否接受岗位调剂"},
+                "parentId":"form-1"
+            }),
+            json!({
+                "nodeId":"wrapper-1",
+                "role":{"value":"none"},
+                "parentId":"group-1"
+            }),
+            json!({
+                "nodeId":"radio-1",
+                "role":{"value":"radio"},
+                "name":{"value":"否"},
+                "parentId":"wrapper-1",
+                "properties":[
+                    {"name":"checked","value":{"value":"false"}},
+                    {"name":"required","value":{"value":true}},
+                    {"name":"disabled","value":{"value":false}}
+                ]
+            }),
+        ];
+        let by_id = raw_nodes
+            .iter()
+            .filter_map(|node| {
+                node.get("nodeId")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_string(), node))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let group = ax_group_context(&raw_nodes[2], &by_id).unwrap();
+        assert_eq!(group.0, "group-1");
+        assert_eq!(group.1, "group");
+        assert_eq!(group.2, "是否接受岗位调剂");
+        assert_eq!(
+            ax_property_string(&raw_nodes[2], "checked").as_deref(),
+            Some("false")
+        );
+        assert_eq!(ax_property_bool(&raw_nodes[2], "required"), Some(true));
+        assert_eq!(ax_property_bool(&raw_nodes[2], "disabled"), Some(false));
+        assert_eq!(ax_property_bool(&raw_nodes[2], "readonly"), None);
+    }
+
+    #[test]
+    fn remote_object_sequence_reuses_one_page_websocket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut websocket = accept(stream).unwrap();
+
+            let first = websocket.read().unwrap();
+            let Message::Text(first) = first else {
+                panic!("expected first CDP text request")
+            };
+            let first: Value = serde_json::from_str(&first).unwrap();
+            assert_eq!(first["method"], "DOM.resolveNode");
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "id": first["id"],
+                        "result": {"object": {"objectId": "remote-object-1"}}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+
+            let second = websocket.read().unwrap();
+            let Message::Text(second) = second else {
+                panic!("expected second CDP text request")
+            };
+            let second: Value = serde_json::from_str(&second).unwrap();
+            assert_eq!(second["method"], "Runtime.callFunctionOn");
+            assert_eq!(second["params"]["objectId"], "remote-object-1");
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "id": second["id"],
+                        "result": {"result": {"value": {"ok": true}}}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+        });
+
+        let endpoint = Url::parse(&format!(
+            "ws://127.0.0.1:{}/devtools/page/sequence",
+            address.port()
+        ))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut websocket = open_loopback_websocket(&endpoint, deadline).unwrap();
+        let mut next_id = 1;
+        let resolved = cdp_call_on_websocket_until(
+            &mut websocket,
+            &mut next_id,
+            "DOM.resolveNode",
+            json!({"backendNodeId": 42}),
+            false,
+            deadline,
+        )
+        .unwrap();
+        let object_id = resolved["object"]["objectId"].as_str().unwrap();
+        let result = cdp_call_on_websocket_until(
+            &mut websocket,
+            &mut next_id,
+            "Runtime.callFunctionOn",
+            json!({"objectId": object_id, "functionDeclaration": "function(){return {ok:true};}"}),
+            true,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(result["result"]["value"]["ok"], true);
+        assert_eq!(next_id, 3);
+        handle.join().unwrap();
     }
 
     #[test]

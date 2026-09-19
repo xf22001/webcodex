@@ -31,7 +31,15 @@
   const ATTEMPT_ID = /^wc_job_delivery_[A-Za-z0-9_-]{16}$/;
   const CALL_TIMEOUT_MS = 10000;
   const VISIBLE_POLL_MS = 3000;
-  const HIDDEN_POLL_MS = 15000;
+  const HIDDEN_EARLY_POLL_MS = 15000;
+  const HIDDEN_MEDIUM_POLL_MS = 60000;
+  const HIDDEN_LATE_POLL_MS = 300000;
+  const HIDDEN_EARLY_POLLS = 20;
+  const HIDDEN_MEDIUM_POLLS = 25;
+  // MCP Apps exposes the presentation tool result lifecycle but not an authoritative
+  // "current model turn is terminal" signal. Give the invoking turn a bounded yield
+  // window after its tool result before any follow-up ui/message dispatch.
+  const AUTO_RESUME_TURN_YIELD_GRACE_MS = 10000;
   const MAX_AUTOMATIC_MESSAGE_CHARS = 1024;
   const TERMINAL_DELIVERY = new Set(["delivered", "delivery_unknown"]);
 
@@ -50,6 +58,10 @@
   let pendingFinish = null;
   let rebindAttemptedAfterLoss = false;
   let carrierLost = false;
+  let hiddenPollCount = 0;
+  let initialToolResultSeen = false;
+  let autoResumeNotBeforeMs = null;
+  let autoResumeSuppressed = false;
 
   const el = id => document.getElementById(id);
 
@@ -160,6 +172,23 @@
       && Math.floor(Date.now() / 1000) >= value.expires_at;
   }
 
+  function armAutomaticResumeFromInitialToolResult(value) {
+    if (initialToolResultSeen) return;
+    initialToolResultSeen = true;
+    if (value.state === "waiting" && value.delivery_state === "not_ready") {
+      autoResumeNotBeforeMs = Date.now() + AUTO_RESUME_TURN_YIELD_GRACE_MS;
+    } else {
+      // If the presentation tool result already carries terminal truth, the
+      // invoking model turn can handle it directly; do not enqueue a redundant turn.
+      autoResumeSuppressed = true;
+    }
+  }
+
+  function automaticResumeDelayMs() {
+    if (autoResumeSuppressed || autoResumeNotBeforeMs === null) return null;
+    return Math.max(0, autoResumeNotBeforeMs - Date.now());
+  }
+
   function render(value) {
     if (!validProjection(value)) return;
     projection = value;
@@ -177,7 +206,13 @@
     } else if (value.delivery_state === "prepared") {
       el("status").textContent = "Continuation prepared";
     } else if (value.state === "triggered") {
-      el("status").textContent = "Job finished · continuing…";
+      if (autoResumeSuppressed) {
+        el("status").textContent = "Job finished · terminal result already available";
+      } else if (automaticResumeDelayMs() > 0) {
+        el("status").textContent = "Job finished · waiting for current turn to yield…";
+      } else {
+        el("status").textContent = "Job finished · continuing…";
+      }
     } else if (bindingId) {
       el("status").textContent = "Waiting for Job completion";
     } else {
@@ -187,17 +222,37 @@
 
   function shouldStop(value = projection) {
     return carrierLost
-      || !!(value && (TERMINAL_DELIVERY.has(value.delivery_state) || expired(value)));
+      || !!(value && (TERMINAL_DELIVERY.has(value.delivery_state) || expired(value)))
+      || !!(value && autoResumeSuppressed && value.state === "triggered");
+  }
+
+  function nextPollDelay() {
+    if (!document.hidden) {
+      hiddenPollCount = 0;
+      return VISIBLE_POLL_MS;
+    }
+    const delay = hiddenPollCount < HIDDEN_EARLY_POLLS
+      ? HIDDEN_EARLY_POLL_MS
+      : hiddenPollCount < HIDDEN_EARLY_POLLS + HIDDEN_MEDIUM_POLLS
+        ? HIDDEN_MEDIUM_POLL_MS
+        : HIDDEN_LATE_POLL_MS;
+    hiddenPollCount += 1;
+    return delay;
   }
 
   function scheduleNext() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
     if (tornDown || shouldStop()) return;
+    let delay = nextPollDelay();
+    if (projection && projection.state === "triggered" && projection.delivery_state === "pending") {
+      const remaining = automaticResumeDelayMs();
+      if (remaining !== null && remaining > 0) delay = remaining;
+    }
     timer = setTimeout(() => {
       timer = null;
       void reconcile();
-    }, document.hidden ? HIDDEN_POLL_MS : VISIBLE_POLL_MS);
+    }, delay);
   }
 
   async function bind() {
@@ -278,7 +333,8 @@
   }
 
   async function prepareAndDispatch() {
-    if (prepareUncertain || dispatchStartedAttempt || pendingFinish || tornDown) return;
+    if (prepareUncertain || dispatchStartedAttempt || pendingFinish || tornDown
+      || autoResumeSuppressed || autoResumeNotBeforeMs === null || Date.now() < autoResumeNotBeforeMs) return;
     let response;
     try {
       response = await callTool("job_terminal_continuation_prepare", {
@@ -412,6 +468,7 @@
     if (!value) return;
     if (waitId && value.wait_id !== waitId) return;
     waitId = value.wait_id;
+    armAutomaticResumeFromInitialToolResult(value);
     render(value);
     void reconcile();
   }
@@ -474,6 +531,7 @@
   addEventListener("visibilitychange", () => {
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    if (!document.hidden) hiddenPollCount = 0;
     void reconcile();
   });
   addEventListener("pagehide", teardown, { once: true });

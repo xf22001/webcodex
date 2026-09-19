@@ -11,9 +11,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 use super::continuation_feedback::EXPLORATION_CONTINUITY_ACTION;
+#[cfg(test)]
+use super::project_instructions::INSTRUCTION_CANDIDATE_PATHS;
 use super::project_instructions::{
     ProjectInstructionFile, ProjectInstructionsSnapshot, ProjectInstructionsSummarySnapshot,
-    INSTRUCTION_CANDIDATE_PATHS, MAX_LINES_PER_FILE,
+    MAX_LINES_PER_FILE,
 };
 use super::project_resolution::ResolvedProject;
 use super::session_context::canonical_repository_key;
@@ -67,8 +69,8 @@ pub(crate) fn builtin_coding_workflow_projection(profile: CodingGuidanceProfile)
             "Verify Project/branch/HEAD/changes/nested rules. Recovery/compaction/exact Session resume is continuation: reuse still-current Git/read/validation/Job facts; revalidate changed snapshots/HEAD/worktree/instructions.",
             "Preserve unrelated work; push/publish/deploy/restart need explicit action/target. If a user answer/Job/validation/result is not a dependency, continue independent work; wait only on real dependencies.",
             "Ordinary implementation is default: map cross-layer changes end to end; use compiler/schema/exhaustiveness failures for gaps; minimize concepts, avoid speculative redesign.",
-            "Validation failure is evidence, not queue cleanliness. Fix blockers before dependent work; otherwise continue. Reuse assertion_name on rerun; mutation stales evidence; outcome_unknown fails closed. Formatting is finalization.",
-            "Use one execution/Job, exact continuation; wait_secs=100,wake_on=terminal when blocked, not for visibility. After Rust stabilizes, format once before final diff/closeout; rerun only after later Rust edits. Final source needs sufficient fresh validation."
+            "Validation failure is evidence, not queue cleanliness. Fix dependent blockers; continue otherwise. Reuse assertion_name; outcome_unknown fails closed. After Rust stabilizes, format once; rerun only after later Rust edits. Require sufficient fresh validation.",
+            "Keep one execution/Job and exact continuation. Blocked: use wait_for_job_terminal with a real Host carrier; no short polling. observe_jobs for details, stop_job(confirm=true) for control; list_jobs is identity recovery."
         ],
         "tool_strategy": {
             "profile": profile,
@@ -79,7 +81,7 @@ pub(crate) fn builtin_coding_workflow_projection(profile: CodingGuidanceProfile)
             "session_recording": "When work_on_project creates or resumes, pass recording_session_id for recorder provenance only. business session_id may target another Session; it grants no authority.",
             "session_message_ack": "For retained session_attention with requires_ack, echo ack_session_message_ids. This proves model-context retention only; it never resolves messages, grants authority, or gates execution.",
             "session_message_resolution": "For a handled non-todo, send session_message_resolution on the next ordinary call with recording_session_id; if requires_ack, also send ack_session_message_ids. It cannot predict the main call. Todos use complete_session_message.",
-            "context_sidecar": "context_request adds bounded context after the main tool and never authorizes effects. Recover lost project.instructions with an observation call before dependent mutation.",
+            "context_sidecar": "context_request after the main tool; never authorizes. jobs.attention: Project-level, not Session/control. Recover project.instructions by observation call before dependent mutation.",
             "runner_targeting": "For exact Runner client_id, use runtime_status(client_id=...) or list_projects(client_id=...) before treating it as absent.",
             "persistent_shell": "Local: run_process=literal argv; run_shell=shell grammar/short chains; run_script=program-like scripts; specialize for added semantics. Persistent shell only for repeated named-SSH state or local same-process state.",
             "normal_closeout": "Source/validation/open evidence: finish_coding_task(summary_only=true). Read/planning/artifact: finalize directly."
@@ -105,12 +107,12 @@ fn tool_strategy_guidance(profile: CodingGuidanceProfile) -> &'static [&'static 
         ],
         #[cfg(feature = "experimental-code-mode")]
         CodingGuidanceProfile::CodeMode => &[
-            "For one simple observation use a direct primitive; do not wrap a single simple call in Code Mode. Native commands and structured tools are first-class: choose the simplest sufficient primitive. Narrow broad discovery before bounded targeted reads; avoid ritual round trips.",
-            "Prefer read-only code_mode_exec for related search/read observations, cross-file/module investigation, or synthesis of independent observations when it reduces outer model round trips. Three or more related observations is a soft heuristic, never a correctness rule.",
+            "For one simple observation use a direct primitive; do not wrap it in Code Mode. If one bounded search will immediately inspect its matches, prefer direct search_and_read. Native commands and structured tools are first-class; choose the simplest sufficient primitive. Narrow broad discovery before targeted reads.",
+            "Prefer read-only code_mode_exec for multi-step related search/read observations, cross-file/module investigation, or synthesis of independent observations when it reduces outer model round trips. Three or more related observations is a soft heuristic, never a correctness rule.",
             "Keep adaptive follow-up inside one cell: search, inspect result, dependent read, inspect, further search, compact final projection. Dependent calls remain sequential inside the cell; they need not cross model turns.",
             "Plan each cell as a small dependency DAG: use Promise.all for independent observations and keep true dependencies sequential. Prefer a native batch shape (read_files items, search_project_texts queries) over same-kind calls. Use JavaScript for branching/cross-tool composition, not avoidable micro-calls.",
             "Keep raw child ToolResults inside the cell. Filter, extract, cross-reference and synthesize search results, file bodies and diff chunks before text(...). Emit only compact structured evidence needed for the next model decision; no fixed JSON shape is required.",
-            "Avoid raw-result dumping: do not batch calls then text(results). Project large nested results proactively before hitting the bounded outer-output limit; text(value) should contain distilled findings, relevant paths and small evidence, not intermediate material.",
+            "Avoid raw-result dumping: do not batch calls then text(results). Project proactively before hitting the bounded outer-output limit. If nested signatures or result fields are not retained, exact tool_manifest on the selected Code Mode entry returns its bounded callable contract.",
             "Canonical mutation is the default edit path; structured validation is the default validation path. Consider effectful Code Mode only to reduce outer round trips for multiple related validations; mutating Code Mode only when adaptive read -> one guarded edit benefits.",
             "This profile grants no capability or nested admission. All children retain canonical Project/Session authority, permission, risk, approval, effects, idempotency, validation evidence, Job continuation, retry and effect-certainty semantics.",
         ],
@@ -305,6 +307,7 @@ pub(crate) struct StartupBriefInput<'a> {
     pub(crate) requested_project: &'a str,
     pub(crate) project_resolution: &'a Value,
     pub(crate) resolved: &'a ResolvedProject,
+    pub(crate) project_ref: Option<&'a str>,
     pub(crate) knowledge_association: Option<&'a Value>,
     pub(crate) session: &'a SessionSummary,
     pub(crate) continuation_kind: &'a str,
@@ -313,8 +316,7 @@ pub(crate) struct StartupBriefInput<'a> {
     pub(crate) instructions: &'a ProjectInstructionsSnapshot,
     pub(crate) previous_instructions: Option<&'a ProjectInstructionsSummarySnapshot>,
     pub(crate) force_instruction_load: bool,
-    pub(crate) include_project_instructions: bool,
-    pub(crate) include_reused_instruction_content: bool,
+    pub(crate) include_instruction_content: bool,
     pub(crate) extensions: Option<&'a StartupExtensions>,
     pub(crate) git: &'a Value,
     pub(crate) semantic_navigation: &'a Value,
@@ -333,8 +335,7 @@ pub(crate) fn build_startup_brief(input: StartupBriefInput<'_>) -> Value {
         input.instructions,
         input.previous_instructions,
         input.force_instruction_load,
-        !minimal && input.include_project_instructions,
-        input.include_reused_instruction_content,
+        !minimal && input.include_instruction_content,
         minimal,
     );
     let continuation = continuation_projection(
@@ -389,6 +390,9 @@ pub(crate) fn build_startup_brief(input: StartupBriefInput<'_>) -> Value {
     });
     if let Some(association) = input.knowledge_association {
         brief["project"]["knowledge_association"] = association.clone();
+    }
+    if let Some(project_ref) = input.project_ref {
+        brief["project"]["project_ref"] = json!(project_ref);
     }
     if let Some(extensions) = input.extensions {
         debug_assert!(extensions.serialized_len() <= STARTUP_EXTENSION_CATALOG_HARD_MAX_BYTES);
@@ -677,12 +681,52 @@ fn roots_projection(source: &Value) -> Value {
 
 pub(crate) fn project_instructions_context_projection(
     current: &ProjectInstructionsSnapshot,
+    max_bytes: usize,
 ) -> Value {
-    // Sidecar requests are explicit current observations rather than Session
-    // continuation deltas. Reuse the same bounded source/content/read_more
-    // projection as coding startup, without consulting or mutating Session
-    // instruction-retention state.
-    instructions_projection(current, None, true, true, true, false)
+    // Sidecar requests observe current sources without Session retention. Its
+    // shared envelope is smaller than startup, especially with 16 global files.
+    let mut projection = instructions_projection(current, None, true, true, false);
+    if serialized_len(&projection) <= max_bytes {
+        return projection;
+    }
+    // Headings duplicate the body; remove this optional index before losing
+    // actual guidance or source identities.
+    if let Some(sources) = projection["sources"].as_array_mut() {
+        for source in sources {
+            source["headings"] = json!([]);
+        }
+    }
+    while serialized_len(&projection) > max_bytes {
+        let largest = projection["sources"].as_array().and_then(|sources| {
+            sources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, source)| {
+                    source["content"]
+                        .as_str()
+                        .filter(|body| !body.is_empty())
+                        .map(|body| (index, json_string_payload_len(body)))
+                })
+                .max_by_key(|(_, bytes)| *bytes)
+        });
+        let Some((index, bytes)) = largest else {
+            // Essential source metadata itself does not fit. The owning
+            // sidecar envelope will return its existing explicit budget error.
+            break;
+        };
+        let source = &mut projection["sources"][index];
+        let body = source["content"].as_str().unwrap_or_default();
+        let (bounded, _) = bounded_json_string(body, bytes / 2);
+        source["read_more"] = if source["source_scope"] == "project" {
+            projected_read_more(source["path"].as_str().unwrap_or_default(), &bounded)
+        } else {
+            Value::Null
+        };
+        source["content"] = json!(bounded);
+        source["truncated"] = json!(true);
+        projection["truncated"] = json!(true);
+    }
+    projection
 }
 
 fn instructions_projection(
@@ -690,15 +734,13 @@ fn instructions_projection(
     previous: Option<&ProjectInstructionsSummarySnapshot>,
     force_load: bool,
     allow_content: bool,
-    include_reused_content: bool,
     minimal: bool,
 ) -> Value {
     let status = instruction_status(current, previous, force_load);
     let include_content = allow_content
         && (matches!(status, "loaded" | "changed")
-            || (status == "reused" && include_reused_content)
             || (status == "unavailable" && !current.files.is_empty()));
-    let changed_sources = if status == "changed" {
+    let changed_sources = if matches!(status, "changed" | "unavailable") {
         changed_instruction_sources(current, previous)
     } else {
         Vec::new()
@@ -746,7 +788,7 @@ fn instruction_status(
             "not_found"
         };
     }
-    let Some(previous) = previous.filter(|snapshot| snapshot.scan_complete) else {
+    let Some(previous) = previous else {
         return "loaded";
     };
     if force_load {
@@ -772,7 +814,8 @@ fn instruction_snapshots_match(
             .iter()
             .zip(&previous.files)
             .all(|(left, right)| {
-                left.path == right.path
+                left.source_scope == right.source_scope
+                    && left.path == right.path
                     && left.fingerprint == right.fingerprint
                     && left.truncated == right.truncated
             })
@@ -782,23 +825,46 @@ fn changed_instruction_sources(
     current: &ProjectInstructionsSnapshot,
     previous: Option<&ProjectInstructionsSummarySnapshot>,
 ) -> Vec<String> {
-    let mut changed = Vec::new();
-    for candidate in INSTRUCTION_CANDIDATE_PATHS {
-        let current_file = current.files.iter().find(|file| file.path == *candidate);
-        let previous_file = previous
-            .and_then(|snapshot| snapshot.files.iter().find(|file| file.path == *candidate));
-        let differs = match (current_file, previous_file) {
-            (Some(left), Some(right)) => {
-                left.fingerprint != right.fingerprint || left.truncated != right.truncated
+    let mut identities: Vec<_> = current
+        .files
+        .iter()
+        .map(|file| (file.source_scope, file.path.as_str()))
+        .collect();
+    if let Some(previous) = previous {
+        for file in &previous.files {
+            let identity = (file.source_scope, file.path.as_str());
+            if !identities.contains(&identity) {
+                identities.push(identity);
             }
-            (None, None) => false,
-            _ => true,
-        };
-        if differs {
-            changed.push((*candidate).to_string());
         }
     }
-    changed
+
+    identities
+        .into_iter()
+        .filter_map(|(scope, path)| {
+            if !current.scope_complete(scope) {
+                return None;
+            }
+            let current_file = current
+                .files
+                .iter()
+                .find(|file| file.source_scope == scope && file.path == path);
+            let previous_file = previous.and_then(|snapshot| {
+                snapshot
+                    .files
+                    .iter()
+                    .find(|file| file.source_scope == scope && file.path == path)
+            });
+            let differs = match (current_file, previous_file) {
+                (Some(left), Some(right)) => {
+                    left.fingerprint != right.fingerprint || left.truncated != right.truncated
+                }
+                (None, None) => false,
+                _ => true,
+            };
+            differs.then(|| path.to_string())
+        })
+        .collect()
 }
 
 fn instruction_source_projection(
@@ -833,13 +899,18 @@ fn instruction_source_projection(
         (None, false)
     };
     *projection_truncated |= content_truncated;
-    let read_more = if content_truncated {
+    let read_more = if content_truncated
+        && file.source_scope == super::project_instructions::InstructionSourceScope::Project
+    {
         let returned = content.as_deref().unwrap_or_default();
         projected_read_more(&file.path, returned)
+    } else if content_truncated {
+        Value::Null
     } else {
         serde_json::to_value(&file.read_more).unwrap_or(Value::Null)
     };
     json!({
+        "source_scope": file.source_scope,
         "path": file.path,
         "fingerprint": file.fingerprint,
         "truncated": file.truncated || content_truncated,
@@ -1487,7 +1558,11 @@ fn enforce_hard_size_limit(brief: &mut Value) {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let read_more = projected_read_more(&path, &bounded);
+        let read_more = if source["source_scope"] == "project" {
+            projected_read_more(&path, &bounded)
+        } else {
+            Value::Null
+        };
         source["content"] = json!(bounded);
         source["truncated"] = json!(true);
         source["read_more"] = read_more;
@@ -1586,7 +1661,11 @@ fn enforce_hard_size_limit(brief: &mut Value) {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let read_more = projected_read_more(&path, &bounded);
+        let read_more = if source["source_scope"] == "project" {
+            projected_read_more(&path, &bounded)
+        } else {
+            Value::Null
+        };
         source["content"] = json!(bounded);
         source["truncated"] = json!(true);
         source["read_more"] = read_more;
@@ -1813,6 +1892,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, path)| LoadedInstructionCandidate {
+                    source_scope:
+                        webcodex_core::project_instructions::InstructionSourceScope::Project,
                     path: (*path).to_string(),
                     content: format!(
                         "# Rule source {index}\n## Required\n{}\n",
@@ -1827,29 +1908,56 @@ mod tests {
     }
 
     #[test]
-    fn reused_instruction_status_and_body_projection_are_independent() {
+    fn instruction_delta_schema_accepts_replaced_runner_sources_and_project_changes() {
+        use webcodex_core::project_instructions::InstructionSourceScope;
+        let snapshot = |version: &str| {
+            let mut candidates = (0..16)
+                .map(|index| LoadedInstructionCandidate {
+                    source_scope: InstructionSourceScope::Runner,
+                    path: format!("runner/{index}/{version}.md"),
+                    content: version.to_string(),
+                    total_lines: 1,
+                    full_sha256: None,
+                })
+                .collect::<Vec<_>>();
+            candidates.extend(INSTRUCTION_CANDIDATE_PATHS.iter().map(|path| {
+                LoadedInstructionCandidate {
+                    source_scope: InstructionSourceScope::Project,
+                    path: (*path).to_string(),
+                    content: version.to_string(),
+                    total_lines: 1,
+                    full_sha256: None,
+                }
+            }));
+            ProjectInstructionsSnapshot::from_candidates(candidates, true)
+        };
+        let previous = snapshot("old").to_summary();
+        let current = snapshot("new");
+        let changed = changed_instruction_sources(&current, Some(&previous));
+        assert_eq!(changed.len(), 37);
+        let schema = crate::tool_runtime::registry::output_schema_for_tool("work_on_project");
+        let changed_schema = &schema["properties"]["output"]["properties"]["instructions"]
+            ["properties"]["changed_sources"];
+        assert!(
+            changed_schema.is_object(),
+            "work_on_project instruction delta schema"
+        );
+        validate_schema_instance_for_test(&json!(changed), changed_schema).unwrap();
+    }
+
+    #[test]
+    fn reused_instruction_status_never_reprojects_body() {
         let current = instruction_snapshot();
         let previous = current.to_summary();
 
-        let advanced =
-            instructions_projection(&current, Some(&previous), false, true, false, false);
-        assert_eq!(advanced["status"], "reused");
-        assert_eq!(advanced["content_included"], false);
-        assert!(advanced["sources"]
+        let projection = instructions_projection(&current, Some(&previous), false, true, false);
+        assert_eq!(projection["status"], "reused");
+        assert_eq!(projection["content_included"], false);
+        assert!(projection["sources"]
             .as_array()
             .unwrap()
             .iter()
             .all(|source| source["content"].is_null()));
-
-        let canonical =
-            instructions_projection(&current, Some(&previous), false, true, true, false);
-        assert_eq!(canonical["status"], "reused");
-        assert_eq!(canonical["content_included"], true);
-        assert!(canonical["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["content"].is_string()));
     }
 
     fn delta_feedback(new_total: usize, resolved_total: usize, still_total: usize) -> Value {
@@ -2174,6 +2282,7 @@ mod tests {
                 requested_project: "agent:size:demo",
                 project_resolution: &project_resolution,
                 resolved: &resolved,
+                project_ref: None,
                 knowledge_association: None,
                 session: &session,
                 continuation_kind: "continued",
@@ -2182,8 +2291,7 @@ mod tests {
                 instructions: &instructions,
                 previous_instructions: None,
                 force_instruction_load: true,
-                include_project_instructions: true,
-                include_reused_instruction_content: false,
+                include_instruction_content: true,
                 extensions: Some(&extensions),
                 git: &git,
                 semantic_navigation: &semantic_navigation,
@@ -2308,3 +2416,7 @@ mod tests {
             .any(|action| action.starts_with("rerun focused target 0")));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/startup_instructions_projection.rs"]
+mod instruction_tests;

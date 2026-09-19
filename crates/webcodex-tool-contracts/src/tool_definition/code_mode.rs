@@ -53,7 +53,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     .review(super::ToolReviewEvidence::ReadOnlyInspection),
             ),
             "Read-only Code Mode for related inspections. Prefer a direct tool for one simple observation. Use Promise.all only for independent calls; keep dependent follow-ups sequential inside one cell. Filter child results before text(value); never a raw-result dump. Project before the outer-output limit. Children keep canonical authority; no shell/fs/network/mutation/validation/Jobs.",
-        ).with_gpt_action_description("Read-only orchestration for related inspections. Use direct tools for simple observations; parallelize only independent calls, keep adaptive follow-ups inside the cell. Distill evidence before text(value); avoid raw-result dumps. Canonical Project/Session checks remain.")),
+        ).with_gpt_action_description("Read-only orchestration for related inspections. Use direct tools for simple observations; parallelize only independent calls, keep adaptive follow-ups inside the cell. Distill evidence before text(value); avoid raw-result dumps. Canonical Project/Session checks remain.").with_gpt_action_gateway_only()),
         45,
     ),
     adaptive_runtime_direct(
@@ -85,7 +85,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
     adaptive_runtime_direct(
         permission_risk(
             requires_explicit_business_session(model_spec(
-                def(
+                super::require_all_scopes(def(
                     "code_mode_exec_mutating",
                     super::ToolAuditPolicy::typed_fields(EFFECTFUL_RESULT_AUDIT_FIELDS),
                     ModelVisible,
@@ -102,11 +102,11 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     true,
                     NoPath,
                     true,
-                    false,
+                    true,
                     super::ToolSessionEvidencePolicy::NONE,
-                ),
-                "Guarded edit Code Mode for adaptive read -> one canonical apply_text_edits attempt. Default to direct mutation; use only when it saves model turns. Distill results before text(value). Nested canonical write authority and Edit evidence remain authoritative; no validation, shell/process, Jobs, other writes, gateways or recursion.",
-            ).with_gpt_action_description("Guarded edit orchestration for adaptive read -> one canonical apply_text_edits attempt when it saves model turns. Default to direct edits. Canonical authority/effects remain; no nested validation, shell/process, Jobs, other writes or recursion.").with_gpt_action_gateway_only()),
+                ), &[PROJECT_WRITE, JOB_RUN]),
+                "Bounded coding Code Mode: adaptive E1 reads, at most one canonical apply_text_edits attempt, then cargo_check/cargo_test only after a successful known edit. Requires project:write and job:run; child authority remains canonical. Execution pass is not current-source proof: inspect source_state. Continue Jobs outside the cell using exact effect_receipt children. No shell/process, nested Jobs, alternate writes, gateways, recursion or whole-program retry.",
+            ).with_gpt_action_description("Bounded adaptive read -> one canonical edit -> cargo_check/cargo_test. Requires write and Job scopes; child authority stays canonical. Source freshness may be unproven. Continue handed-off Jobs outside the cell; never retry the whole program. No shell, alternate writes or recursion.").with_gpt_action_gateway_only()),
             PERMISSION_RISK_WRITE,
         ),
         65,

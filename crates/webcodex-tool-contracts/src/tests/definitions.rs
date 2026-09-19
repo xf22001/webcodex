@@ -119,7 +119,7 @@ fn experimental_code_mode_effectful_has_conservative_e2a_envelope() {
 
 #[cfg(feature = "experimental-code-mode")]
 #[test]
-fn experimental_code_mode_mutating_has_conservative_e2b_envelope() {
+fn experimental_code_mode_mutating_has_conservative_e2c_combined_authority_envelope() {
     let definition = lookup_tool_definition("code_mode_exec_mutating")
         .expect("code_mode_exec_mutating definition");
     let metadata = definition.metadata();
@@ -130,11 +130,15 @@ fn experimental_code_mode_mutating_has_conservative_e2b_envelope() {
     assert_eq!(metadata.idempotency, ToolIdempotency::NonIdempotent);
     assert!(
         metadata.destructive,
-        "E2b can create/edit/delete/rename through apply_text_edits"
+        "E2c can create/edit/delete/rename through canonical apply_text_edits"
     );
     assert_eq!(
         metadata.authority,
-        ToolAuthorityPolicy::Require(PROJECT_WRITE)
+        ToolAuthorityPolicy::RequireAll(&[PROJECT_WRITE, JOB_RUN])
+    );
+    assert!(
+        metadata.shell_like,
+        "structured validation executes project build/test code"
     );
     assert_eq!(definition.permission_risk(), PERMISSION_RISK_WRITE);
     assert_eq!(definition.adaptive_runtime_direct_rank(), Some(65));
@@ -255,7 +259,7 @@ fn experimental_code_mode_is_absent_without_feature() {
 
 #[test]
 fn final_changes_requires_the_typed_internal_posix_runner_capability() {
-    for name in ["present_changes", "changes_file_diff"] {
+    for name in ["present_work_result", "changes_file_diff"] {
         let requirement = runtime_tool_runner_capability(name)
             .unwrap_or_else(|| panic!("{name} must require its real Runner execution capability"));
         assert_eq!(
@@ -513,6 +517,121 @@ fn every_runtime_tool_has_an_explicit_fail_closed_audit_contract() {
 }
 
 #[test]
+fn stop_job_direct_exposure_preserves_one_canonical_effect_and_gateway_budget() {
+    let definition = lookup_tool_definition("stop_job").unwrap();
+    assert_eq!(
+        tool_definitions()
+            .filter(|item| item.name == "stop_job")
+            .count(),
+        1
+    );
+    assert_eq!(definition.adaptive_runtime_direct_rank(), Some(81));
+    assert_eq!(
+        definition.gpt_action_exposure(),
+        ToolGptActionExposure::GatewayOnly
+    );
+    assert!(definition.supports_gpt_actions());
+    assert_eq!(definition.metadata.effect, ToolEffect::Mutate);
+    assert_eq!(definition.metadata.risk, ToolRisk::JobRun);
+    assert_eq!(definition.metadata.approval, ToolApprovalPolicy::Standard);
+    assert_eq!(
+        definition.metadata.idempotency,
+        ToolIdempotency::DesiredState
+    );
+    assert_eq!(
+        definition.metadata.authority,
+        ToolAuthorityPolicy::Require(JOB_RUN)
+    );
+    assert!(!gpt_action_direct_tool_definitions()
+        .iter()
+        .any(|item| item.name == "stop_job"));
+    assert!(lookup_tool_definition("cancel_job").is_none());
+    assert!(lookup_tool_definition("manage_jobs").is_none());
+    let schema = input_schema_for_tool("stop_job");
+    let properties = schema["properties"].as_object().unwrap();
+    assert_eq!(properties.len(), 4);
+    for key in ["project", "job_id", "session_id", "confirm"] {
+        assert!(properties.contains_key(key));
+    }
+    for name in [
+        "read_files",
+        "search_project_texts",
+        "git_status",
+        "apply_text_edits",
+    ] {
+        let schema = input_schema_for_tool(name);
+        let properties = schema["properties"].as_object().unwrap();
+        for forbidden in [
+            "observe_job",
+            "job_id",
+            "cancel_job",
+            "wait_job",
+            "job_control",
+        ] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "{name} gained {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn agent_continuation_setup_descriptions_are_self_guiding_without_direct_expansion() {
+    let specs = registered_tool_specs();
+    let description = |name: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("missing ToolSpec {name}"))
+            .description
+            .as_str()
+    };
+    let create = description("create_agent_identity");
+    assert!(create.contains("first setup step"));
+    assert!(create.contains("rotate_agent_continuation_endpoint"));
+    assert!(create.contains("present_agent_continuation"));
+    let rotate = description("rotate_agent_continuation_endpoint");
+    assert!(rotate.contains("first-time durable continuation setup"));
+    assert!(rotate.contains("present_agent_continuation"));
+    assert!(rotate.contains("does not establish a Host binding"));
+    let present = description("present_agent_continuation");
+    assert!(present.contains(
+        "create_agent_identity -> rotate_agent_continuation_endpoint -> present_agent_continuation"
+    ));
+    assert!(present.contains("yield/end the current model turn promptly"));
+    assert!(present.contains("production_auto_resume_available"));
+    assert!(present.contains("not production auto-resume readiness"));
+
+    assert_eq!(
+        lookup_tool_definition("create_agent_identity")
+            .unwrap()
+            .adaptive_runtime_direct_rank(),
+        None,
+        "identity creation stays discoverable through the gateway rather than expanding Direct"
+    );
+    assert_eq!(
+        lookup_tool_definition("present_agent_continuation")
+            .unwrap()
+            .adaptive_runtime_direct_rank(),
+        Some(18)
+    );
+    assert_eq!(
+        lookup_tool_definition("rotate_agent_continuation_endpoint")
+            .unwrap()
+            .adaptive_runtime_direct_rank(),
+        Some(19)
+    );
+    assert_eq!(
+        lookup_tool_definition("attach_agent_endpoint")
+            .unwrap()
+            .adaptive_runtime_direct_rank(),
+        None,
+        "compatibility alias must not become a second canonical Direct entry"
+    );
+}
+
+#[test]
 fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
     let mut seen_ranks = std::collections::BTreeMap::new();
     for definition in tool_definitions() {
@@ -550,6 +669,7 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         ("run_detached_process", 72),
         ("run_shell", 75),
         ("observe_jobs", 80),
+        ("stop_job", 81),
     ] {
         let definition = derived
             .iter()
@@ -563,6 +683,8 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
     }
 
     for name in [
+        "workspace_hygiene_check",
+        "finish_coding_task",
         "runner_config_check",
         "runner_config_reload",
         "ssh_resource",
@@ -583,6 +705,7 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         "go_test",
     ] {
         let definition = lookup_tool_definition(name).expect("model-visible long-tail definition");
+        assert!(definition.visibility.is_model_visible(), "{name}");
         assert_eq!(
             definition.adaptive_runtime_direct_rank(),
             None,
@@ -656,7 +779,6 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         "present_goal_plan",
         "present_agent_continuation",
         "present_work_result",
-        "present_changes",
         "export_project_artifact",
         "rotate_agent_continuation_endpoint",
     ] {

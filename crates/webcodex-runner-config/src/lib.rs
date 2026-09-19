@@ -17,6 +17,10 @@ use webcodex_core::runner_protocol::RunnerCapabilities;
 
 pub mod paths;
 
+/// Desktop injects provider credentials under these private source names. Only
+/// explicit MCP env_from_env mappings may inherit them, not ordinary job children.
+pub const DESKTOP_MCP_ENV_PREFIX: &str = "WEBCODEX_DESKTOP_MCP_";
+
 /// Default Runner project registry selected for a new system-level install.
 pub const DEFAULT_INIT_PROJECT_REGISTRY_DIR: &str = "/etc/webcodex/project-registry";
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
@@ -355,6 +359,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // against its startup-bound path and must never be inferred from a
             // generated static runner.toml capability block.
             runner_config_control: false,
+            instruction_runtime: false,
         },
         policy: GeneratedRunnerPolicy {
             allow_raw_shell: true,

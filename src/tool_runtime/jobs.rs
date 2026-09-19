@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
-use webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS;
+use webcodex_core::runtime_contract::{
+    MAX_JOB_OBSERVATION_WAIT_SECS, MODEL_JOB_CONTINUATION_WAIT_SECS,
+};
 use webcodex_core::workflow_session_contract::is_validation_like_execution_purpose;
 
 use super::helpers::{
@@ -758,7 +760,7 @@ pub(crate) fn observe_job_continuation(job_id: &str, observation_token: Option<&
         "observe_jobs",
         json!({
             "items": [item],
-            "wait_secs": MAX_JOB_OBSERVATION_WAIT_SECS,
+            "wait_secs": MODEL_JOB_CONTINUATION_WAIT_SECS,
             "wake_on": "terminal",
         }),
     )
@@ -1422,6 +1424,10 @@ impl ToolRuntime {
                         {
                             validation["validation_target_id"] = json!(target_id);
                         }
+                        validation["source_state"] = json!(self.validation_sources.observe(
+                            job.project_id.as_deref().unwrap_or_default(),
+                            validation_metadata.and_then(|metadata| metadata.source_fence.as_ref()),
+                        ));
                         output["validation"] = validation;
                     }
                 }
@@ -1527,6 +1533,14 @@ impl ToolRuntime {
                         .and_then(|metadata| metadata.require_tests),
                     job.validation.as_ref().and_then(|metadata| metadata.no_run),
                 );
+                if let Some(validation) = validation.as_mut() {
+                    validation["source_state"] = json!(self.validation_sources.observe(
+                        job.project_id.as_deref().unwrap_or_default(),
+                        job.validation
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_fence.as_ref()),
+                    ));
+                }
                 if let (Some(validation), Some(target_id)) = (
                     validation.as_mut(),
                     job.validation

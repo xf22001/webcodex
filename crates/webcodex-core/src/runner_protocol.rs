@@ -386,6 +386,8 @@ pub const RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES: &str = "managed_ssh_resources
 /// startup-bound configuration path. Missing on older Runners is false; Servers
 /// must never fall back to PID/signal emulation for this operation.
 pub const RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL: &str = "runner_config_control";
+/// Narrow Runner-owned observation of configured instruction files. Missing on older Runners is false.
+pub const RUNNER_CAPABILITY_INSTRUCTION_RUNTIME: &str = "instruction_runtime";
 pub const RUNNER_CONFIG_REQUEST_KIND: &str = "runner_config";
 pub const RUNNER_CONFIG_REQUEST_MAX_BYTES: usize = 512;
 pub const RUNNER_CONFIG_RESPONSE_MAX_BYTES: usize = 4096;
@@ -499,6 +501,7 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS,
     RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES,
     RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
+    RUNNER_CAPABILITY_INSTRUCTION_RUNTIME,
     RUNNER_CAPABILITY_COMPUTER_CONTROL,
     RUNNER_CAPABILITY_COMPUTER_SCROLL_TO_ELEMENT,
     RUNNER_CAPABILITY_COMPUTER_KEY_INPUT,
@@ -778,6 +781,9 @@ pub struct RunnerCapabilities {
     /// transport, Plugin support, or protocol generation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub runner_config_control: bool,
+    /// Runner-owned configured instruction snapshot support. Missing on older Runners is false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub instruction_runtime: bool,
 }
 
 /// Bounded, non-secret status for the Runner's active configuration generation.
@@ -852,6 +858,8 @@ pub enum RunnerConfigErrorField {
     MaxConcurrentJobs,
     #[serde(rename = "skills.roots")]
     SkillsRoots,
+    #[serde(rename = "instructions.files")]
+    InstructionsFiles,
     #[serde(rename = "shell.max_persistent_shells")]
     ShellMaxPersistentShells,
     #[serde(rename = "shell.persistent_shell_idle_timeout_secs")]
@@ -962,6 +970,10 @@ impl RunnerConfigOperationResponse {
             (
                 Some(RunnerConfigErrorField::SkillsRoots),
                 Some(RunnerConfigErrorReason::InvalidPath),
+            )
+            | (
+                Some(RunnerConfigErrorField::InstructionsFiles),
+                Some(RunnerConfigErrorReason::InvalidPath),
             ) => {}
             _ => return Err("invalid config error diagnostic"),
         }
@@ -1063,6 +1075,7 @@ impl Default for RunnerCapabilities {
             native_tool_plugins: false,
             managed_ssh_resources: false,
             runner_config_control: false,
+            instruction_runtime: false,
         }
     }
 }
@@ -1707,9 +1720,9 @@ pub const STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS: u64 = 1;
 pub const STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS: u64 = 3_600;
 pub const STRUCTURED_EXECUTION_TIMEOUT_DEFAULT_SECS: u64 = 60;
 /// Ceiling for direct synchronous structured Runner requests.
-/// Durable typed Jobs use `STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS` instead.
+/// Durable typed Jobs use their execution-form lifetime ceiling instead.
 pub const STRUCTURED_EXECUTION_DIRECT_SYNC_TIMEOUT_MAX_SECS: u64 = 120;
-pub const PROCESS_TIMEOUT_MAX_SECS: u64 = STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS;
+pub const PROCESS_TIMEOUT_MAX_SECS: u64 = 7 * 24 * 60 * 60;
 
 pub const SCRIPT_MIN_BYTES: usize = 1;
 pub const SCRIPT_MAX_BYTES: usize = 512 * 1024;
@@ -1718,7 +1731,17 @@ pub const SCRIPT_ARG_MAX_BYTES: usize = 8_192;
 pub const SCRIPT_ARGV_MAX_BYTES: usize = 16_000;
 pub const SCRIPT_STDIN_MAX_BYTES: usize = 64 * 1024;
 pub const SCRIPT_CWD_MAX_BYTES: usize = 1_024;
-pub const SCRIPT_TIMEOUT_MAX_SECS: u64 = STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS;
+pub const SCRIPT_TIMEOUT_MAX_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Canonical maximum execution lifetime for a durable Job kind. Unknown,
+/// validation, shell, and Skill Job kinds retain the shared 1-hour ceiling.
+pub fn job_execution_timeout_max_secs(kind: &str) -> u64 {
+    match kind {
+        "run_process" | "run_detached_process" => PROCESS_TIMEOUT_MAX_SECS,
+        "run_script" => SCRIPT_TIMEOUT_MAX_SECS,
+        _ => STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
+    }
+}
 
 /// Validate the transport-neutral executable/argv payload. Both Server and
 /// Runner call this so a stale or malicious peer cannot bypass either side.
@@ -2601,6 +2624,7 @@ mod envelope_tests {
                 native_tool_plugins: false,
                 managed_ssh_resources: false,
                 runner_config_control: false,
+                instruction_runtime: false,
             },
             policy: None,
             job_concurrency_limit: Some(4),
@@ -3375,6 +3399,32 @@ mod envelope_tests {
     }
 
     #[test]
+    fn durable_job_execution_lifetime_ceiling_depends_on_execution_form() {
+        assert_eq!(PROCESS_TIMEOUT_MAX_SECS, 604_800);
+        assert_eq!(SCRIPT_TIMEOUT_MAX_SECS, 604_800);
+        assert_eq!(STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS, 3_600);
+        assert_eq!(STRUCTURED_EXECUTION_DIRECT_SYNC_TIMEOUT_MAX_SECS, 120);
+        assert_eq!(
+            job_execution_timeout_max_secs("run_process"),
+            PROCESS_TIMEOUT_MAX_SECS
+        );
+        assert_eq!(
+            job_execution_timeout_max_secs("run_detached_process"),
+            PROCESS_TIMEOUT_MAX_SECS
+        );
+        assert_eq!(
+            job_execution_timeout_max_secs("run_script"),
+            SCRIPT_TIMEOUT_MAX_SECS
+        );
+        for kind in ["shell", "validation", "run_skill_resource", "unknown"] {
+            assert_eq!(
+                job_execution_timeout_max_secs(kind),
+                STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS
+            );
+        }
+    }
+
+    #[test]
     fn script_request_validation_is_bounded_and_allows_whitespace_only_content() {
         let valid = ShellScriptPayload {
             language: ShellScriptLanguage::Sh,
@@ -3445,6 +3495,7 @@ mod envelope_tests {
         )
         .is_err());
         assert!(validate_script_request(&valid, None, Some("bad\0cwd"), 60).is_err());
+        assert!(validate_script_request(&valid, None, None, 21_600).is_ok());
         assert!(validate_script_request(&valid, None, None, 0).is_err());
         assert!(validate_script_request(&valid, None, None, SCRIPT_TIMEOUT_MAX_SECS + 1).is_err());
     }
@@ -3826,6 +3877,7 @@ mod envelope_tests {
                 "native_tool_plugins",
                 "managed_ssh_resources",
                 "runner_config_control",
+                "instruction_runtime",
                 "computer_control",
                 "computer_scroll_to_element",
                 "computer_key_input",
@@ -4205,6 +4257,7 @@ mod filter_canonical_tests {
         step: ShellJobValidationStep,
     ) -> ShellJobValidationMetadata {
         ShellJobValidationMetadata {
+            source_fence: None,
             tool: tool.to_string(),
             kind: kind.to_string(),
             steps: vec![step],

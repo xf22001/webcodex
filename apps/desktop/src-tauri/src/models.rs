@@ -252,23 +252,6 @@ pub struct QuickShareState {
     pub ready_for_chatgpt: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RegularTunnelStatus {
-    Starting,
-    Ready,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RegularTunnelState {
-    pub provider: String,
-    pub status: RegularTunnelStatus,
-    pub clipboard_state: String,
-    pub clipboard_contains: String,
-    pub ready_for_chatgpt: bool,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopOperationKind {
@@ -284,6 +267,8 @@ pub enum DesktopOperationKind {
     RuntimeResume,
     TunnelProxyUpdate,
     TunnelConfigUpdate,
+    RunnerSettingsUpdate,
+    RunnerRestart,
 }
 
 impl DesktopOperationKind {
@@ -300,6 +285,8 @@ impl DesktopOperationKind {
             Self::RuntimeRefresh => "runtime_refresh",
             Self::RuntimeResume => "runtime_resume",
             Self::TunnelProxyUpdate => "tunnel_proxy_update",
+            Self::RunnerSettingsUpdate => "runner_settings_update",
+            Self::RunnerRestart => "runner_restart",
             Self::TunnelConfigUpdate => "tunnel_config_update",
         }
     }
@@ -397,6 +384,7 @@ pub struct ChatGptActivitySnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesktopStateSnapshot {
+    pub saved_projects: Vec<ProjectSelection>,
     pub topology: Option<RuntimeTopology>,
     pub readiness: ReadinessSnapshot,
     pub project: Option<ProjectSelection>,
@@ -406,7 +394,10 @@ pub struct DesktopStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_activity: Option<ChatGptActivitySnapshot>,
     pub quick_share: Option<QuickShareState>,
-    pub regular_tunnel: Option<RegularTunnelState>,
+    #[serde(default)]
+    pub connections: crate::connections::ConnectionsSnapshot,
+    #[serde(default)]
+    pub mcp_providers: crate::mcp_providers::McpProvidersSnapshot,
     pub current_operation: Option<DesktopOperationSnapshot>,
     pub activity_sequence: u64,
     pub openai_tunnel_configured: bool,
@@ -420,6 +411,7 @@ pub struct DesktopStateSnapshot {
 impl Default for DesktopStateSnapshot {
     fn default() -> Self {
         Self {
+            saved_projects: Vec::new(),
             topology: None,
             readiness: ReadinessSnapshot::default(),
             project: None,
@@ -427,7 +419,8 @@ impl Default for DesktopStateSnapshot {
             powershell_runtime: None,
             chatgpt_activity: None,
             quick_share: None,
-            regular_tunnel: None,
+            connections: Default::default(),
+            mcp_providers: Default::default(),
             current_operation: None,
             activity_sequence: 0,
             openai_tunnel_configured: false,
@@ -448,6 +441,8 @@ impl Default for DesktopStateSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StoredDesktopConfig {
+    #[serde(default)]
+    pub saved_projects: Vec<SavedProject>,
     pub topology: Option<RuntimeTopology>,
     pub project: Option<ProjectSelection>,
     pub runtime: Option<StoredRuntime>,
@@ -457,6 +452,12 @@ pub struct StoredDesktopConfig {
     pub preferred_connection: Option<RegularConnectionPreference>,
     #[serde(default)]
     pub tunnel_proxy: TunnelProxyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedProject {
+    pub project: ProjectSelection,
+    pub runner_config: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

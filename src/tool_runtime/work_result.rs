@@ -42,9 +42,9 @@ impl ToolRuntime {
             .await
     }
 
-    /// Read one exact project-scoped coding Session without creating work or
-    /// writing presentation state. The only live Project observation is the
-    /// bounded, no-diff show_changes producer used for current worktree facts.
+    /// Project/Session authority is shared by initial presentation and explicit
+    /// live refresh. Only initial presentation may allocate a process-local
+    /// frozen snapshot; neither path writes the target Session.
     async fn exact_work_result(
         &self,
         project: String,
@@ -97,21 +97,23 @@ impl ToolRuntime {
         // read, not Session evidence, and an explicit App refresh must never
         // append to the target Session merely because the card requested it.
         let workspace_result = self
-            .show_changes(
-                resolved.resolved_id.clone(),
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-            )
+            .show_changes_for_presentation(resolved.resolved_id.clone())
             .await;
-        let validation =
-            validation_summary_from_events(&summary.events, WORK_RESULT_VALIDATION_LIMIT);
-        let current_validation =
-            current_validation_evidence_for_session(&summary, WORK_RESULT_VALIDATION_LIMIT)
-                .evidence;
-        let review = review_evidence_summary_for_session(&summary);
+        // Work Result refresh is read-only, but source freshness is live
+        // process-local observation state. Re-observe persisted validation fences
+        // in memory so a later canonical mutation can strengthen unproven ->
+        // stale without materializing Jobs or writing the target Session.
+        let projection_summary = self.refresh_validation_source_summary(&summary);
+        let validation = validation_summary_from_events(
+            &projection_summary.events,
+            WORK_RESULT_VALIDATION_LIMIT,
+        );
+        let current_validation = current_validation_evidence_for_session(
+            &projection_summary,
+            WORK_RESULT_VALIDATION_LIMIT,
+        )
+        .evidence;
+        let review = review_evidence_summary_for_session(&projection_summary);
         let history_partial = summary.events_truncated;
         let mut projection = build_work_result_projection(
             &resolved.resolved_id,
@@ -123,7 +125,19 @@ impl ToolRuntime {
             &review,
             history_partial,
         );
+        // This version covers live domains only. The card keeps the initial
+        // frozen identity locally; refresh neither replaces nor re-creates it.
         projection["state_version"] = json!(work_result_state_version(&projection));
+        if tool_name == "present_work_result" {
+            match self
+                .freeze_work_result_changes(&resolved.resolved_id, &summary, auth)
+                .await
+            {
+                Ok(Some(changes)) => projection["final_changes"] = changes,
+                Ok(None) => {}
+                Err(result) => return result,
+            }
+        }
         ToolResult::ok(json!({"work_result": projection}))
     }
 }
@@ -466,7 +480,7 @@ fn validation_latest_status(status: Option<&str>) -> &'static str {
 fn current_validation_status(status: Option<&str>) -> &'static str {
     match status {
         Some("not_run") => "not_run",
-        Some("passed") => "passed",
+        Some("unproven") => "unproven",
         Some("failed") => "failed",
         Some("expected") => "expected",
         Some("inconclusive") => "inconclusive",

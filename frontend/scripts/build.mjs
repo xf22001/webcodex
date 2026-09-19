@@ -36,6 +36,11 @@ export const RUNTIME_INLINE_MODULES = Object.freeze([
   "runtime_icons.ts",
   "runtime_navigation.ts",
   "runtime_collaboration.ts",
+  "runtime_product_view.ts",
+  "runtime_product.ts",
+  "runtime_window_state.ts",
+  "runtime_sessions.ts",
+  "runtime_workspace.ts",
   "runtime.ts",
 ]);
 
@@ -521,9 +526,21 @@ export function createOutputs(
         ""
       )
   );
+  const runtimeProductViewModule = buildJs(transpileTypeScript(sourceDirectory, "runtime_product_view.ts"));
+  const runtimeProductViewClassic = stripModuleExports(runtimeProductViewModule.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*\n/gm, ""));
+  const runtimeProductModule = buildJs(transpileTypeScript(sourceDirectory, "runtime_product.ts"));
+  const runtimeProductClassic = stripModuleExports(runtimeProductModule.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*\n/gm, ""));
+  const runtimeWindowStateModule = buildJs(transpileTypeScript(sourceDirectory, "runtime_window_state.ts"));
+  const runtimeWindowStateClassic = stripModuleExports(runtimeWindowStateModule.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*\n/gm, ""));
+  const runtimeSessionsModule = buildJs(transpileTypeScript(sourceDirectory, "runtime_sessions.ts"));
+  const runtimeSessionsClassic = stripModuleExports(runtimeSessionsModule.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*\n/gm, ""));
+  const runtimeWorkspaceModule = buildJs(transpileTypeScript(sourceDirectory, "runtime_workspace.ts"));
+  const runtimeWorkspaceClassic = stripModuleExports(runtimeWorkspaceModule.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*\n/gm, ""));
   const runtimeModule = transpileTypeScript(sourceDirectory, "runtime.ts");
   const runtimeScript = stripModuleExports(
     runtimeModule
+      .replace(/^import\s*\{[^}]*\}\s*from\s*["']\.\/runtime_(?:product|product_view|window_state|sessions)\.js["'];?\s*\n/gm, "")
+      .replace(/^import\s*\{[^}]*\}\s*from\s*["']\.\/runtime_workspace\.js["'];?\s*\n/m, "")
       .replace(
         /^import\s*\{[\s\S]*?\}\s*from\s*["']\.\/workflow_session_state(?:\.js)?["'];?\s*\n/m,
         ""
@@ -611,6 +628,11 @@ export function createOutputs(
     ["runtime_icons.ts", runtimeIconsClassic],
     ["runtime_navigation.ts", runtimeNavigationClassic],
     ["runtime_collaboration.ts", runtimeCollaborationClassic],
+    ["runtime_product_view.ts", runtimeProductViewClassic],
+    ["runtime_product.ts", runtimeProductClassic],
+    ["runtime_window_state.ts", runtimeWindowStateClassic],
+    ["runtime_sessions.ts", runtimeSessionsClassic],
+    ["runtime_workspace.ts", runtimeWorkspaceClassic],
     ["runtime.ts", runtimeScript],
   ]);
   const runtimeInlined = buildJs(
@@ -689,6 +711,11 @@ export function createOutputs(
     ["runtime_icons.js", runtimeIconsModule],
     ["runtime_navigation.js", runtimeNavigationModule],
     ["runtime_collaboration.js", runtimeCollaborationModule],
+    ["runtime_product_view.js", runtimeProductViewModule],
+    ["runtime_product.js", runtimeProductModule],
+    ["runtime_window_state.js", runtimeWindowStateModule],
+    ["runtime_sessions.js", runtimeSessionsModule],
+    ["runtime_workspace.js", runtimeWorkspaceModule],
     ["admin_controller.js", adminControllerModule],
     ["admin_mutation_controller.js", adminMutationControllerModule],
     ["admin_mutation_view.js", adminMutationViewModule],

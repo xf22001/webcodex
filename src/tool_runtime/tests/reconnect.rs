@@ -899,8 +899,6 @@ fn coding_start_call(project: &str, instruction: &str) -> ToolCall {
         base_ref: None,
         instruction: instruction.to_string(),
         session_id: None,
-        include_project_instructions: true,
-        include_workflow_guidance: true,
         guidance_profile: Default::default(),
         include_extension_catalog: false,
     }
@@ -915,8 +913,6 @@ fn coding_resume_call(project: &str, instruction: &str, session_id: &str) -> Too
         base_ref: None,
         instruction: instruction.to_string(),
         session_id: Some(session_id.to_string()),
-        include_project_instructions: true,
-        include_workflow_guidance: true,
         guidance_profile: Default::default(),
         include_extension_catalog: false,
     }
@@ -1231,7 +1227,9 @@ async fn coding_workflow_read_only_upgrade_is_atomic_and_permission_checked() {
     assert_eq!(upgraded.output["session_id"], session_id);
     assert_eq!(upgraded.output["continuation"], "resumed_explicitly");
     assert_eq!(upgraded.output["instructions"]["status"], "reused");
-    assert_eq!(upgraded.output["instructions"]["content_included"], true);
+    assert!(upgraded.output["instructions"]
+        .get("content_included")
+        .is_none());
     assert!(upgraded.output.get("continuation_feedback").is_none());
     let summary = runtime.sessions.summary(&session_id, Some(20)).unwrap();
     assert!(!summary.guards.deny_write_tools);

@@ -11,7 +11,7 @@ use super::*;
 #[tokio::test]
 async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux_flags() {
     let mut env = crate::test_support::TestEnvGuard::new();
-    env.remove("WEBCODEX_MCP_COMPACT_SCHEMAS");
+    env.set("WEBCODEX_MCP_COMPACT_SCHEMAS", "false");
     let runtime = test_runtime();
     let outcome = handle_mcp_request(
         &runtime,
@@ -43,7 +43,10 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
         "exact git base",
         "fresh workflow session",
         "exact resume",
-        "current model context",
+        "primary result stays compact",
+        "context_request",
+        "project.instructions",
+        "webcodex.workflow",
         "skills",
         "plugin",
         "without bypassing project authority",
@@ -62,6 +65,8 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
     let work_props = work_schema["properties"]
         .as_object()
         .expect("work_on_project MCP properties");
+    assert!(!work_props.contains_key("include_project_instructions"));
+    assert!(!work_props.contains_key("include_workflow_guidance"));
     assert!(
         !work_props.contains_key("role"),
         "work_on_project must not grow a role wire field"
@@ -73,18 +78,21 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
         "mode",
         "base_ref",
         "instruction",
-        "include_project_instructions",
-        "include_workflow_guidance",
         "guidance_profile",
         "include_extension_catalog",
         "session_id",
     ] {
         assert!(work_props.contains_key(field), "MCP schema missing {field}");
     }
-    assert_eq!(work_props["include_project_instructions"]["default"], true);
-    assert_eq!(work_props["include_workflow_guidance"]["default"], true);
     assert_eq!(work_props["guidance_profile"]["default"], "direct");
-    assert_eq!(work_props["guidance_profile"]["enum"], json!(["direct"]));
+    assert_eq!(
+        work_props["guidance_profile"]["enum"],
+        if cfg!(feature = "experimental-code-mode") {
+            json!(["direct", "code_mode"])
+        } else {
+            json!(["direct"])
+        }
+    );
     assert_eq!(work_props["include_extension_catalog"]["default"], true);
     assert_eq!(work_props["mode"]["enum"], json!(["checkout", "worktree"]));
     assert_eq!(work_props["mode"]["default"], "checkout");
@@ -113,14 +121,15 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
         );
     }
 
-    let finish_props = tool("finish_coding_task")["inputSchema"]["properties"]
+    let finish_schema = webcodex_tool_contracts::input_schema_for_tool("finish_coding_task");
+    let finish_props = finish_schema["properties"]
         .as_object()
         .expect("finish_coding_task inputSchema properties");
     assert!(
         finish_props.contains_key("include_workspace"),
         "MCP finish_coding_task schema should expose include_workspace"
     );
-    let finish_required = tool("finish_coding_task")["inputSchema"]["required"]
+    let finish_required = finish_schema["required"]
         .as_array()
         .expect("finish_coding_task required fields");
     assert!(

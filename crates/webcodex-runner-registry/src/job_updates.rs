@@ -36,7 +36,7 @@ use webcodex_core::runner_protocol::{
     ShellJobOpRequest, ShellJobStructuredExecutionMetadata, ShellJobValidationMetadata,
     ShellJobValidationStep, ShellProcessArgv, ShellRunRequest, ShellScriptLanguage,
     ShellScriptPayload, DETACHED_IDEMPOTENCY_KEY_MAX_BYTES, PROCESS_CWD_MAX_BYTES,
-    PROCESS_STDIN_MAX_BYTES, STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
+    PROCESS_STDIN_MAX_BYTES, PROCESS_TIMEOUT_MAX_SECS, STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
     STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS,
 };
 use webcodex_core::runner_skill::RunnerSkillExecutionRequest;
@@ -585,6 +585,7 @@ fn validate_structured_job_common(
     cwd: Option<&str>,
     stdin: Option<&str>,
     timeout_secs: u64,
+    timeout_max_secs: u64,
 ) -> Result<(), String> {
     if let Some(stdin) = stdin {
         if stdin.len() > PROCESS_STDIN_MAX_BYTES {
@@ -606,11 +607,9 @@ fn validate_structured_job_common(
             return Err("cwd cannot contain NUL bytes".to_string());
         }
     }
-    if !(STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS..=STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS)
-        .contains(&timeout_secs)
-    {
+    if !(STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS..=timeout_max_secs).contains(&timeout_secs) {
         return Err(format!(
-            "timeout_secs must be between {STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS} and {STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS}"
+            "timeout_secs must be between {STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS} and {timeout_max_secs}"
         ));
     }
     Ok(())
@@ -782,6 +781,7 @@ impl RunnerRegistry {
                     normalized_job_cwd.as_deref(),
                     structured_stdin.as_deref(),
                     timeout_secs,
+                    PROCESS_TIMEOUT_MAX_SECS,
                 )?;
                 let preview =
                     process_preview(&process.executable, process.args.iter().map(String::as_str));
@@ -803,6 +803,7 @@ impl RunnerRegistry {
                     normalized_job_cwd.as_deref(),
                     structured_stdin.as_deref(),
                     timeout_secs,
+                    PROCESS_TIMEOUT_MAX_SECS,
                 )?;
                 let preview = format!("detached process ({} args)", process.args.len());
                 let safe = ShellJobStructuredExecutionMetadata {
@@ -848,7 +849,12 @@ impl RunnerRegistry {
                 if structured_stdin.is_some() {
                     return Err("Skill resource Job does not accept generic stdin".to_string());
                 }
-                validate_structured_job_common(normalized_job_cwd.as_deref(), None, timeout_secs)?;
+                validate_structured_job_common(
+                    normalized_job_cwd.as_deref(),
+                    None,
+                    timeout_secs,
+                    STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
+                )?;
                 let preview = format!("trusted Skill resource {}", request.path);
                 let safe = ShellJobStructuredExecutionMetadata {
                     execution_source: "run_skill_resource".to_string(),
@@ -1276,13 +1282,30 @@ impl RunnerRegistry {
         ids
     }
 
-    pub async fn promote_hidden_job(&self, job_id: &str) -> Result<ShellJobInfo, String> {
+    /// The sole handoff/recovery visibility transition. Authorization, terminal
+    /// races, cleanup ownership and the observation-token proof are checked
+    /// under the same lock; retrying this transition never dispatches execution.
+    pub async fn promote_hidden_job(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        job_id: &str,
+    ) -> Result<ShellJobInfo, String> {
+        #[cfg(any(test, feature = "root-test-support"))]
+        self.hidden_handoff_failure_for_test(false).await?;
+        validate_id(job_id, "job_id")?;
         let mut inner = self.inner.lock().await;
         refresh_job_status_locked(&mut inner, job_id);
         let job = inner
             .jobs_by_id
-            .get_mut(job_id)
+            .get(job_id)
             .ok_or_else(|| format!("unknown shell job: {job_id}"))?;
+        if !shell_job_visible_to_auth(auth, &inner, job) {
+            return Err(format!("unknown shell job: {job_id}"));
+        }
+        let job = inner
+            .jobs_by_id
+            .get_mut(job_id)
+            .expect("authorized job exists");
         if job.visibility == ShellJobVisibility::CleanupPending {
             return Err(format!("structured job cleanup is pending: {job_id}"));
         }
@@ -1346,6 +1369,8 @@ impl RunnerRegistry {
         job_id: &str,
         tail_lines: Option<usize>,
     ) -> Result<(ShellJobInfo, Option<String>, Option<String>, usize, usize), String> {
+        #[cfg(any(test, feature = "root-test-support"))]
+        self.hidden_handoff_failure_for_test(true).await?;
         validate_id(job_id, "job_id")?;
         let mut inner = self.inner.lock().await;
         refresh_job_status_locked(&mut inner, job_id);

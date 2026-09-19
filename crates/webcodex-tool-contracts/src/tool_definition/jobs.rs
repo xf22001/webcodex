@@ -43,7 +43,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 true,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Run one one-shot executable with structured argv. This is the preferred route for one native executable with literal argv; Windows batch shims use the bounded Runner-owned quoting contract on executable. Use run_shell only when shell semantics or a short tightly related command chain is required. Do not open a persistent shell merely to run several commands: local persistence is only for same-process cwd/env/exports/functions/umask state; repeated commands on one named SSH resource preserve remote state. New persistent SSH targets use ssh_resource onboarding; one-shot/no-persistence SSH remains valid. Long work continues as the same execution and stays Runner-owned. If the native child must outlive the Runner because this Runner will restart, upgrade, stop, or be replaced, use run_detached_process from the start; duration alone is not a reason to detach.",
+            "Run one one-shot executable with structured argv. This is the preferred route for one native executable with literal argv; Windows batch shims use the bounded Runner-owned quoting contract on executable. Use run_shell only when shell semantics or a short tightly related command chain is required. Do not open a persistent shell merely to run several commands: local persistence is only for same-process cwd/env/exports/functions/umask state; repeated commands on one named SSH resource preserve remote state. New persistent SSH targets use ssh_resource onboarding; one-shot/no-persistence SSH remains valid. Long work continues as the same execution and stays Runner-owned; timeout_secs defaults to 60 seconds and the total execution lifetime clamps at 7 days. If the native child must outlive the Runner because this Runner will restart, upgrade, stop, or be replaced, use run_detached_process from the start; duration alone is not a reason to detach.",
         ).with_gpt_action_description("Run one native executable with literal argv; prefer this over shell when shell syntax is unnecessary. Long work continues as the same Job. Use run_detached_process only when the child must survive Runner restart/upgrade.")
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::NativeArgv,
@@ -84,7 +84,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     true,
                     super::ToolSessionEvidencePolicy::NONE,
                 ),
-                "Start a supervisor-owned detached native process as a durable Job when accepted work must outlive the initiating Runner process. Use it from the start when the workflow will restart, upgrade, stop, or replace this Runner and a native child must remain alive across Runner exit or replacement. Duration alone is not a reason to detach: ordinary long work stays Runner-owned. Ownership is handed off before payload start; after restart or upgrade, a replacement Runner can recover the same logical Job only when the supervisor/native identity and lifetime fence reconcile. A bounded replay key prevents duplicate dispatch while retained; expired keys are not retry tokens. Observe or stop with Job tools. No shell, script, SSH-resource, or retry fallback.",
+                "Start a supervisor-owned detached native process as a durable Job when accepted work must outlive the initiating Runner process. Use it from the start when the workflow will restart, upgrade, stop, or replace this Runner and a native child must remain alive across Runner exit or replacement. Duration alone is not a reason to detach: ordinary long work stays Runner-owned. timeout_secs defaults to 60 seconds and the total detached execution lifetime clamps at 7 days. Ownership is handed off before payload start; after restart or upgrade, a replacement Runner can recover the same logical Job only when the supervisor/native identity and lifetime fence reconcile. A bounded replay key prevents duplicate dispatch while retained; expired keys are not retry tokens. Observe or stop with Job tools. No shell, script, SSH-resource, or retry fallback.",
             ).with_gpt_action_description("Start a supervisor-owned native process that must survive Runner restart/upgrade as a durable Job. Requires an idempotency_key; observe/stop with Job tools. Duration alone is not a reason to detach.")
             .with_execution(super::ToolExecutionContract::new(
                 super::ToolExecutionForm::NativeArgv,
@@ -124,7 +124,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             true,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Run bounded sh, bash, PowerShell, JavaScript, or TypeScript as typed Runner-owned script data. JavaScript is Node.js-backed fixed .mjs ESM. TypeScript uses Node native erasable type stripping in .mts ESM, requires Node.js 22.6+, does not type-check, and rejects enum and other transform-required syntax. The Runner owns runtime selection/flags; WebCodex does not install npm dependencies, run tsc, or fall back to Bun/Deno/tsx. Relative ESM imports resolve from the Runner-owned temporary module, not project cwd. Prefer run_process for native argv, run_script for program-like scripts, and run_shell when shell grammar is required. Long work continues as the same execution / same Job and is never restarted; script bodies never become shell command text. If a native child must outlive the Runner across restart/upgrade/stop/replacement, use run_detached_process from the start.",
+        "Run bounded sh, bash, PowerShell, JavaScript, or TypeScript as typed Runner-owned script data. JavaScript is Node.js-backed fixed .mjs ESM. TypeScript uses Node native erasable type stripping in .mts ESM, requires Node.js 22.6+, does not type-check, and rejects enum and other transform-required syntax. The Runner owns runtime selection/flags; WebCodex does not install npm dependencies, run tsc, or fall back to Bun/Deno/tsx. Relative ESM imports resolve from the Runner-owned temporary module, not project cwd. Prefer run_process for native argv, run_script for program-like scripts, and run_shell when shell grammar is required. Long work continues as the same execution / same Job and is never restarted; timeout_secs defaults to 60 seconds and the total script execution lifetime clamps at 7 days; script bodies never become shell command text. If a native child must outlive the Runner across restart/upgrade/stop/replacement, use run_detached_process from the start.",
     )
     .with_execution(super::ToolExecutionContract::new(
         super::ToolExecutionForm::TypedScript,
@@ -312,7 +312,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
         )),
         TOOL_CATEGORY_JOB,
     ),
-    permission_risk(
+    adaptive_runtime_direct(permission_risk(
         model_spec(
             def(
                 "stop_job",
@@ -335,9 +335,9 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolSessionEvidencePolicy::NONE,
             ),
             "Stop one existing WebCodex Job by job_id. Requires confirm=true and preserves project/session ownership; log bodies are not returned.",
-        ),
+        ).with_gpt_action_gateway_only(),
         PERMISSION_RISK_JOB,
-    ),
+    ), 81),
     adaptive_runtime_direct(
         model_spec(
             def(
@@ -365,8 +365,8 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolActivityPresentation::Transport,
                 super::ToolActivityInteraction::Meaningful,
             ),
-            "Continue known Jobs by job_id; do not call list_jobs first. Pass observation_token unchanged as after_observation_token. Observe 1-8 Jobs with bounded deltas and isolated errors. No token gives an immediate baseline; no wait_secs gives an immediate observation. With tokens, bounded wait_secs (max 100) uses wake_on=change by default. Use wait_secs=100,wake_on=terminal when useful progress is blocked on terminal outcome; if independent work remains, keep the exact continuation and observe later—do not poll for visibility. Use terminal when any terminal result unblocks progress; use all_terminal when every Job in a predetermined set is required. Updates do not extend the shared deadline; item errors return immediately. Timeout may include changed=true deltas. reset is bounded recovery. Never launches, retries, stops, or subscribes.",
-        ).with_gpt_action_description("Continue known Jobs by job_id/token. Use wait_secs=100,wake_on=terminal only when progress is blocked on terminal outcome; otherwise retain the exact continuation, continue independent work, and observe later. Tokens are observation cursors, never retry/execution authority."),
+            "Continue known Jobs by job_id; do not call list_jobs first. Pass observation_token unchanged as after_observation_token. No token gives an immediate baseline; no wait_secs gives an immediate observation. With tokens, bounded wait_secs (runtime max 100) uses wake_on=change by default. Prefer the returned continuation; otherwise use wait_secs=55,wake_on=terminal when useful progress is blocked on terminal outcome because longer waits may exceed the Host deadline. If independent work remains, observe later—do not poll for visibility. terminal wakes on any terminal Job; all_terminal waits for all. Updates do not extend the deadline; item errors return immediately. Timeout may include changed=true. Never launches, retries, stops, or subscribes.",
+        ).with_gpt_action_description("Continue known Jobs. Prefer the returned continuation; otherwise use wait_secs=55,wake_on=terminal only when blocked on terminal outcome. Runtime allows up to 100s, but longer waits may exceed the Host deadline. Tokens are cursors, never retry authority."),
         80,
     ),
     adaptive_runtime_direct(
@@ -395,7 +395,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolActivityPresentation::Transport,
                 super::ToolActivityInteraction::Meaningful,
             ),
-            "Arm one caller-owned bounded one-shot terminal attention for one exact existing public job_id. Exact keyed replay returns the same wait. This operation never starts, retries, stops, or replaces the Job; job_id remains execution identity and observation tokens are unrelated cursors. Terminal delivery contains only sparse identity/status/outcome facts, never logs. automatic_resume_available is true only when a real current Host carrier exists. Do not poll this wait; use observe_jobs only when explicit logs/details or recovery are needed.",
+            "Arm one caller-owned bounded one-shot terminal attention for one exact existing public job_id. Exact keyed replay returns the same wait. This operation never starts, retries, stops, or replaces the Job; job_id remains execution identity and observation tokens are unrelated cursors. Terminal delivery contains only sparse identity/status/outcome facts, never logs. automatic_resume_available is true only when a real current Host carrier exists. If an MCP result supplies suggested_call for the Host continuation carrier, use it only while the wait is still waiting, only when no independent work remains, and yield/end the current model turn immediately after presentation; an already-triggered wait already belongs to the current turn and needs no follow-up carrier. Do not poll this wait; use observe_jobs only when explicit logs/details or recovery are needed.",
         ).with_gpt_action_description("Arm durable one-shot attention for an existing Job terminal transition. It never changes Job execution. Do not poll the wait; observe_jobs remains the explicit logs/details recovery tool."),
         79,
     ),
@@ -463,7 +463,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Present one exact caller-owned Job terminal wait as a bounded MCP App continuation card. Requires explicit wait_id, independently re-authorizes the wait and underlying Job visibility, never infers identity from Project, Session, ClientWindow, peer identity, credential, or recent activity, and never changes Job execution or terminal truth.",
+            "Present one exact caller-owned still-waiting Job terminal wait as a bounded MCP App continuation card. Use this only as the final meaningful action when progress is blocked on that terminal transition; after successful presentation, yield/end the current model turn promptly so a later Host follow-up can create a fresh turn. An already-triggered wait should be handled in the current turn instead. Requires explicit wait_id, independently re-authorizes the wait and underlying Job visibility, never infers identity from Project, Session, ClientWindow, peer identity, credential, or recent activity, and never changes Job execution or terminal truth.",
         )
         .with_gpt_action_unsupported(),
         78,

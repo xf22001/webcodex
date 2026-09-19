@@ -15,6 +15,7 @@ use super::files::{
     key_file_schema, path_kind_schema, project_type_schema, scan_schema, suggested_read_schema,
     top_level_entry_schema,
 };
+#[cfg(any(test, feature = "root-test-support"))]
 use webcodex_core::runtime_contract::{
     BUILTIN_CODING_WORKFLOW_CONTRACT, BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS,
     BUILTIN_CODING_WORKFLOW_VERSION,
@@ -140,7 +141,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "presentation",
-                open_object_schema("Optional parser-ready presentation follow-up. Present only when this exact Workflow Session has a startup Git baseline, durable successful first-class Edit evidence, and the current final workspace still differs from that baseline; contains exactly one present_changes suggested_call and is preserved in full and summary_only closeout."),
+                open_object_schema("Optional parser-ready presentation follow-up. Present only when this exact Workflow Session has a startup Git baseline, durable successful first-class Edit evidence, and the current final workspace still differs from that baseline; contains exactly one present_work_result suggested_call and is preserved in full and summary_only closeout."),
             ),
             (
                 "suggested_next_actions",
@@ -436,6 +437,7 @@ fn startup_project_schema() -> Value {
         "properties": {
             "requested": {"type": "string"},
             "resolved_id": {"type": "string"},
+            "project_ref": {"type": "string", "pattern": "^~p[1-9][0-9]*$"},
             "repository_identity": {
                 "type": "string",
                 "pattern": "^repository:v1:[0-9a-f]{64}$",
@@ -493,6 +495,7 @@ fn startup_workspace_schema() -> Value {
     })
 }
 
+#[cfg(any(test, feature = "root-test-support"))]
 fn startup_workflow_schema() -> Value {
     json!({
         "type": "object",
@@ -564,6 +567,7 @@ fn startup_workflow_schema() -> Value {
     })
 }
 
+#[cfg(any(test, feature = "root-test-support"))]
 fn startup_workflow_role_schema() -> Value {
     json!({
         "type": "object",
@@ -585,7 +589,7 @@ fn startup_workflow_role_schema() -> Value {
 fn startup_instructions_schema() -> Value {
     json!({
         "type": "object",
-        "description": "Project-local repository instructions discovered from fixed sources such as AGENTS.md or CLAUDE.md. Separate from the WebCodex built-in workflow.",
+        "description": "Runner-configured instructions followed by project-local repository instructions. Both are model guidance only and are separate from the WebCodex built-in workflow.",
         "properties": {
             "status": {
                 "type": "string",
@@ -593,24 +597,16 @@ fn startup_instructions_schema() -> Value {
             },
             "sources": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": 21,
                 "items": startup_instruction_source_schema(),
-                "description": "Fixed, ordered repository-rule sources."
+                "description": "Deterministic Runner-global sources followed by fixed project-local repository-rule sources."
             },
             "changed_sources": {
                 "type": "array",
                 "uniqueItems": true,
-                "maxItems": 5,
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "AGENTS.md",
-                        "agents.md",
-                        "CLAUDE.md",
-                        ".codex/AGENTS.md",
-                        ".github/copilot-instructions.md"
-                    ]
-                }
+                // Old and new Runner identities (16 + 16), plus five fixed Project sources.
+                "maxItems": 37,
+                "items": instruction_source_path_schema()
             },
             "content_included": {"type": "boolean"},
             "truncated": {"type": "boolean"},
@@ -628,11 +624,10 @@ fn startup_instructions_schema() -> Value {
     })
 }
 
-fn startup_instruction_source_schema() -> Value {
+fn instruction_source_path_schema() -> Value {
     json!({
-        "type": "object",
-        "properties": {
-            "path": {
+        "anyOf": [
+            {
                 "type": "string",
                 "enum": [
                     "AGENTS.md",
@@ -642,6 +637,20 @@ fn startup_instruction_source_schema() -> Value {
                     ".github/copilot-instructions.md"
                 ]
             },
+            {
+                "type": "string",
+                "pattern": "^runner/[0-9]+/[^/\\\\\\u0000]{1,255}$"
+            }
+        ]
+    })
+}
+
+fn startup_instruction_source_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "source_scope": {"type": "string", "enum": ["runner", "project"]},
+            "path": instruction_source_path_schema(),
             "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "truncated": {"type": "boolean"},
             "headings": {
@@ -675,7 +684,7 @@ fn startup_instruction_source_schema() -> Value {
                 ]
             }
         },
-        "required": ["path", "fingerprint", "truncated", "headings", "content", "read_more"],
+        "required": ["source_scope", "path", "fingerprint", "truncated", "headings", "content", "read_more"],
         "additionalProperties": false
     })
 }
@@ -887,7 +896,7 @@ fn startup_semantic_navigation_schema() -> Value {
                     "probe_failed"
                 ]
             },
-            "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means the bounded startup status probe timed out, so availability is intentionally unknown rather than unavailable."),
+            "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means the bounded startup status probe timed out or failed without an availability observation; this is advisory, not unavailability."),
             "provider": nullable_schema("string", "Semantic provider when applicable."),
             "capability": nullable_schema("string", "Bounded advertised capability summary."),
             "reason_code": nullable_schema("string", "Stable semantic-navigation reason.")
@@ -1029,7 +1038,7 @@ fn semantic_navigation_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "supported": schema_type("boolean", "True when the Project is Runner-backed, the owning Runner is connected, and it advertises lsp_read_only_navigation."),
-            "available": nullable_schema("boolean", "Observed semantic-navigation availability. True means supported Rust/Go navigation has an available executable or an existing running/initializing server slot; false is a positive unavailable observation; null means the bounded startup status probe timed out before availability could be observed."),
+            "available": nullable_schema("boolean", "Observed semantic-navigation availability. True means supported Rust/Go navigation has an available executable or an existing running/initializing server slot; false is a positive unavailable observation; null means a bounded startup status probe timed out or failed before availability could be observed; this is advisory, not unavailability."),
             "recommended": schema_type("boolean", "True only for available or running status."),
             "status": {
                 "type": "string",
@@ -1129,7 +1138,7 @@ fn semantic_navigation_schema() -> Value {
 
 fn work_on_project_instruction_source_schema() -> Value {
     let mut schema = startup_instruction_source_schema();
-    schema["required"] = json!(["path", "fingerprint"]);
+    schema["required"] = json!(["source_scope", "path", "fingerprint"]);
     schema
 }
 
@@ -1155,7 +1164,7 @@ fn work_on_project_output_schema() -> Value {
     });
     let compact_instructions = json!({
         "type": "object",
-        "description": "Compact project-local repository instruction projection, separate from the WebCodex built-in workflow. status reports repository/Workflow Session delta; content_included reports this call's caller-explicit model-facing body projection. False/null/empty body-projection defaults are omitted.",
+        "description": "Compact Runner-global plus project-local instruction projection, separate from the WebCodex built-in workflow. status reports Workflow Session delta; content_included reports this call's caller-explicit model-facing body projection. False/null/empty body-projection defaults are omitted.",
         "properties": {
             "status": {
                 "type": "string",
@@ -1163,24 +1172,16 @@ fn work_on_project_output_schema() -> Value {
             },
             "sources": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": 21,
                 "items": work_on_project_instruction_source_schema(),
-                "description": "Fixed, ordered repository-rule sources. path/fingerprint are always present; false/null/empty body-projection defaults are omitted."
+                "description": "Runner-global sources precede project-local sources. source_scope/path/fingerprint are always present; false/null/empty body-projection defaults are omitted."
             },
             "changed_sources": {
                 "type": "array",
                 "uniqueItems": true,
-                "maxItems": 5,
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "AGENTS.md",
-                        "agents.md",
-                        "CLAUDE.md",
-                        ".codex/AGENTS.md",
-                        ".github/copilot-instructions.md"
-                    ]
-                }
+                // Old and new Runner identities (16 + 16), plus five fixed Project sources.
+                "maxItems": 37,
+                "items": instruction_source_path_schema()
             },
             "content_included": {"type": "boolean", "description": "Emitted only when bounded instruction bodies are included for this call; omission means false. This is independent of status=reused."},
             "truncated": {"type": "boolean", "description": "Emitted only when true."},
@@ -1193,7 +1194,7 @@ fn work_on_project_output_schema() -> Value {
         "type": "object",
         "properties": {
             "supported": {"type": "boolean"},
-            "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means the bounded startup status probe timed out, so availability is unknown rather than unavailable."),
+            "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means the bounded startup status probe timed out or failed without an availability observation; this does not lower coding readiness."),
             "status": {
                 "type": "string",
                 "enum": [
@@ -1237,11 +1238,15 @@ fn work_on_project_output_schema() -> Value {
         ),
         (
             "project",
-            schema_type("string", "Canonical runtime project id used for this task. For Runner path input it is the resolved full project id."),
+            schema_type("string", "Project selector used to start or resume this task. For direct Project input this preserves the caller's accepted selector, including a Server-issued project_ref; for Runner path input it is the resolved canonical runtime Project id."),
         ),
         (
             "resolved_project",
             schema_type("string", "Resolved full runtime project id from the permission check and exact project resolution."),
+        ),
+        (
+            "project_ref",
+            schema_type("string", "Server-issued short Project selector scoped to the authenticated caller. Convenience only: every use re-resolves and re-authorizes the canonical Runtime Project."),
         ),
         (
             "project_resolution",
@@ -1295,14 +1300,6 @@ fn work_on_project_output_schema() -> Value {
             {
                 let mut schema = compact_repository;
                 schema["description"] = json!("Unexpected or noteworthy repository-overview state. Omitted for work_on_project's normal intentional no-overview path.");
-                schema
-            },
-        ),
-        (
-            "workflow",
-            {
-                let mut schema = startup_workflow_schema();
-                schema["description"] = json!("Shared coding workflow plus the selected guidance_profile tool strategy (default direct). Included when include_workflow_guidance=true; false omits the entire workflow. Session or transport identity never selects or suppresses guidance.");
                 schema
             },
         ),

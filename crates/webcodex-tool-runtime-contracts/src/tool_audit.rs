@@ -112,6 +112,53 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "text_present": true,
             "text_bytes": text.len(),
         }),
+        BrowserActToolCall::SelectOption {
+            client_id,
+            browser_id,
+            page_id,
+            element_id,
+            option,
+        } => serde_json::json!({
+            "action": "select_option",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+            "element_id": element_id,
+            "option_present": true,
+            "option_bytes": option.len(),
+        }),
+        BrowserActToolCall::SetValue {
+            client_id,
+            browser_id,
+            page_id,
+            element_id,
+            value,
+        } => serde_json::json!({
+            "action": "set_value",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+            "element_id": element_id,
+            "value_present": true,
+            "value_bytes": value.len(),
+        }),
+        BrowserActToolCall::UploadFile {
+            client_id,
+            browser_id,
+            page_id,
+            element_id,
+            project,
+            path,
+        } => serde_json::json!({
+            "action": "upload_file",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+            "element_id": element_id,
+            "project": project,
+            "path_present": true,
+            "path_bytes": path.len(),
+        }),
         BrowserActToolCall::Key {
             client_id,
             browser_id,
@@ -338,6 +385,7 @@ fn typed_goal_request_audit(kind: GoalRequestAudit, arguments: &Value) -> Value 
                         .unwrap_or_default(),
                 ),
             );
+            copy_keys(obj, &mut out, &["controller_agent_id"]);
             out.insert(
                 "idempotency_key_present".to_string(),
                 Value::Bool(obj.get("idempotency_key").and_then(Value::as_str).is_some()),
@@ -349,7 +397,12 @@ fn typed_goal_request_audit(kind: GoalRequestAudit, arguments: &Value) -> Value 
             copy_keys(
                 obj,
                 &mut out,
-                &["goal_id", "expected_revision", "lifecycle"],
+                &[
+                    "goal_id",
+                    "expected_revision",
+                    "controller_agent_id",
+                    "lifecycle",
+                ],
             );
             out.insert(
                 "title_chars".to_string(),
@@ -3577,6 +3630,65 @@ mod browser_privacy_tests {
         assert!(!serialized.contains(text_secret));
         assert!(text.get("text").is_none());
 
+        let option_secret = "PRIVATE_OPTION_SECRET";
+        let option = session_log_arguments_for_tool_request(
+            "browser_act",
+            &json!({
+                "action":"select_option",
+                "client_id":"msi",
+                "browser_id":"browser_abcdefghijklmnop",
+                "page_id":"page_abcdefghijklmnop",
+                "element_id":"element_abcdefghijklmnop",
+                "option":option_secret
+            }),
+        );
+        assert_eq!(option["option_present"], true);
+        assert_eq!(option["option_bytes"], option_secret.len());
+        assert!(!serde_json::to_string(&option)
+            .unwrap()
+            .contains(option_secret));
+        assert!(option.get("option").is_none());
+
+        let value_secret = "PRIVATE_VALUE_SECRET";
+        let value = session_log_arguments_for_tool_request(
+            "browser_act",
+            &json!({
+                "action":"set_value",
+                "client_id":"msi",
+                "browser_id":"browser_abcdefghijklmnop",
+                "page_id":"page_abcdefghijklmnop",
+                "element_id":"element_abcdefghijklmnop",
+                "value":value_secret
+            }),
+        );
+        assert_eq!(value["value_present"], true);
+        assert_eq!(value["value_bytes"], value_secret.len());
+        assert!(!serde_json::to_string(&value)
+            .unwrap()
+            .contains(value_secret));
+        assert!(value.get("value").is_none());
+
+        let private_path = "private/resume-SECRET.pdf";
+        let upload = session_log_arguments_for_tool_request(
+            "browser_act",
+            &json!({
+                "action":"upload_file",
+                "client_id":"msi",
+                "browser_id":"browser_abcdefghijklmnop",
+                "page_id":"page_abcdefghijklmnop",
+                "element_id":"element_abcdefghijklmnop",
+                "project":"agent:msi:resume",
+                "path":private_path
+            }),
+        );
+        assert_eq!(upload["path_present"], true);
+        assert_eq!(upload["path_bytes"], private_path.len());
+        assert_eq!(upload["project"], "agent:msi:resume");
+        assert!(!serde_json::to_string(&upload)
+            .unwrap()
+            .contains(private_path));
+        assert!(upload.get("path").is_none());
+
         let private_url = "https://example.test/path?token=URL_QUERY_SECRET";
         let navigate = session_log_arguments_for_tool_request(
             "browser_act",
@@ -4151,12 +4263,14 @@ impl ToolCallAuditProjection for ToolCall {
             Self::CreateGoal {
                 title,
                 objective,
+                controller_agent_id,
                 idempotency_key,
             } => typed_goal_request_audit(
                 GoalRequestAudit::Create,
                 &serde_json::json!({
                     "title": title,
                     "objective": objective,
+                    "controller_agent_id": controller_agent_id,
                     "idempotency_key": idempotency_key,
                 }),
             ),
@@ -4187,6 +4301,7 @@ impl ToolCallAuditProjection for ToolCall {
                 expected_revision,
                 title,
                 objective,
+                controller_agent_id,
                 lifecycle,
                 terminal_reason,
                 idempotency_key,
@@ -4197,6 +4312,7 @@ impl ToolCallAuditProjection for ToolCall {
                     "expected_revision": expected_revision,
                     "title": title,
                     "objective": objective,
+                    "controller_agent_id": controller_agent_id,
                     "lifecycle": lifecycle,
                     "terminal_reason": terminal_reason,
                     "idempotency_key": idempotency_key,
@@ -4230,12 +4346,16 @@ impl ToolCallAuditProjection for ToolCall {
                 agent_id,
                 endpoint_id,
                 expected_controller_generation,
+                mode,
                 events,
+                goal_id,
                 idempotency_key,
             } => serde_json::json!({
                 "agent_id": agent_id,
                 "endpoint_id": endpoint_id,
                 "expected_controller_generation": expected_controller_generation,
+                "mode": mode.as_str(),
+                "goal_id": goal_id,
                 "event_count": events.len(),
                 "idempotency_key_present": !idempotency_key.is_empty(),
             }),
@@ -4924,6 +5044,21 @@ impl ToolCallAuditProjection for ToolCall {
                 "query_count": queries.len(),
                 "patterns_present": !queries.is_empty(),
             }),
+            Self::SearchAndRead {
+                project,
+                read_before,
+                read_after,
+                max_reads,
+                with_line_numbers,
+                ..
+            } => serde_json::json!({
+                "project": project,
+                "query_present": true,
+                "read_before": read_before,
+                "read_after": read_after,
+                "max_reads": max_reads,
+                "with_line_numbers": with_line_numbers,
+            }),
             Self::LspStatus { project, .. } => serde_json::json!({
                 "project": project,
             }),
@@ -5401,8 +5536,6 @@ impl ToolCallAuditProjection for ToolCall {
                 mode,
                 base_ref,
                 instruction,
-                include_project_instructions,
-                include_workflow_guidance,
                 guidance_profile: _,
                 session_id,
                 include_extension_catalog,
@@ -5414,8 +5547,6 @@ impl ToolCallAuditProjection for ToolCall {
                 "base_ref_present": base_ref.is_some(),
                 "instruction_present": true,
                 "instruction_summary": command_preview(instruction),
-                "include_project_instructions": include_project_instructions,
-                "include_workflow_guidance": include_workflow_guidance,
                 "include_extension_catalog": include_extension_catalog,
                 "session_id": session_id,
             }),
@@ -5452,10 +5583,6 @@ impl ToolCallAuditProjection for ToolCall {
                 session_id,
             }
             | Self::WorkResultState {
-                project,
-                session_id,
-            }
-            | Self::PresentChanges {
                 project,
                 session_id,
             } => serde_json::json!({

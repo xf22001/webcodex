@@ -34,6 +34,7 @@ pub(crate) mod files;
 mod git;
 mod runner_authorization;
 mod runner_config;
+mod runner_instructions;
 #[cfg(test)]
 pub(crate) use git::{framed_clean_show_changes_test_stdout, framed_show_changes_test_block};
 mod git_committed;
@@ -71,6 +72,7 @@ mod runtime;
 mod runtime_info;
 pub(crate) mod runtime_metrics;
 mod script;
+mod search_and_read;
 mod search_project_texts;
 mod semantic_navigation;
 mod session_context;
@@ -92,6 +94,7 @@ mod surface;
 pub(crate) use tool_audit::session_log_result_for_tool as audit_safe_result_for_tool;
 mod validation_events;
 pub(crate) mod validation_profile;
+mod validation_source;
 pub(crate) mod window_activity;
 pub(crate) use webcodex_core::{
     project_instructions, project_listing as file_listing, validation_evidence as validation_parser,
@@ -135,8 +138,8 @@ pub(crate) use tool_definition::{
     RunnerCapabilityRequirement,
 };
 pub use webcodex_tool_contracts::tool_call::{
-    AgentWaitEventSelectorCall, HostFileImportProvenance, ObserveJobsItem, ObserveJobsWakeOn,
-    PluginToolCall, ProjectArtifactAction, ReadFilesItem, SearchPatternMode,
+    AgentWaitEventSelectorCall, AgentWaitModeCall, HostFileImportProvenance, ObserveJobsItem,
+    ObserveJobsWakeOn, PluginToolCall, ProjectArtifactAction, ReadFilesItem, SearchPatternMode,
     SearchProjectTextsQuery, SearchResultMode, SshResourceToolCall, ToolCall,
 };
 pub(crate) use webcodex_tool_contracts::tool_call::{
@@ -164,7 +167,7 @@ pub(crate) use webcodex_tool_runtime_contracts::tool_result::{
 pub(crate) use project_resolution::ProjectResolverErrorKind;
 pub(crate) use project_resolution::{runner_project_runtime_id, ProjectResolverError};
 pub(crate) use registry::{
-    agent_continuation_app_tool_specs, changes_app_tool_specs, goal_plan_app_tool_specs,
+    agent_continuation_app_tool_specs, goal_plan_app_tool_specs,
     job_terminal_continuation_app_tool_specs, registered_tool_specs,
     stateless_operator_extension_tool_specs, work_result_app_tool_specs,
 };

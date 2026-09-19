@@ -56,37 +56,34 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolActivityPresentation::Support,
                 super::ToolActivityInteraction::Meaningful,
             ),
-            "Canonical bootstrap for ordinary coding/review. Use project or client_id+path. Omit session_id for a fresh Workflow Session; it does not imply a fresh model context. Exact resume requires an active accessible Session and never guesses prior Session. Defaults return project instructions, workflow guidance, and Skills/Plugin selection metadata. guidance_profile selects direct (default) or code_mode guidance only; it grants no tools, authority, or Session state. Set include_* false only when current model context retains content; otherwise use defaults for a fresh or uncertain model context. Session/window/transport never proves retention; Runtime re-observes instruction files. Skill bodies require skill_read_file; Plugin calls require plugin_tool describe. Checkout does not require Git; mode=worktree uses an exact Git base for an isolated worktree without bypassing Project authority.",
-        ).with_gpt_action_description("Start or resume exact project work. Use project or client_id+path; omit session_id for a fresh Workflow Session. Defaults return project/workflow/extension context. worktree mode creates an isolated Runner-managed Git worktree without widening authority."),
+            "Canonical bootstrap for ordinary coding/review. Prefer Server-issued project_ref; project or client_id+path and canonical Project ids remain accepted. Omit session_id for a fresh Workflow Session; it does not imply a fresh model context. Exact resume requires an active accessible Session and never guesses prior Session. Runtime re-observes instruction files for change detection and Session metadata; primary result stays compact. For a fresh or uncertain model context, request missing guidance via context_request: project.instructions and/or webcodex.workflow; omission projects neither. guidance_profile selects direct/code_mode model guidance only and grants no authority or Session state. project_ref is durable principal-scoped convenience, not authority; each use reauthorizes the canonical Project. include_extension_catalog controls the bounded Skills/Plugins catalog. Checkout does not require Git; mode=worktree creates an isolated worktree from an exact Git base without bypassing Project authority.",
+        ).with_gpt_action_description("Start/resume exact Project work. Prefer Server-issued project_ref; canonical id or client_id+path also work. Primary output is compact; request missing project.instructions/webcodex.workflow via context_request. worktree creates an isolated managed worktree without widening authority."),
         10,
     ),
-    adaptive_runtime_direct(
-        requires_explicit_business_session(model_spec(
-            def(
-                "finish_coding_task",
-                super::ToolAuditPolicy::TYPED_CANONICAL,
-                ModelVisible,
-                "workflow",
-                Some(GitOrShell),
-                TOOL_PROVIDER_CONTROL,
-                super::ToolSemanticContract {
-                    effect: super::ToolEffect::Observe,
-                    risk: Read,
-                    approval: super::ToolApprovalPolicy::None,
-                    idempotency: super::ToolIdempotency::PureRead,
-                },
-                Some(RUNTIME_READ),
-                true,
-                NoPath,
-                false,
-                false,
-                super::ToolSessionEvidencePolicy::NONE,
-            )
-            .with_activity_kind(super::ToolActivityKind::Review),
-            "Return an optional deterministic evidence snapshot for model review, including workspace, validation, jobs, and recorded tool events. The result is advisory: it does not decide task completion, replace direct diff or test review, or generate the user-facing final report.",
-        )),
-        150,
-    ),
+    requires_explicit_business_session(model_spec(
+        def(
+            "finish_coding_task",
+            super::ToolAuditPolicy::TYPED_CANONICAL,
+            ModelVisible,
+            "workflow",
+            Some(GitOrShell),
+            TOOL_PROVIDER_CONTROL,
+            super::ToolSemanticContract {
+                effect: super::ToolEffect::Observe,
+                risk: Read,
+                approval: super::ToolApprovalPolicy::None,
+                idempotency: super::ToolIdempotency::PureRead,
+            },
+            Some(RUNTIME_READ),
+            true,
+            NoPath,
+            false,
+            false,
+            super::ToolSessionEvidencePolicy::NONE,
+        )
+        .with_activity_kind(super::ToolActivityKind::Review),
+        "Return an optional deterministic evidence snapshot for model review, including workspace, validation, jobs, and recorded tool events. The result is advisory: it does not decide task completion, replace direct diff or test review, or generate the user-facing final report.",
+    )),
     adaptive_runtime_direct(
         requires_explicit_business_session(model_spec(
             def(
@@ -95,38 +92,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     super::ToolAuditResultField::pointer("project", "/work_result/project"),
                     super::ToolAuditResultField::pointer("session_id", "/work_result/session_id"),
                     super::ToolAuditResultField::pointer("state_version", "/work_result/state_version"),
-                    super::ToolAuditResultField::value("error_kind"),
-                ]),
-                ModelVisible,
-                "workflow",
-                Some(GitOrShell),
-                TOOL_PROVIDER_CONTROL,
-                super::ToolSemanticContract {
-                    effect: super::ToolEffect::Observe,
-                    risk: Read,
-                    approval: super::ToolApprovalPolicy::None,
-                    idempotency: super::ToolIdempotency::PureRead,
-                },
-                Some(PROJECT_READ),
-                true,
-                NoPath,
-                false,
-                false,
-                super::ToolSessionEvidencePolicy::NONE,
-            ),
-            "Optionally present one exact coding Workflow Session as a persistent read-only Work Result MCP App card when a user-visible work summary is genuinely useful. Requires explicit project + session_id, creates no work, runs no validation/review, changes no Session lifecycle, and grants no authority. The returned Work Result is the card's initial authoritative snapshot; do not call merely to acknowledge a clean worktree and do not call repeatedly to refresh. Later refresh is user-driven inside the existing card through one exact app-only state read per click. Presentation is UX only, never a correctness requirement; repeated explicit presentation may create another Host card.",
-        ))
-        .with_gpt_action_unsupported(),
-        155,
-    ),
-    adaptive_runtime_direct(
-        requires_explicit_business_session(model_spec(
-            def(
-                "present_changes",
-                super::ToolAuditPolicy::typed_fields(&[
-                    super::ToolAuditResultField::pointer("project", "/changes/project"),
-                    super::ToolAuditResultField::pointer("session_id", "/changes/session_id"),
-                    super::ToolAuditResultField::pointer("snapshot_id", "/changes/snapshot_id"),
+                    super::ToolAuditResultField::pointer("snapshot_id", "/work_result/final_changes/snapshot_id"),
                     super::ToolAuditResultField::value("error_kind"),
                 ]),
                 ModelVisible,
@@ -150,10 +116,10 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolActivityPresentation::Transport,
                 super::ToolActivityInteraction::NonMeaningful,
             ),
-            "Create one final frozen Changes MCP App presentation for the exact coding Workflow Session only when finish_coding_task returned this parser-ready follow-up. Requires exact project + session_id, re-authorizes both independently, creates no work or validation, changes no Session lifecycle, and grants no authority. Repeated explicit calls can create another Host card, so do not call it more than once for the same closeout.",
+            "Optionally present one exact coding Workflow Session as a persistent read-only Work Result MCP App card when a user-visible work summary is genuinely useful. Requires explicit project + session_id, creates no work, runs no validation/review, changes no Session lifecycle, and grants no authority. The initial Work Result includes eligible frozen final changes for lazy in-card diff reads; do not call merely to acknowledge a clean worktree and do not call repeatedly to refresh. User-driven app-only refresh updates live workspace, validation, and review without replacing the card's frozen snapshot. Presentation is UX only, never a correctness requirement; repeated explicit presentation may create another Host card.",
         ))
         .with_gpt_action_unsupported(),
-        156,
+        155,
     ),
     def(
         "work_result_state",

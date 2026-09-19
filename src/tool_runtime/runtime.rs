@@ -119,6 +119,7 @@ pub struct ToolRuntime {
     /// Process-local model-facing handles for exact full-file read snapshots.
     /// Clones share the registry; a Server runtime restart creates a new epoch.
     pub(crate) read_revisions: Arc<super::read_revisions::ReadRevisionRegistry>,
+    pub(crate) validation_sources: Arc<super::validation_source::ValidationSourceRegistry>,
     /// Process-local Project mutation serialization used only by orchestration
     /// frontends. Direct first-class mutations deliberately bypass this registry.
     #[cfg(feature = "experimental-code-mode")]
@@ -128,9 +129,10 @@ pub struct ToolRuntime {
     pub(crate) read_files_deadline: Duration,
     /// One deadline shared by every query in a `search_project_texts` batch.
     pub(crate) search_project_texts_deadline: Duration,
-    /// Internal synchronous wait window for a read-only structured validation
-    /// before it promotes to a Job. Defaults to `SYNC_VALIDATION_WAIT_SECS`;
-    /// tests shrink it so the handoff path can be exercised without sleeping.
+    /// Runtime cap for the effective synchronous grace before a read-only
+    /// structured validation promotes to a Job. Production permits the public
+    /// maximum; the validation budget selects the canonical default or explicit
+    /// caller preference. Tests shrink this cap to exercise handoff without sleeping.
     pub(crate) validation_sync_wait: Duration,
     /// Orders authoritative terminal-Job snapshot acquisition through Session
     /// marker/evidence materialization. Marker eviction interprets absence from
@@ -173,6 +175,9 @@ pub struct ToolRuntime {
     /// the server from the existing webcodex.db handle; Runner-native project
     /// filesystems never own Memory v1 persistence.
     pub(crate) memory_db: Option<Arc<crate::Database>>,
+    /// Durable Server-owned mapping from authenticated caller + short Project ref
+    /// to one exact canonical Project incarnation. It grants no authority.
+    pub(crate) project_reference_db: Option<Arc<crate::Database>>,
     /// Optional Control-owned durable user-domain store. Durable Agent, Conversation,
     /// AgentTask, and Goal state share this Server SQLite handle while remaining
     /// independent tables, lifecycles, and authority domains.
@@ -212,6 +217,9 @@ impl ToolRuntime {
             repository_overview_probe_timeout:
                 super::coding_task::DEFAULT_REPOSITORY_OVERVIEW_PROBE_TIMEOUT,
             read_revisions: Arc::new(super::read_revisions::ReadRevisionRegistry::new()),
+            validation_sources: Arc::new(
+                super::validation_source::ValidationSourceRegistry::default(),
+            ),
             #[cfg(feature = "experimental-code-mode")]
             orchestration_mutation_fences: Arc::new(
                 super::orchestration_host::OrchestrationMutationFenceRegistry::default(),
@@ -219,7 +227,9 @@ impl ToolRuntime {
             read_files_deadline: super::read_files::DEFAULT_READ_FILES_DEADLINE,
             search_project_texts_deadline:
                 super::search_project_texts::DEFAULT_SEARCH_PROJECT_TEXTS_DEADLINE,
-            validation_sync_wait: Duration::from_secs(super::helpers::SYNC_VALIDATION_WAIT_SECS),
+            validation_sync_wait: Duration::from_secs(
+                super::structured_execution::STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS,
+            ),
             validation_terminal_reconciliation: Arc::new(Mutex::new(())),
             #[cfg(test)]
             validation_terminal_reconciliation_test_hook: Arc::new(
@@ -236,6 +246,7 @@ impl ToolRuntime {
             metrics: Arc::new(super::runtime_metrics::TracingRuntimeMetrics),
             window_activity_db: None,
             memory_db: None,
+            project_reference_db: None,
             communication_db: None,
             job_terminal_db: None,
             job_terminal_continuations: None,
@@ -264,6 +275,11 @@ impl ToolRuntime {
 
     pub(crate) fn with_memory_database(mut self, db: Arc<crate::Database>) -> Self {
         self.memory_db = Some(db);
+        self
+    }
+
+    pub(crate) fn with_project_reference_database(mut self, db: Arc<crate::Database>) -> Self {
+        self.project_reference_db = Some(db);
         self
     }
 

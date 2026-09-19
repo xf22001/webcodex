@@ -1,6 +1,9 @@
 use super::super::config::{RunnerPolicy, ShellConfig};
 use super::*;
-use crate::runner_protocol::{RunnerCapabilities, RunnerRequest, RUNNER_PROTOCOL_GENERATION_V2};
+use crate::runner_protocol::{
+    RunnerCapabilities, RunnerEnvelope, RunnerJobUpdateRequest, RunnerRequest,
+    RUNNER_PROTOCOL_GENERATION_V2,
+};
 #[cfg(all(unix, feature = "runner-real-process-tests"))]
 use crate::POLLING_DISPATCH_MAX_IN_FLIGHT;
 use futures_util::{SinkExt, StreamExt};
@@ -10,9 +13,225 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+#[test]
+fn runner_stream_telemetry_is_fail_open() {
+    observe_runtime_metric_fail_open(|| panic!("synthetic metric sink failure"));
+}
+
+#[test]
+fn runner_stream_telemetry_dimensions_are_closed_and_payload_safe() {
+    assert_eq!(
+        [
+            StreamTransport::WebSocket.name(),
+            StreamTransport::Quic.name()
+        ],
+        ["websocket", "quic"]
+    );
+    assert_eq!(
+        [
+            RunnerStreamMetricOutcome::Success.as_str(),
+            RunnerStreamMetricOutcome::Closed.as_str(),
+            RunnerStreamMetricOutcome::Backpressure.as_str(),
+            RunnerStreamMetricOutcome::TransportError.as_str(),
+            RunnerStreamMetricOutcome::Timeout.as_str(),
+        ],
+        [
+            "success",
+            "closed",
+            "backpressure",
+            "transport_error",
+            "timeout"
+        ]
+    );
+    assert_eq!(bounded_stream_envelope_kind("result"), "result");
+    assert_eq!(bounded_stream_envelope_kind("job_update"), "job_update");
+    assert_eq!(
+        bounded_stream_envelope_kind("project_inventory_status"),
+        "project_inventory"
+    );
+    assert_eq!(
+        bounded_stream_envelope_kind("runtime_metadata"),
+        "provider_metadata"
+    );
+    assert_eq!(
+        bounded_stream_envelope_kind("/private/path?token=secret"),
+        "control"
+    );
+}
+
+#[test]
+fn runner_stream_telemetry_failed_outcomes_never_emit_success_latency_samples() {
+    let duration = Some(Duration::from_millis(9));
+    assert_eq!(
+        successful_stream_duration(RunnerStreamMetricOutcome::Success, duration),
+        duration
+    );
+    assert_eq!(
+        successful_stream_duration(RunnerStreamMetricOutcome::Closed, duration),
+        None
+    );
+    assert_eq!(
+        successful_stream_duration(RunnerStreamMetricOutcome::Backpressure, duration),
+        None
+    );
+    assert_eq!(
+        successful_stream_duration(RunnerStreamMetricOutcome::TransportError, duration),
+        None
+    );
+    assert_eq!(
+        successful_stream_duration(RunnerStreamMetricOutcome::Timeout, duration),
+        None
+    );
+}
+
+#[test]
+fn runner_stream_control_admission_preserves_best_effort_full_and_closed_semantics() {
+    for transport in [StreamTransport::WebSocket, StreamTransport::Quic] {
+        let (tx, mut rx) = mpsc::channel(1);
+        assert!(try_send_runner_stream_control(
+            transport,
+            &tx,
+            RunnerEnvelope::Pong { ts: 1 },
+        ));
+        assert!(
+            !try_send_runner_stream_control(transport, &tx, RunnerEnvelope::Pong { ts: 2 },),
+            "a full best-effort control queue must reject immediately"
+        );
+        assert!(matches!(rx.try_recv(), Ok(RunnerEnvelope::Pong { ts: 1 })));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        drop(rx);
+        assert!(
+            !try_send_runner_stream_control(transport, &tx, RunnerEnvelope::Pong { ts: 3 },),
+            "a closed control queue must stay non-blocking and fail"
+        );
+    }
+}
+
+fn test_push_sink(
+    transport: StreamTransport,
+    capacity: usize,
+) -> (RunnerSink, mpsc::Receiver<RunnerEnvelope>) {
+    let (tx, rx) = mpsc::channel(capacity);
+    let sink = match transport {
+        StreamTransport::WebSocket => RunnerSink::WebSocket {
+            tx,
+            client_id: "metric-client".to_string(),
+            runner_instance_id: "metric-instance".to_string(),
+        },
+        StreamTransport::Quic => RunnerSink::Quic {
+            tx,
+            client_id: "metric-client".to_string(),
+            runner_instance_id: "metric-instance".to_string(),
+        },
+    };
+    (sink, rx)
+}
+
+fn test_command_result(duration_ms: Option<u64>) -> CommandResult {
+    CommandResult {
+        exit_code: Some(0),
+        stdout: Some("ok\n".to_string()),
+        stderr: None,
+        duration_ms,
+        error: None,
+    }
+}
+
+fn test_job_update() -> RunnerJobUpdateRequest {
+    RunnerJobUpdateRequest {
+        client_id: "metric-client".to_string(),
+        runner_instance_id: "metric-instance".to_string(),
+        job_id: "metric-job".to_string(),
+        request_id: Some("metric-request".to_string()),
+        update_seq: Some(1),
+        status: "running".to_string(),
+        stdout_chunk: None,
+        stderr_chunk: None,
+        stdout_tail: None,
+        stderr_tail: None,
+        log_snapshot: None,
+        exit_code: None,
+        duration_ms: None,
+        error: None,
+        command_execution_state: None,
+        validation_progress: None,
+        test_count_evidence: None,
+        activity: None,
+        finished: false,
+    }
+}
+
+#[test]
+fn runner_stream_telemetry_websocket_and_quic_share_result_and_job_update_queue_semantics() {
+    for transport in [StreamTransport::WebSocket, StreamTransport::Quic] {
+        let (sink, mut rx) = test_push_sink(transport, 4);
+        assert_eq!(
+            sink.submit_result("result-request".to_string(), test_command_result(Some(4)))
+                .unwrap(),
+            ResultSubmission::Accepted
+        );
+        sink.send_job_update(&test_job_update()).unwrap();
+
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(RunnerEnvelope::Result { .. })
+        ));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(RunnerEnvelope::JobUpdate { .. })
+        ));
+    }
+}
+
+#[test]
+fn runner_stream_telemetry_closed_channel_preserves_transport_closed_result_semantics() {
+    for transport in [StreamTransport::WebSocket, StreamTransport::Quic] {
+        let (sink, rx) = test_push_sink(transport, 1);
+        drop(rx);
+        let error = sink
+            .submit_result("closed-request".to_string(), test_command_result(Some(2)))
+            .expect_err("closed writer channel must reject result submission");
+        assert!(matches!(error, SubmitResultError::TransportClosed(_)));
+    }
+}
+
+#[test]
+fn runner_stream_telemetry_concurrent_results_remain_distinct_on_one_stream_writer_queue() {
+    for transport in [StreamTransport::WebSocket, StreamTransport::Quic] {
+        let (sink, mut rx) = test_push_sink(transport, 4);
+        let left = sink.clone();
+        let right = sink.clone();
+        let left_thread = thread::spawn(move || {
+            left.submit_result("left".to_string(), test_command_result(Some(1)))
+                .unwrap();
+        });
+        let right_thread = thread::spawn(move || {
+            right
+                .submit_result("right".to_string(), test_command_result(Some(1)))
+                .unwrap();
+        });
+        left_thread.join().unwrap();
+        right_thread.join().unwrap();
+
+        let mut request_ids = Vec::new();
+        for _ in 0..2 {
+            let Some(RunnerEnvelope::Result { payload }) = rx.blocking_recv() else {
+                panic!("expected Result envelope");
+            };
+            request_ids.push(payload.result.request_id);
+        }
+        request_ids.sort();
+        assert_eq!(request_ids, ["left", "right"]);
+    }
+}
 
 fn test_runner_config(server_url: String) -> RunnerConfig {
     RunnerConfig {
@@ -43,6 +262,7 @@ fn test_runner_config(server_url: String) -> RunnerConfig {
         quic: None,
         shell: ShellConfig::default(),
         skills: super::super::config::SkillsConfig::default(),
+        instructions: super::super::config::InstructionsConfig::default(),
         ssh: Default::default(),
         tool_providers: Default::default(),
         mcp_gateway: Default::default(),
@@ -811,7 +1031,10 @@ fn polling_job_request(
     let mut request = polling_shell_request(request_id, cwd, command);
     request.kind = "start_job".to_string();
     request.job_id = Some(job_id.to_string());
-    request.job_context = Some(crate::test_job_context(cwd, Vec::new()));
+    request.job_context = Some(crate::webcodex_runner::job_manager::test_job_context(
+        cwd,
+        Vec::new(),
+    ));
     request
 }
 
@@ -3299,7 +3522,10 @@ fn start_job_request(cwd: &Path, command: &str) -> RunnerRequest {
         created_at: 0,
         validation: None,
         lsp: None,
-        job_context: Some(crate::test_job_context(cwd, Vec::new())),
+        job_context: Some(crate::webcodex_runner::job_manager::test_job_context(
+            cwd,
+            Vec::new(),
+        )),
         mcp_gateway: None,
         plugin_gateway: None,
         coding_agent: None,
@@ -4967,7 +5193,7 @@ async fn websocket_proxy_connect_rejects_non_success_without_leaking_secrets() {
 
 #[tokio::test]
 async fn websocket_proxy_connect_response_header_is_bounded_and_redacted() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let proxy_secret = "PROXY_RESPONSE_SECRET_DO_NOT_LEAK";
     let server_token = "SERVER_TOKEN_DO_NOT_LEAK";
@@ -4978,11 +5204,15 @@ async fn websocket_proxy_connect_response_header_is_bounded_and_redacted() {
         let connect = read_async_http_headers(&mut stream).await;
         assert!(!connect.contains(server_token), "{connect}");
         let mut response = format!("HTTP/1.1 200 OK\r\nX-Secret: {proxy_secret}\r\n").into_bytes();
-        response.extend(std::iter::repeat_n(
-            b'x',
-            WS_PROXY_CONNECT_HEADER_MAX_BYTES + 1024,
-        ));
-        let _ = stream.write_all(&response).await;
+        assert!(response.len() < WS_PROXY_CONNECT_HEADER_MAX_BYTES);
+        response.resize(WS_PROXY_CONNECT_HEADER_MAX_BYTES, b'x');
+        stream.write_all(&response).await.unwrap();
+        stream.flush().await.unwrap();
+        // Keep the synthetic proxy alive until the client consumes the bounded
+        // header prefix and closes. Dropping immediately can surface a Windows
+        // connection-reset error before the client observes the size fence.
+        let mut byte = [0u8; 1];
+        let _ = stream.read(&mut byte).await;
     });
 
     let ws_url = "ws://127.0.0.1:9/api/agents/ws";

@@ -108,6 +108,23 @@ fn work_result_projection_is_sparse_bounded_and_honest() {
 }
 
 #[test]
+fn work_result_preserves_unproven_source_without_hiding_historical_execution_success() {
+    let projected = build_work_result_projection(
+        "agent:special:demo",
+        "wc_sess_0123456789abcdef",
+        true,
+        &json!({"git_available":true,"clean":true}),
+        &validation("passed", "passed", 1, 0),
+        &current_validation("unproven", 0, 0),
+        &review(0),
+        false,
+    );
+    assert_eq!(projected["validation"]["status"], "passed");
+    assert_eq!(projected["validation"]["successes"], 1);
+    assert_eq!(projected["validation"]["current_status"], "unproven");
+}
+
+#[test]
 fn work_result_state_version_matches_buffered_projection_hash() {
     let projection = build_work_result_projection(
         "agent:special:项目-🦀",
@@ -217,7 +234,7 @@ fn work_result_projection_marks_bounded_history_partial_without_inventing_absenc
     assert_eq!(partial["review"]["history_partial"], true);
     assert_eq!(partial["review"]["total"], 0);
 
-    for current in ["passed", "failed", "stale"] {
+    for current in ["unproven", "failed", "stale"] {
         let projected = build_work_result_projection(
             "agent:special:demo",
             &session_id,
@@ -388,6 +405,144 @@ async fn work_result_state_reauthorizes_exact_identity_and_refresh_does_not_reco
 }
 
 #[tokio::test]
+async fn work_result_refresh_reobserves_validation_source_staleness_without_recording() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    commit_file(tmp.path(), "README.md", "hello\n", "initial");
+    let runtime = test_runtime();
+    let project =
+        register_runner_project_at_path(&runtime, "work-result-source", "demo", tmp.path()).await;
+    let auth = auth_context(None, true);
+    let session = runtime.sessions.start_session(
+        Some(project.clone()),
+        Some("Work Result source refresh".to_string()),
+    );
+
+    let start_fence = runtime
+        .validation_sources
+        .capture(&project)
+        .expect("source fence");
+    let initial_source = runtime
+        .validation_sources
+        .observe(&project, Some(&start_fence));
+    assert_eq!(
+        initial_source.freshness,
+        webcodex_core::validation_source::ValidationFreshness::Unproven
+    );
+    assert_eq!(
+        initial_source.observed_mutation_fence,
+        webcodex_core::validation_source::ObservedMutationFence::Uncrossed
+    );
+
+    let started = runtime.sessions.record_tool_call_started_with_options(
+        Some(&session.session_id),
+        crate::tool_runtime::sessions::SessionTransport::Api,
+        "cargo_check",
+        &json!({"project": "demo"}),
+        Some(project.clone()),
+        crate::tool_runtime::sessions::session_tool_contract("cargo_check"),
+    );
+    runtime.sessions.record_tool_call_finished(
+        started,
+        true,
+        &json!({
+            "terminal": true,
+            "command_started": true,
+            "command_completed": true,
+            "execution_state": "completed",
+            "exit_code": 0,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "source_state": initial_source,
+        }),
+        None,
+        None,
+    );
+
+    let before = runtime.sessions.summary(&session.session_id, None).unwrap();
+    let persisted_finished = before
+        .events
+        .iter()
+        .find(|event| event.kind == "tool_call_finished" && event.tool_name == "cargo_check")
+        .expect("persisted validation finish");
+    assert_eq!(
+        persisted_finished.resolved_project.as_deref(),
+        Some(project.as_str())
+    );
+    assert_eq!(
+        persisted_finished
+            .validation_output_summary
+            .as_ref()
+            .and_then(|value| value.pointer("/source_state/start_fence/epoch"))
+            .and_then(Value::as_str),
+        Some(start_fence.epoch.as_str())
+    );
+    let initial = refresh_once(
+        &runtime,
+        "work-result-source",
+        &project,
+        &session.session_id,
+        &auth,
+    )
+    .await;
+    assert!(initial.success, "{:?}", initial.error);
+    assert_eq!(
+        initial.output["work_result"]["validation"]["current_status"],
+        "unproven"
+    );
+
+    let mutation = runtime
+        .validation_sources
+        .begin(&project)
+        .expect("mutation observation");
+    mutation.finish(&ToolResult::ok(json!({
+        "execution_state": "completed",
+        "state_changed": true,
+    })));
+
+    let mut reobserved_events = before.events.clone();
+    runtime.refresh_validation_source_states(&mut reobserved_events);
+    let reobserved = reobserved_events
+        .iter()
+        .find(|event| event.kind == "tool_call_finished" && event.tool_name == "cargo_check")
+        .and_then(|event| event.validation_output_summary.as_ref())
+        .and_then(|value| value.get("source_state"))
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<webcodex_core::validation_source::ValidationSourceState>(value)
+                .ok()
+        })
+        .expect("reobserved source state");
+    assert_eq!(
+        reobserved.freshness,
+        webcodex_core::validation_source::ValidationFreshness::Stale
+    );
+
+    let stale = refresh_once(
+        &runtime,
+        "work-result-source",
+        &project,
+        &session.session_id,
+        &auth,
+    )
+    .await;
+    assert!(stale.success, "{:?}", stale.error);
+    assert_eq!(
+        stale.output["work_result"]["validation"]["current_status"],
+        "stale"
+    );
+    assert_eq!(
+        stale.output["work_result"]["validation"]["reason"],
+        "validation_source_fence_crossed"
+    );
+
+    let after = runtime.sessions.summary(&session.session_id, None).unwrap();
+    assert_eq!(after.events_total, before.events_total);
+    assert_eq!(after.events.len(), before.events.len());
+    assert_eq!(after.updated_at, before.updated_at);
+}
+
+#[tokio::test]
 async fn work_result_state_marks_truncated_session_evidence_partial_without_recording_refresh() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
@@ -487,6 +642,16 @@ async fn work_result_state_fails_closed_for_foreign_session_authority() {
 
 #[test]
 fn work_result_tool_contract_requires_exact_project_and_session() {
+    assert!(
+        ToolCall::from_tool_name(
+            "present_changes",
+            json!({
+                "project": "agent:x:y", "session_id": format!("wc_sess_{}", "1".repeat(32))
+            })
+        )
+        .is_err(),
+        "the retired presentation must not parse as a compatibility alias"
+    );
     for name in ["present_work_result", "work_result_state"] {
         assert!(ToolCall::from_tool_name(name, json!({"project": "agent:x:y"})).is_err());
         assert!(ToolCall::from_tool_name(
@@ -505,3 +670,6 @@ fn work_result_tool_contract_requires_exact_project_and_session() {
         assert_eq!(call.tool_name(), name);
     }
 }
+
+#[path = "work_result/frozen_changes.rs"]
+mod frozen_changes;

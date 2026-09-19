@@ -100,9 +100,8 @@ struct CodingStartupOptions {
     tool_name: &'static str,
     detail: StartupDetail,
     include_repository_overview: bool,
-    include_project_instructions: bool,
+    include_instruction_content: bool,
     include_extension_catalog: bool,
-    include_reused_instruction_content: bool,
 }
 
 impl CodingStartupOptions {
@@ -113,14 +112,12 @@ impl CodingStartupOptions {
             detail,
             tool_name: "work_on_project",
             include_repository_overview: true,
-            include_project_instructions: true,
+            include_instruction_content: true,
             include_extension_catalog: false,
-            include_reused_instruction_content: false,
         }
     }
 
     fn work_on_project(
-        include_project_instructions: bool,
         include_extension_catalog: bool,
         guidance_profile: CodingGuidanceProfile,
     ) -> Self {
@@ -129,9 +126,8 @@ impl CodingStartupOptions {
             detail: StartupDetail::Standard,
             tool_name: "work_on_project",
             include_repository_overview: false,
-            include_project_instructions,
+            include_instruction_content: false,
             include_extension_catalog,
-            include_reused_instruction_content: include_project_instructions,
         }
     }
 }
@@ -813,7 +809,7 @@ impl ToolRuntime {
                 let (semantic_navigation, project_instructions, repository_overview, extensions) =
                     futures_util::future::join4(
                         self.probe_semantic_navigation_for_startup(&resolved),
-                        self.load_coding_project_instructions(&resolved.config),
+                        self.load_effective_coding_instructions(&resolved, auth),
                         self.repository_overview_for_startup(&resolved, auth),
                         extension_discovery,
                     )
@@ -828,7 +824,7 @@ impl ToolRuntime {
                 let (semantic_navigation, project_instructions, extensions) =
                     futures_util::future::join3(
                         self.probe_semantic_navigation_for_startup(&resolved),
-                        self.load_coding_project_instructions(&resolved.config),
+                        self.load_effective_coding_instructions(&resolved, auth),
                         extension_discovery,
                     )
                     .await;
@@ -842,7 +838,7 @@ impl ToolRuntime {
         let semantic_navigation = serde_json::to_value(semantic_navigation).unwrap_or_else(|_| {
             json!({
                 "supported": false,
-                "available": false,
+                "available": Value::Null,
                 "status": "probe_failed",
                 "reason_code": "status_probe_failed",
             })
@@ -1067,6 +1063,10 @@ impl ToolRuntime {
                 );
             }
         };
+        let project_instructions = session_outcome
+            .project_instructions
+            .as_ref()
+            .unwrap_or(&project_instructions);
         let session_summary = &session_outcome.summary;
         let mut connection_state = runtime_status
             .get("connection_layers")
@@ -1159,7 +1159,7 @@ impl ToolRuntime {
             "runtime_status": runtime_status.clone(),
             "connection_state": connection_state,
             "authority": authority_profile_payload(),
-            "rules": rules_summary(Some(&project_instructions)),
+            "rules": rules_summary(Some(project_instructions)),
             "git": git.clone(),
             "semantic_navigation": semantic_navigation.clone(),
             "recommended_flow": recommended_flow,
@@ -1185,10 +1185,9 @@ impl ToolRuntime {
         // Reload rule bodies only when there is no prior snapshot to compare
         // against (fresh session, or a session whose rules were never
         // persisted, e.g. restored after a restart). Otherwise the shared
-        // brief compares fingerprints and reports reused/changed. Whether a
-        // reused body is projected is intentionally separate: diagnostic test
-        // projections stay incremental, while work_on_project follows
-        // its caller-explicit include_project_instructions preference.
+        // brief compares fingerprints and reports reused/changed. Diagnostic
+        // projections may include current/changed bodies; work_on_project keeps
+        // bodies out of its primary result and uses context_request when needed.
         let force_instruction_load = previous_instructions.is_none();
         let canonical_repository_root_matches = if resume_requested {
             None
@@ -1201,22 +1200,23 @@ impl ToolRuntime {
             .await;
         let project_resolution_value =
             serde_json::to_value(&project_resolution).unwrap_or_else(|_| json!({}));
+        let project_ref = self.project_reference_for_resolved(&resolved, auth);
         let startup_brief = build_startup_brief(StartupBriefInput {
             guidance_profile: startup.guidance_profile,
             detail,
             requested_project: &project,
             project_resolution: &project_resolution_value,
             resolved: &resolved,
+            project_ref: project_ref.as_deref(),
             knowledge_association: knowledge_association.as_ref(),
             session: session_summary,
             continuation_kind,
             reused: session_outcome.reused,
             resume_requested,
-            instructions: &project_instructions,
+            instructions: project_instructions,
             previous_instructions,
             force_instruction_load,
-            include_project_instructions: startup.include_project_instructions,
-            include_reused_instruction_content: startup.include_reused_instruction_content,
+            include_instruction_content: startup.include_instruction_content,
             extensions: extensions.as_ref(),
             git: &git,
             semantic_navigation: &semantic_navigation,
@@ -1333,8 +1333,6 @@ impl ToolRuntime {
         base_ref: Option<String>,
         instruction: String,
         session_id: Option<String>,
-        include_project_instructions: bool,
-        include_workflow_guidance: bool,
         guidance_profile: CodingGuidanceProfile,
         include_extension_catalog: bool,
         auth: Option<&AuthContext>,
@@ -1436,11 +1434,7 @@ impl ToolRuntime {
                 SessionMode::Normal,
                 false,
                 false,
-                CodingStartupOptions::work_on_project(
-                    include_project_instructions,
-                    include_extension_catalog,
-                    guidance_profile,
-                ),
+                CodingStartupOptions::work_on_project(include_extension_catalog, guidance_profile),
                 session_id.clone(),
                 None,
                 auth,
@@ -1464,10 +1458,9 @@ impl ToolRuntime {
         } else {
             project
         };
-        project_work_on_project_output_with_workflow_inner(
+        project_work_on_project_output_inner(
             projected_project,
             result.output,
-            include_workflow_guidance,
             guidance_profile,
             Some(correlation),
         )
@@ -1666,13 +1659,13 @@ impl ToolRuntime {
             .sessions
             .summary(&session_id, Some(FINISH_SESSION_EVENT_LIMIT))
             .unwrap_or(closeout_pre_validation_summary);
-        let changes_presentation = match self
+        let work_result_presentation = match self
             .final_changes_presentation_needed(&resolved.resolved_id, &closeout_session_summary)
             .await
         {
             Ok(true) => Some(json!({
                 "suggested_call": {
-                    "tool": "present_changes",
+                    "tool": "present_work_result",
                     "arguments": {
                         "project": resolved.resolved_id.clone(),
                         "session_id": session_id.clone(),
@@ -1682,15 +1675,18 @@ impl ToolRuntime {
             Ok(false) => None,
             Err(message) => {
                 final_warnings.push(json!({
-                    "kind": "changes_presentation_probe_failed",
+                    "kind": "work_result_presentation_probe_failed",
                     "message": message,
                 }));
                 None
             }
         };
-        let review_evidence = review_evidence_summary_for_session(&closeout_session_summary);
+        let projection_closeout_session_summary =
+            self.refresh_validation_source_summary(&closeout_session_summary);
+        let review_evidence =
+            review_evidence_summary_for_session(&projection_closeout_session_summary);
         let (work_performed, changed_paths) =
-            closeout_work_projection(&closeout_session_summary.events);
+            closeout_work_projection(&projection_closeout_session_summary.events);
 
         // Continuation feedback reuses the same attempt summary and validation
         // delta projections as start/handoff. It is a read-only projection over
@@ -1705,18 +1701,21 @@ impl ToolRuntime {
         };
         let continuation_current_validation =
             super::validation_events::current_validation_evidence_for_session(
-                &closeout_session_summary,
+                &projection_closeout_session_summary,
                 20,
             );
         let raw_tool_failures =
-            tool_failure_summary_from_events(&closeout_session_summary.events, 10);
-        let reconciliation =
-            reconcile_closeout_evidence(&raw_tool_failures, &closeout_session_summary, &validation);
+            tool_failure_summary_from_events(&projection_closeout_session_summary.events, 10);
+        let reconciliation = reconcile_closeout_evidence(
+            &raw_tool_failures,
+            &projection_closeout_session_summary,
+            &validation,
+        );
         let continuation_feedback = if closeout_session_summary.events.is_empty() {
             not_applicable_continuation_feedback_value("empty_session")
         } else {
             continuation_feedback_value(ContinuationFeedbackInput {
-                session_summary: &closeout_session_summary,
+                session_summary: &projection_closeout_session_summary,
                 validation: &continuation_validation,
                 jobs: &jobs,
                 discussion: &discussion,
@@ -1763,12 +1762,12 @@ impl ToolRuntime {
             "llm_summary": false,
             "final_warnings": final_warnings,
         });
-        if let Some(presentation) = changes_presentation {
+        if let Some(presentation) = work_result_presentation {
             output["presentation"] = presentation;
         }
         output["suggested_next_actions"] = json!(finish_suggested_next_actions(&output));
         output["handoff_brief"] = build_handoff_brief(HandoffBriefInput {
-            session_summary: &closeout_session_summary,
+            session_summary: &projection_closeout_session_summary,
             continuation_feedback: output.get("continuation_feedback").unwrap_or(&Value::Null),
             workspace_requested: include_workspace,
             workspace: output.get("workspace"),
@@ -1800,11 +1799,11 @@ impl ToolRuntime {
 
     /// Build the bounded continuation feedback projection for coding startup.
     ///
-    /// Pure read-only: validation is derived from the session ledger only
-    /// (`validation_summary_from_events`, no job-status enrichment), jobs come
-    /// from the bounded `active_jobs_summary` metadata, and guidance is read
-    /// from the message board without marking anything read or resolved. No
-    /// shell, no file reads, no Runner requests, no ledger mutation.
+    /// Pure read-only: validation is derived from the session ledger plus
+    /// process-local source-fence re-observation (no Job-status enrichment), jobs
+    /// come from the bounded `active_jobs_summary` metadata, and guidance is read
+    /// from the message board without marking anything read or resolved. No shell,
+    /// file reads, Runner requests, or ledger mutation.
     async fn startup_continuation_feedback(
         &self,
         summary: &sessions::SessionSummary,
@@ -1828,20 +1827,21 @@ impl ToolRuntime {
         if projection_summary.events.is_empty() {
             return not_applicable_continuation_feedback_value("empty_session");
         }
+        let projection_summary = self.refresh_validation_source_summary(projection_summary);
         let validation = super::validation_events::validation_summary_from_events(
             &projection_summary.events,
             20,
         );
         let current_validation = super::validation_events::current_validation_evidence_for_session(
-            projection_summary,
+            &projection_summary,
             20,
         );
         let raw_tool_failures = tool_failure_summary_from_events(&projection_summary.events, 10);
         let reconciliation =
-            reconcile_closeout_evidence(&raw_tool_failures, projection_summary, &validation);
+            reconcile_closeout_evidence(&raw_tool_failures, &projection_summary, &validation);
         let (discussion, _) = self.discussion_snapshot(&summary.session_id);
         continuation_feedback_value(ContinuationFeedbackInput {
-            session_summary: projection_summary,
+            session_summary: &projection_summary,
             validation: &validation,
             jobs,
             discussion: &discussion,
@@ -2263,6 +2263,8 @@ struct WorkOnProjectSessionProjection {
 struct WorkOnProjectProjectProjection {
     resolved_id: String,
     #[serde(default)]
+    project_ref: Option<String>,
+    #[serde(default)]
     knowledge_association: Option<Value>,
 }
 
@@ -2316,6 +2318,7 @@ struct WorkOnProjectInstructionsProjection {
 
 #[derive(Deserialize, Serialize)]
 struct WorkOnProjectInstructionSourceProjection {
+    source_scope: String,
     path: String,
     fingerprint: String,
     truncated: bool,
@@ -2353,6 +2356,7 @@ fn sparse_work_on_project_instruction_source(
     source: WorkOnProjectInstructionSourceProjection,
 ) -> Value {
     let WorkOnProjectInstructionSourceProjection {
+        source_scope,
         path,
         fingerprint,
         truncated,
@@ -2361,6 +2365,7 @@ fn sparse_work_on_project_instruction_source(
         read_more,
     } = source;
     let mut projected = json!({
+        "source_scope": source_scope,
         "path": path,
         "fingerprint": fingerprint,
     });
@@ -2454,22 +2459,7 @@ fn is_default_work_on_project_repository(repository: &Value) -> bool {
 /// Session state, so protocol drift fails closed with `state_changed=true`.
 #[cfg(test)]
 pub(crate) fn project_work_on_project_output(project: String, output: Value) -> ToolResult {
-    project_work_on_project_output_with_workflow(project, output, true)
-}
-
-#[cfg(test)]
-pub(crate) fn project_work_on_project_output_with_workflow(
-    project: String,
-    output: Value,
-    include_workflow_guidance: bool,
-) -> ToolResult {
-    project_work_on_project_output_with_workflow_inner(
-        project,
-        output,
-        include_workflow_guidance,
-        CodingGuidanceProfile::Direct,
-        None,
-    )
+    project_work_on_project_output_inner(project, output, CodingGuidanceProfile::Direct, None)
 }
 
 #[cfg(test)]
@@ -2478,19 +2468,17 @@ pub(crate) fn project_work_on_project_output_with_correlation_for_test(
     output: Value,
     correlation: &mut ToolCallCorrelation,
 ) -> ToolResult {
-    project_work_on_project_output_with_workflow_inner(
+    project_work_on_project_output_inner(
         project,
         output,
-        true,
         CodingGuidanceProfile::Direct,
         Some(correlation),
     )
 }
 
-fn project_work_on_project_output_with_workflow_inner(
+fn project_work_on_project_output_inner(
     project: String,
     output: Value,
-    include_workflow_guidance: bool,
     guidance_profile: CodingGuidanceProfile,
     correlation: Option<&mut ToolCallCorrelation>,
 ) -> ToolResult {
@@ -2555,10 +2543,13 @@ fn project_work_on_project_output_with_workflow_inner(
             None,
         );
     }
-    if projection.instructions.sources.len() > 5 {
+    if projection.instructions.sources.len()
+        > webcodex_core::runner_instruction::RUNNER_INSTRUCTION_RESPONSE_MAX_FILES
+            + super::project_instructions::INSTRUCTION_CANDIDATE_PATHS.len()
+    {
         return work_on_project_projection_failed(
             "instructions.sources",
-            "at most 5 source objects",
+            "at most 21 source objects",
             "invalid array contents",
             None,
         );
@@ -2648,11 +2639,11 @@ fn project_work_on_project_output_with_workflow_inner(
     if let Some(knowledge_association) = projection.project.knowledge_association {
         result.output["knowledge_association"] = knowledge_association;
     }
+    if let Some(project_ref) = projection.project.project_ref {
+        result.output["project_ref"] = json!(project_ref);
+    }
     if let Some(extensions) = projection.extensions {
         result.output["extensions"] = extensions;
-    }
-    if include_workflow_guidance {
-        result.output["workflow"] = projection.workflow;
     }
     if !project_resolution_is_default {
         let mut project_resolution = json!(projection.project_resolution);

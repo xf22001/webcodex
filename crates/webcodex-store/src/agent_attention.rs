@@ -1,4 +1,5 @@
 use super::agent_task::AgentTaskState;
+use super::agent_wait::goal_scoped_wait_owns_terminal_attention_in_transaction;
 use super::agent_wake::{AGENT_WAKE_ID_PREFIX, WAKE_TRIGGER_ATTENTION_EVENT};
 use super::communication::{
     allocate_identity, store_error, CommunicationPrincipal, CommunicationStoreError,
@@ -60,10 +61,10 @@ pub(super) fn create_agent_task_terminal_attention_in_transaction(
     principal: &CommunicationPrincipal,
     task_id: &str,
     task_attempt_id: &str,
-    target_agent_id: &str,
+    fallback_worker_agent_id: &str,
     terminal_task_state: AgentTaskState,
     now: i64,
-) -> Result<usize, CommunicationStoreError> {
+) -> Result<(usize, Vec<String>), CommunicationStoreError> {
     if !terminal_task_state.terminal() {
         return Err(CommunicationStoreError::new(
             "agent_attention_event_invariant",
@@ -71,10 +72,10 @@ pub(super) fn create_agent_task_terminal_attention_in_transaction(
         ));
     }
 
-    let goal_ids = {
+    let goal_routes = {
         let mut statement = transaction
             .prepare(
-                "SELECT g.goal_id
+                "SELECT g.goal_id, g.controller_agent_id
                  FROM wc_goal_correlations c
                  JOIN wc_goals g ON g.goal_id = c.goal_id
                  WHERE c.kind = 'agent_task' AND c.reference_id = ?1
@@ -92,12 +93,12 @@ pub(super) fn create_agent_task_terminal_attention_in_transaction(
                     principal.digest,
                     MAX_GOAL_CORRELATIONS + 1,
                 ],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .map_err(store_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(store_error)?
     };
-    if goal_ids.len() as i64 > MAX_GOAL_CORRELATIONS {
+    if goal_routes.len() as i64 > MAX_GOAL_CORRELATIONS {
         return Err(CommunicationStoreError::new(
             "agent_attention_goal_capacity_exceeded",
             format!(
@@ -106,7 +107,27 @@ pub(super) fn create_agent_task_terminal_attention_in_transaction(
         ));
     }
 
-    for goal_id in &goal_ids {
+    let mut schedule_agent_ids = Vec::new();
+    let mut attention_event_count = 0usize;
+    for (goal_id, controller_agent_id) in &goal_routes {
+        if goal_scoped_wait_owns_terminal_attention_in_transaction(
+            transaction,
+            principal,
+            goal_id,
+            task_id,
+        )? {
+            continue;
+        }
+        let target_agent_id = controller_agent_id
+            .as_deref()
+            .unwrap_or(fallback_worker_agent_id);
+        require_owned_attention_target(transaction, principal, target_agent_id)?;
+        if !schedule_agent_ids
+            .iter()
+            .any(|agent_id| agent_id == target_agent_id)
+        {
+            schedule_agent_ids.push(target_agent_id.to_string());
+        }
         let event_id = allocate_identity(
             &transaction,
             AGENT_ATTENTION_EVENT_ID_PREFIX,
@@ -163,8 +184,33 @@ pub(super) fn create_agent_task_terminal_attention_in_transaction(
                 ],
             )
             .map_err(store_error)?;
+        attention_event_count += 1;
     }
-    Ok(goal_ids.len())
+    Ok((attention_event_count, schedule_agent_ids))
+}
+
+fn require_owned_attention_target(
+    conn: &Connection,
+    principal: &CommunicationPrincipal,
+    agent_id: &str,
+) -> Result<(), CommunicationStoreError> {
+    let owned = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM wc_agent_identities
+                WHERE agent_id = ?1 AND owner_principal_kind = ?2 AND owner_principal_digest = ?3
+             )",
+            params![agent_id, principal.kind, principal.digest],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(store_error)?;
+    if !owned {
+        return Err(CommunicationStoreError::new(
+            "agent_attention_target_invariant",
+            "Goal attention target is missing or unauthorized",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn require_agent_attention_event_for_wake(
@@ -195,7 +241,13 @@ pub(crate) fn require_agent_attention_event_for_wake(
                AND g.owner_principal_kind = ?2 AND g.owner_principal_digest = ?3
                AND t.owner_principal_kind = ?2 AND t.owner_principal_digest = ?3
                AND e.target_agent_id = ?4
-               AND t.assignee_agent_id = ?4 AND a.assignee_agent_id = ?4
+               AND t.assignee_agent_id = a.assignee_agent_id
+               AND EXISTS (
+                   SELECT 1 FROM wc_agent_identities target
+                   WHERE target.agent_id = e.target_agent_id
+                     AND target.owner_principal_kind = ?2
+                     AND target.owner_principal_digest = ?3
+               )
                AND t.latest_attempt_id = e.task_attempt_id
                AND t.terminal_attempt_id = e.task_attempt_id
                AND t.state = e.terminal_task_state

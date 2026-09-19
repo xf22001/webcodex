@@ -6,14 +6,23 @@ use crate::tool_runtime::startup_brief::{
 use serde_json::{json, Value};
 
 fn workflow_schema() -> Value {
-    registry::output_schema_for_tool("work_on_project")["properties"]["output"]["properties"]
-        ["workflow"]
+    let schema = registry::coding_workflow_diagnostic_output_schema_for_test();
+    schema["properties"]["output"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["detail"]["const"] == "standard")
+        .unwrap()["properties"]["workflow"]
         .clone()
 }
 
 #[test]
 fn builtin_coding_workflow_defaults_are_required_and_bounded() {
     let workflow = builtin_coding_workflow_projection(Default::default());
+    assert!(workflow["model_protocol"]["context_sidecar"]
+        .as_str()
+        .unwrap()
+        .contains("jobs.attention"));
     let schema = workflow_schema();
     validate_schema_instance_for_test(&workflow, &schema).unwrap();
 
@@ -72,12 +81,12 @@ fn builtin_coding_workflow_defaults_cover_unnamed_tasks_without_granting_authori
         "outcome_unknown fails closed",
         "one execution/Job",
         "exact continuation",
-        "wait_secs=100,wake_on=terminal",
-        "not for visibility",
+        "wait_for_job_terminal with a real Host carrier",
+        "no short polling",
+        "stop_job(confirm=true)",
+        "list_jobs is identity recovery",
         "sufficient fresh validation",
-        "Formatting is finalization",
         "After Rust stabilizes, format once",
-        "before final diff/closeout",
         "rerun only after later Rust edits",
     ] {
         assert!(defaults.contains(boundary), "missing guidance: {boundary}");
@@ -174,8 +183,11 @@ fn code_mode_strategy_changes_only_guidance_and_teaches_compact_composition() {
     let strategy = strategy_text(&composed);
     for phrase in [
         "simple observation use a direct primitive",
+        "prefer direct search_and_read",
+        "multi-step related search/read observations",
         "read-only code_mode_exec",
         "soft heuristic",
+        "bounded callable contract",
         "adaptive follow-up inside one cell",
         "sequential inside the cell",
         "small dependency DAG",

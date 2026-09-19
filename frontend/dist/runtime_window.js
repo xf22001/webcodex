@@ -115,21 +115,39 @@ export function createWindowCard(row, selectedWindowKey, onSelect, now = Date.no
         return null;
     const button = document.createElement("button");
     button.type = "button";
+    button.dataset.action = "open-window";
+    button.dataset.windowKey = key;
+    button.title = key;
+    button.setAttribute("aria-label", translate("Window", language) + " " + runtimeWindowShortKey(key));
     button.className = "runtime-window-card" + (key === selectedWindowKey ? " selected" : "");
     if (key === selectedWindowKey)
         button.setAttribute("aria-current", "true");
     const head = document.createElement("div");
     head.className = "runtime-window-card-head";
     const title = document.createElement("strong");
-    title.textContent = "Window " + runtimeWindowShortKey(key);
+    title.textContent = translate("Window", language) + " " + runtimeWindowShortKey(key);
     const active = document.createElement("span");
     active.className = "chip" + (Number(row?.active_count || 0) > 0 ? " tone-runtime" : "");
     active.textContent = Number(row?.active_count || 0) > 0
         ? (language === "zh-CN" ? String(row.active_count) + " 个活跃" : String(row.active_count) + " active")
-        : String(row?.source || "window");
+        : translate("No active request", language);
     head.appendChild(title);
     head.appendChild(active);
     button.appendChild(head);
+    const source = document.createElement("span");
+    source.className = "muted small";
+    source.textContent = translate("Source", language) + " · " + String(row.source || "—");
+    button.appendChild(source);
+    const seen = document.createElement("span");
+    seen.className = "muted small";
+    seen.textContent = translate("Last seen", language) + " · " + windowAgeLabel(row.last_seen_at_ms, now, language);
+    button.appendChild(seen);
+    if (row.last_project_name && row.last_project_name !== "—") {
+        const project = document.createElement("p");
+        project.className = "window-project-label";
+        project.textContent = String(row.last_project_name);
+        button.appendChild(project);
+    }
     const call = document.createElement("span");
     call.className = "muted small";
     call.textContent = row?.last_tool_call_at_ms
@@ -201,6 +219,7 @@ export function renderWindowLinkedSessions(sessionsNode, linkedSessions, onOpenS
     for (const session of linkedSessions) {
         const button = document.createElement("button");
         button.type = "button";
+        button.dataset.action = "open-linked-session";
         button.className = "window-session-card";
         const title = document.createElement("strong");
         title.textContent = String(session?.title || session?.workflow_session_id || translate("Workflow Session", language));
@@ -237,7 +256,7 @@ export function renderSessionWindowCorrelationLinks(linkedNode, links, onSelectW
         button.type = "button";
         button.className = "window-session-card" + (Number(link?.recorder_gap_count || 0) ? " recorder-gap" : "");
         const title = document.createElement("strong");
-        title.textContent = "Window " + runtimeWindowShortKey(key);
+        title.textContent = translate("Window", language) + " " + runtimeWindowShortKey(key);
         const meta = document.createElement("span");
         meta.className = "muted small";
         meta.textContent = [
@@ -262,7 +281,7 @@ export function formatWindowDetailFields(detail, fallbackKey = "", now = Date.no
         return null;
     const key = String(detail.client_window_key || fallbackKey || "");
     return {
-        title: "Window " + runtimeWindowShortKey(key),
+        title: translate("Window", language) + " " + runtimeWindowShortKey(key),
         key: key || "—",
         source: String(detail.source || "—"),
         activeCount: String(Number(detail.active_count || 0)),

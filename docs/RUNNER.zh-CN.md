@@ -85,7 +85,7 @@ allow_patch = true
 会 fail closed，而不是 merge 或猜 precedence。新的 CLI 命令使用
 `--project-registry-dir`。
 
-Runtime project id 形如 `agent:<client_id>:<project_id>`，例如 `agent:workstation:my-repo`。ToolRuntime 通过调用方可见的 Runner registry 解析这些 id；普通用户通常不需要输入。
+Runtime Project 的 canonical id 仍形如 `agent:<client_id>:<project_id>`，例如 `agent:workstation:my-repo`。该 canonical identity 继续用于 authorization、persistence、audit、Runner routing、diagnostic、API 与 CLI 显式 addressing。Model-facing bootstrap/discovery 还可以返回很短的 Server-issued `project_ref`（例如 `~p1`）；后续 Project-scoped tool call 应优先复用它，而不是反复复制 canonical id。映射由 Server 持久维护并按 authenticated caller 隔离，同时钉住 canonical id 与 Runner 报告的 Project root identity；它不是 credential/capability，每次使用都会重新执行当前 Project visibility/authorization。该 ref 不依赖 Workflow Session、ClientWindow、MCP session、transport connection、recent activity 或 Host hidden state；失效 ref 绝不会静默重绑到另一个 Project。
 
 ### 允许根目录
 
@@ -159,6 +159,87 @@ Skill 文件本身是 live 的：修改 `SKILL.md` 或 resource 后，下一次 
 SHA-256。Managed installed Skill 还会用 `expected_package_revision` fence immutable package。
 只有修改 `roots` 配置列表时才需要按正式流程先执行 `runner_config_check`，再携带当前
 generation 执行 `runner_config_reload`；该字段支持 hot reload，不需要重启 Runner 进程。
+
+## Runner 级 configured instructions
+
+同一台 Runner 可以为其所有 Project bootstrap 投影一份共享 coding guidance。v1 直接在
+Runner 的 `runner.toml` 中手工配置；Desktop 的文件选择/上传 UI 留待后续实现。
+
+```toml
+[instructions]
+files = [
+    "/home/alice/.codex/AGENTS.md",
+]
+```
+
+macOS 使用等价的 Runner 本机绝对路径，例如 `/Users/alice/.codex/AGENTS.md`。Windows
+可使用 TOML literal string，避免反斜杠转义：
+
+```toml
+[instructions]
+files = [
+    'C:\Users\alice\.codex\AGENTS.md',
+]
+```
+
+不会隐式发现 `~/.codex/AGENTS.md`；所有路径都必须由用户显式配置，并且是 Runner 本机
+绝对路径。Coding startup 按确定顺序先投影 Runner configured sources，再投影现有
+Project-local candidates：`AGENTS.md`、`agents.md`、`CLAUDE.md`、
+`.codex/AGENTS.md`、`.github/copilot-instructions.md`。两者都只是 model guidance，
+不会改变执行 authority。
+
+Configured instruction 文件只通过 narrow Runner-owned instruction runtime 读取。其父目录
+不会加入 `[policy].allowed_roots`，普通 Project file/shell/process 工具不会因此得到额外
+filesystem authority，Runner native absolute path 也不会投影给模型；model-facing source
+只使用 sanitized logical identity。
+
+配置来源必须是普通 UTF-8 文件，每个文件最多 1 MiB。文件及其父目录组件不能是
+symbolic link 或 Windows reparse point（包括目录 junction）；此时应配置解析后的
+物理路径。Unix 上父目录通过 handle-relative traversal 逐层固定，并在平台提供
+search-only 目录打开语义时保持原有的仅执行/搜索权限行为；Windows 会先用 native
+no-reparse open 获取父目录，再相对这个已固定的父目录句柄打开 leaf，并在接受
+observation 前重新核对父目录 identity，因此并发父目录替换不能把 configured read
+重定向到别处。非 Unix/Windows 目标直接 fail closed，不再回退到按路径重新打开。Windows verbatim disk/UNC 长路径仍可接受，但远端
+文件系统最终取决于服务端实际提供的 reparse 与 handle 语义，不能假定比远端实现
+本身更强的保证。读取时检查已打开的文件句柄，并在读取过程中强制限制字节数，
+而不只依赖读取前的 metadata。无法读取、被重定向、
+超限或 UTF-8 无效的来源会将 instruction scan 标记为 incomplete，但不会暴露原生路径
+或令整个 Project bootstrap 失败。
+
+修改 `[instructions].files` 路径列表时，按正式流程编辑 `runner.toml`，先
+`runner_config_check`，再携带当前 generation 执行 `runner_config_reload`；无需重启
+Runner。文件内容本身始终是 live 的：直接修改 configured `AGENTS.md` 后，下一次
+`work_on_project` / 新 Project bootstrap 会重新读取，不需要 config reload。每个 Project
+bootstrap 都会独立观察当前 Runner-global instructions；v1 不做跨 Project context 去重。
+Runner-global source 被截断时保持有界，也不会因此开放 generic arbitrary-file `read_more`。
+
+
+Configured file 为空，或所有父目录均通过 ordinary-path 检查后确认末级文件缺失时，
+移除其 guidance。父目录缺失、发生重定向或无法读取，以及其他读取失败，均表示
+Runner scope 暂时不可用。从 `instructions.files` 移除条目并 reload 仍会明确撤销规则。
+显式恢复 Session 时，Runner 与 Project scope 独立更新；不可用的 scope
+只在内存中保留上一份规则。观察到新的 Runner instance 或 config generation 后，
+不会继承旧的全局规则。同一 instance 内，已知的较高 config generation 优先于请求
+开始顺序；未知 generation 不能替换已知 generation。Instance 替换按 live-instance
+验证顺序判断，迟到的旧 instance observation 不能恢复已撤销的 guidance。
+同一 instance/generation 内按请求 observation 顺序判断。Project 读取有独立的
+开始顺序 fence，不依赖 Runner 是否可用；迟到的 Project observation 保留较新的
+本地规则，并将 scan 标记为 incomplete。保留粒度是整个 scope，不是不完整 scope
+内的单个文件。规则正文与 observation fence 不会持久化到 Session records。
+
+32 Ki-character snapshot 会先为 Project-local 正文预留预算，再缩短全局正文；
+展示顺序仍为 global-before-project。Session retention 先选择各 scope，再应用共享
+预算。独立限于 32 Ki characters 的全局来源副本仅保留在 Session 内存中，因此保留
+较短的 Project scope，或后续本地正文缩短时，都能恢复之前被共享预算隐藏的全局正文。
+此来源副本与所有 observation fence 均不进入 public snapshot 或 summary。
+即使最终 startup byte budget 再次截断，Runner
+source 也不会获得 Project `read_file` continuation。`work_on_project` 始终重新观察
+instructions 与 change metadata，但 primary output 不投影 instruction 正文。显式
+`context_request=["project.instructions"]` 会同时观察当前 Runner 与 Project source
+并投影有界正文，不复用 Session 中保留的正文。
+Instruction projection 按共享 sidecar 的 20 KiB 剩余预算裁剪：先移除由正文派生的
+heading 索引，再缩短正文；保留 source identity 和 Project 规则，避免仅因新增全局
+source 就丢弃整份 context material。
 
 ## 本地 MCP provider
 
@@ -469,7 +550,8 @@ User scope 使用 `systemctl --user`；system scope 使用 `/etc/systemd/system`
 4. reload 后调用 `runtime_status(client_id=...)`（或 `list_runners`）检查当前运行状态。
 
 `runner_config_reload` 不写 `runner.toml`，只激活磁盘上已经存在的 candidate。policy、
-shell、configured Skill roots、Native Plugin 与静态 SSH resource 中可热加载的字段可以立即生效；`restart_required_fields`
+shell、configured Skill roots、configured instruction files、Native Plugin 与静态 SSH resource
+中可热加载的字段可以立即生效；`restart_required_fields`
 报告的字段仍保持 startup-only，重启前不会假装已在线生效。无效 candidate 保留旧 active
 snapshot 与 generation。`ssh_resource` managed mutation 不同：它使用 frozen startup
 snapshot，且只在工具返回 `restart_required=true` 时要求重启 Runner。

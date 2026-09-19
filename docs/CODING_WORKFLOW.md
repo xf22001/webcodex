@@ -48,20 +48,26 @@ Guidance is delivered in tool results; it is not the client's system prompt and
 does not grant execution authority. Host instructions, the user's task,
 applicable project rules, authentication, and runtime safety policy still apply.
 Delivery is not proof that a model read, retained, or followed the guidance.
-Keep guidance enabled unless the current model context already retains it.
+`work_on_project` keeps its primary result compact: request static model-facing
+material only when the current model context needs it, using
+`context_request=["project.instructions"]` and/or
+`context_request=["webcodex.workflow"]`. Workflow Session identity never proves
+that the current model retained either material.
+
+When bootstrap or discovery returns `project_ref`, reuse it as the `project` selector on ordinary Project-scoped calls. The canonical `agent:<client_id>:<project_id>` identity remains visible for diagnostics and explicit addressing, but the model does not need to mechanically repeat it. A short ref is Server-owned, durable and principal-scoped, carries no authority, and is reauthorized against its pinned canonical Project/root identity on every call.
 
 ## Tool strategy guidance
 
 `work_on_project` accepts `guidance_profile`, defaulting to `direct`. Workflow
 contract v14 returns shared `guidance`, `model_protocol` and review `roles`, plus
-only the selected `tool_strategy: {profile, guidance}`. `include_workflow_guidance=false`
-omits the entire workflow, including the strategy. The selection is request-local:
+only the selected `tool_strategy: {profile, guidance}`, when explicitly requested
+through `context_request=["webcodex.workflow"]`. The selection is request-local:
 choose again on exact resume without changing Session identity or business state.
 It is never inferred from a Window, Session or past tool use, and grants no tools,
 admission, authority or execution semantics. Builds without Experimental Code Mode
-reject explicit `code_mode` as an invalid profile, even if guidance is omitted.
-The independent `webcodex.workflow` context sidecar supplies the default `direct`
-projection; it does not remember a startup selection.
+reject explicit `code_mode` as an invalid profile. On a `work_on_project` call the
+workflow sidecar uses that call's `guidance_profile`; unrelated tools that request
+`webcodex.workflow` use the canonical default `direct` profile.
 
 - `direct`: use the simplest sufficient primitive; batch predetermined independent
   observations and let the model inspect results before adaptive follow-up calls.
@@ -123,7 +129,7 @@ Review the actual workspace/diff after editing and validation. Passing tests do 
 
 ## Long-running work
 
-A command or validation that outlives the synchronous grace period continues as the same WebCodex Job. Keep its exact Job identity and parser-ready continuation. If useful independent work remains, continue that work and observe the Job later; do not repeatedly poll a running Job merely to keep it visible. When the next useful action actually depends on the terminal result, use the provided bounded `wait_secs=100, wake_on=terminal` continuation. For one Job or when any terminal result unblocks progress, use `terminal`; when every Job in a predetermined set is required before progress, use `all_terminal`. Recovery/continuation hints never authorize a retry of an uncertain effect.
+A command or validation that outlives the synchronous grace period continues as the same WebCodex Job. Keep its exact Job identity and parser-ready continuation. If useful independent work remains, continue that work and observe the Job later; do not repeatedly poll a running Job merely to keep it visible. When the next useful action actually depends on the terminal result, use the provided host-safe `wait_secs=55, wake_on=terminal` continuation. The Runtime still accepts explicit observation waits up to 100 seconds, but longer model-facing waits can exceed an outer MCP Host deadline. For one Job or when any terminal result unblocks progress, use `terminal`; when every Job in a predetermined set is required before progress, use `all_terminal`. Recovery/continuation hints never authorize a retry of an uncertain effect.
 
 ## Manual multi-window collaboration
 

@@ -44,9 +44,9 @@ pub const JOB_INVENTORY_MAX_JOBS: usize =
 /// ceiling as well as the shared 8 MiB WebSocket/QUIC frame ceiling for
 /// registration, project, policy, and envelope metadata.
 pub const JOB_INVENTORY_MAX_SERIALIZED_BYTES: usize = 1024 * 1024;
-/// Same-process terminal results remain available long enough for ordinary
-/// reconnect backoff without becoming an unbounded process-lifetime ledger.
-pub const JOB_TERMINAL_RETENTION_SECS: i64 = 15 * 60;
+/// Same-process terminal results remain available for long-running Job recovery
+/// while count and payload bounds prevent an unbounded process-lifetime ledger.
+pub const JOB_TERMINAL_RETENTION_SECS: i64 = 24 * 60 * 60;
 
 fn default_shell_job_kind() -> String {
     "shell".to_string()
@@ -611,6 +611,9 @@ pub struct ShellJobValidationMetadata {
     pub adapter: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_target_id: Option<String>,
+    /// Launch observation in the existing Control Project epoch. Not a source snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fence: Option<crate::validation_source::ValidationSourceFence>,
     /// Effective caller-requested minimum Cargo test count. This is an
     /// observation postcondition, not part of the executable argv.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -641,6 +644,10 @@ impl ShellJobValidationMetadata {
                 };
                 suffix.len() != 24 || !suffix.as_bytes().iter().all(u8::is_ascii_hexdigit)
             })
+            || self
+                .source_fence
+                .as_ref()
+                .is_some_and(|fence| !fence.is_valid())
             || self
                 .minimum_tests
                 .is_some_and(|minimum| !(1..=CARGO_TEST_MIN_TESTS_MAX).contains(&minimum))

@@ -255,26 +255,19 @@ fn coding_task_tools_are_registered_in_metadata_and_openapi() {
         );
     }
 
-    let finish = &openapi["paths"]["/api/actions/finish_coding_task"]["post"];
-    assert_eq!(finish["operationId"], "finish_coding_task");
-    let finish_properties = finish["requestBody"]["content"]["application/json"]["schema"]
-        ["properties"]
-        .as_object()
-        .unwrap();
-    for field in [
-        "project",
-        "session_id",
-        "include_hygiene",
-        "include_handoff",
-        "include_workspace",
-        "include_validation_summary",
-        "summary_only",
-    ] {
-        assert!(
-            finish_properties.contains_key(field),
-            "finish_coding_task missing {field}"
-        );
-    }
+    assert!(
+        openapi["paths"]
+            .get("/api/actions/finish_coding_task")
+            .is_none(),
+        "finish_coding_task is model-visible but intentionally gateway-only"
+    );
+    assert_eq!(
+        webcodex_tool_contracts::runtime_tool_adaptive_direct_rank("finish_coding_task"),
+        None
+    );
+    assert!(webcodex_tool_contracts::gpt_action_tool_supported(
+        "finish_coding_task"
+    ));
     assert!(openapi["paths"]
         .get("/api/actions/start_coding_task")
         .is_none());
@@ -716,8 +709,6 @@ async fn work_on_project_serviced(
                         base_ref: None,
                         instruction,
                         session_id: None,
-                        include_project_instructions: true,
-                        include_workflow_guidance: true,
                         guidance_profile: Default::default(),
                         include_extension_catalog: false,
                     },
@@ -893,8 +884,6 @@ async fn exact_work_on_project_resume_preserves_original_git_baseline_after_head
                         base_ref: None,
                         instruction: "exact resume".to_string(),
                         session_id: Some(session_id),
-                        include_project_instructions: true,
-                        include_workflow_guidance: true,
                         guidance_profile: Default::default(),
                         include_extension_catalog: false,
                     },
@@ -1513,7 +1502,7 @@ async fn finish_coding_task_emits_one_parser_ready_changes_presentation_in_full_
         assert_eq!(
             result.output["presentation"]["suggested_call"],
             json!({
-                "tool": "present_changes",
+                "tool": "present_work_result",
                 "arguments": {
                     "project": project,
                     "session_id": session_id,
@@ -1527,7 +1516,7 @@ async fn finish_coding_task_emits_one_parser_ready_changes_presentation_in_full_
             .all(|action| !action
                 .as_str()
                 .unwrap_or_default()
-                .contains("present_changes")));
+                .contains("present_work_result")));
     }
 
     let restore = std::process::Command::new("git")
@@ -1971,7 +1960,7 @@ async fn finish_coding_task_historical_unresolved_current_pass_does_not_request_
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["validation"]["status"], "mixed");
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 1);
-    assert_eq!(result.output["validation"]["current_status"], "passed");
+    assert_eq!(result.output["validation"]["current_status"], "unproven");
     assert_eq!(
         result.output["validation"]["current_unresolved_failure_count"],
         0
@@ -1986,7 +1975,7 @@ async fn finish_coding_task_historical_unresolved_current_pass_does_not_request_
         result.output["tool_failures"]["actionable_unexpected_count"],
         0
     );
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert_action_list_not_contains(
         &result.output["suggested_next_actions"],
@@ -2074,7 +2063,7 @@ async fn finish_coding_task_summary_only_passes_with_resolved_unexpected_cargo_f
     );
     assert_eq!(result.output["validation"]["status"], "mixed");
     assert_eq!(result.output["validation"]["latest_status"], "passed");
-    assert_eq!(result.output["validation"]["current_status"], "passed");
+    assert_eq!(result.output["validation"]["current_status"], "unproven");
     assert_eq!(
         result.output["validation"]["current_unresolved_failure_count"],
         0
@@ -2082,13 +2071,13 @@ async fn finish_coding_task_summary_only_passes_with_resolved_unexpected_cargo_f
     assert_eq!(full.output["validation"]["status"], "mixed");
     assert_eq!(
         full.output["validation"]["current_evidence"]["status"],
-        "passed"
+        "unproven"
     );
     assert!(handoff.success, "{:?}", handoff.error);
     assert_eq!(handoff.output["validation"]["status"], "mixed");
     assert_eq!(
         handoff.output["validation"]["current_evidence"]["status"],
-        "passed"
+        "unproven"
     );
     assert_eq!(
         handoff.output["validation"]["resolved_failures"]["count"],
@@ -2100,9 +2089,19 @@ async fn finish_coding_task_summary_only_passes_with_resolved_unexpected_cargo_f
     );
     assert_eq!(result.output["validation"]["resolved_failure_count"], 1);
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 0);
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert!(result.output.get("advisories").is_none());
+    assert_reason_list_contains(
+        &result.output["task_outcome"],
+        "warning_reasons",
+        "validation_inconclusive",
+    );
+    assert!(
+        serde_json::to_string(&result.output["suggested_next_actions"])
+            .unwrap()
+            .contains("rerunning validation alone cannot prove current source")
+    );
     assert!(result.output.get("informational_notes").is_none());
     assert!(result.output.get("evidence_history").is_none());
     assert_eq!(result.output["evidence_integrity"]["status"], "clean");
@@ -2332,7 +2331,7 @@ async fn finish_coding_task_summary_only_passes_with_resolved_unexpected_cargo_c
     assert_eq!(result.output["validation"]["latest_status"], "passed");
     assert_eq!(result.output["validation"]["resolved_failure_count"], 1);
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 0);
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert!(result.output.get("evidence_history").is_none());
     assert_eq!(result.output["evidence_integrity"]["status"], "clean");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
@@ -2480,12 +2479,12 @@ async fn finish_coding_task_combined_early_fmt_and_test_failures_resolve_without
     assert_eq!(result.output["validation"]["status"], "mixed");
     assert_eq!(result.output["validation"]["resolved_failure_count"], 2);
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 0);
-    assert_eq!(result.output["validation"]["current_status"], "passed");
+    assert_eq!(result.output["validation"]["current_status"], "unproven");
     assert_eq!(
         result.output["validation"]["current_unresolved_failure_count"],
         0
     );
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert_reason_list_not_contains(
         &result.output["task_outcome"],
@@ -2538,7 +2537,7 @@ async fn finish_coding_task_resolved_history_keeps_real_workspace_advisory() {
     assert_eq!(result.output["validation"]["latest_status"], "passed");
     assert_eq!(result.output["validation"]["resolved_failure_count"], 1);
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 0);
-    assert_eq!(result.output["validation"]["current_status"], "passed");
+    assert_eq!(result.output["validation"]["current_status"], "unproven");
     assert_eq!(
         result.output["validation"]["current_unresolved_failure_count"],
         0
@@ -2605,7 +2604,7 @@ async fn finish_coding_task_resolved_history_keeps_real_tool_failure_blocking() 
     assert_eq!(result.output["validation"]["latest_status"], "passed");
     assert_eq!(result.output["validation"]["resolved_failure_count"], 1);
     assert_eq!(result.output["validation"]["unresolved_failure_count"], 0);
-    assert_eq!(result.output["validation"]["current_status"], "passed");
+    assert_eq!(result.output["validation"]["current_status"], "unproven");
     assert_eq!(
         result.output["validation"]["current_unresolved_failure_count"],
         0
@@ -2698,7 +2697,7 @@ async fn failure_history_fail_closed_attempts_do_not_block_clean_finish() {
         0
     );
     assert_eq!(result.output["validation"]["status"], "passed");
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert_eq!(result.output["evidence_integrity"]["status"], "clean");
     assert_reason_list_not_contains(
@@ -3300,7 +3299,7 @@ async fn finish_coding_task_summary_only_treats_read_failure_as_historical_non_a
     );
     assert_eq!(result.output["validation"]["status"], "passed");
     assert_eq!(result.output["validation"]["latest_status"], "passed");
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert_reason_list_not_contains(
         &result.output["task_outcome"],

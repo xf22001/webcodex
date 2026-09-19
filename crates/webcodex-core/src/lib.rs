@@ -18,6 +18,7 @@ pub mod plugin;
 pub mod project_context_contract;
 pub mod project_instructions;
 pub mod project_listing;
+pub mod runner_instruction;
 pub mod runner_job_lifecycle;
 pub mod runner_job_receipt;
 pub mod runner_operation;
@@ -36,4 +37,5 @@ pub mod validation_evidence;
 #[cfg(test)]
 mod validation_evidence_tests;
 pub mod validation_identity;
+pub mod validation_source;
 pub mod workflow_session_contract;

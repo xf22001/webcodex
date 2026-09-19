@@ -154,6 +154,107 @@ fn tool_recommended_flows_reference_visible_defined_tools() {
 }
 
 #[test]
+fn agent_continuation_setup_flow_is_focused_and_keeps_resume_tools_separate() {
+    let flow = TOOL_RECOMMENDED_FLOWS
+        .iter()
+        .find(|flow| flow.name == "agent_continuation_setup")
+        .expect("agent_continuation_setup recommended flow");
+    assert_eq!(
+        flow.tools,
+        &[
+            "create_agent_identity",
+            "rotate_agent_continuation_endpoint",
+            "present_agent_continuation",
+            "list_agent_identities",
+        ]
+    );
+    let guidance = format!("{}\n{}", flow.summary, flow.manifest_purpose).to_lowercase();
+    for phrase in [
+        "new durable agent window setup",
+        "yield/end",
+        "production_auto_resume_available",
+        "presentation success is not host readiness",
+    ] {
+        assert!(
+            guidance.contains(phrase),
+            "setup flow should mention {phrase}: {guidance}"
+        );
+    }
+    for resume_tool in ["bootstrap_agent_conversation", "consume_agent_wake"] {
+        assert!(!flow.tools.contains(&resume_tool));
+    }
+}
+
+#[test]
+fn goal_agent_wait_orchestration_flow_registers_before_worker_execution_without_discovery() {
+    let flow = TOOL_RECOMMENDED_FLOWS
+        .iter()
+        .find(|flow| flow.name == "goal_agent_wait_orchestration")
+        .expect("goal_agent_wait_orchestration recommended flow");
+    let associate = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "associate_goal_agent_task")
+        .unwrap();
+    let wait = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "wait_for_agent_events")
+        .unwrap();
+    let start = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "start_agent_task_attempt")
+        .unwrap();
+    let dispatch = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "start_agent_task_endpoint_continuation")
+        .unwrap();
+    let bootstrap = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "bootstrap_agent_conversation")
+        .unwrap();
+    let consume = flow
+        .tools
+        .iter()
+        .position(|tool| *tool == "consume_agent_wake")
+        .unwrap();
+    assert!(associate < wait && wait < start && start < dispatch);
+    assert!(dispatch < bootstrap && bootstrap < consume);
+    for required in [
+        "start_agent_task_endpoint_continuation",
+        "bootstrap_agent_conversation",
+        "consume_agent_wake",
+        "read_agent_wait",
+        "get_goal",
+        "read_agent_task",
+        "update_goal",
+    ] {
+        assert!(flow.tools.contains(&required), "missing {required}");
+    }
+    let guidance = format!("{}\n{}", flow.summary, flow.manifest_purpose).to_lowercase();
+    for phrase in [
+        "before any selected worker can terminalize",
+        "explicit 1..8 task selector list",
+        "any for first-result continuation",
+        "all for fan-in",
+        "only after registration start each worker with start_agent_task_attempt followed by start_agent_task_endpoint_continuation",
+        "fresh resumed coordinator turn bootstrap the exact wake",
+        "consume it immediately",
+        "never derive the wait source list from goal correlations",
+        "not treat this flow as a scheduler",
+        "explicitly decide/update goal state",
+    ] {
+        assert!(
+            guidance.contains(phrase),
+            "Goal AgentWait flow should mention {phrase}: {guidance}"
+        );
+    }
+}
+
+#[test]
 fn edit_recommended_flow_selects_mutation_by_shape_without_weakening_guards() {
     let flow = TOOL_RECOMMENDED_FLOWS
         .iter()

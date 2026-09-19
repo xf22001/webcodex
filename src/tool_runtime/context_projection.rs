@@ -2,6 +2,7 @@ use super::project_resolution::ResolvedProject;
 use super::startup_brief::{
     builtin_coding_workflow_projection, project_instructions_context_projection,
 };
+use super::tool_inputs::CodingGuidanceProfile;
 use super::{ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::json_measurement::serialized_json_len;
@@ -57,6 +58,12 @@ pub(crate) const CONTEXT_MATERIAL_SPECS: &[ContextMaterialSpec] = &[
         key: "webcodex.workflow",
         project_required: false,
         scope_policy: ContextMaterialScopePolicy::Public,
+        surface: ContextMaterialSurface::AnySidecar,
+    },
+    ContextMaterialSpec {
+        key: "jobs.attention",
+        project_required: true,
+        scope_policy: ContextMaterialScopePolicy::Require(crate::auth::SCOPE_RUNTIME_READ),
         surface: ContextMaterialSurface::AnySidecar,
     },
     ContextMaterialSpec {
@@ -158,6 +165,7 @@ fn scope_unavailable_reason(key: &str) -> &'static str {
 }
 
 impl ToolRuntime {
+    #[cfg(test)]
     pub(crate) async fn add_requested_context_projection(
         &self,
         result: &mut ToolResult,
@@ -165,6 +173,26 @@ impl ToolRuntime {
         resolved_project: Option<&ResolvedProject>,
         auth: Option<&AuthContext>,
         capabilities: ContextMaterialCapabilities,
+    ) {
+        self.add_requested_context_projection_with_guidance(
+            result,
+            requested,
+            resolved_project,
+            auth,
+            capabilities,
+            CodingGuidanceProfile::default(),
+        )
+        .await;
+    }
+
+    pub(crate) async fn add_requested_context_projection_with_guidance(
+        &self,
+        result: &mut ToolResult,
+        requested: &[String],
+        resolved_project: Option<&ResolvedProject>,
+        auth: Option<&AuthContext>,
+        capabilities: ContextMaterialCapabilities,
+        guidance_profile: CodingGuidanceProfile,
     ) {
         if requested.is_empty() {
             return;
@@ -193,22 +221,50 @@ impl ToolRuntime {
                             let project =
                                 resolved_project.expect("registry requires project target");
                             let snapshot =
-                                self.load_coding_project_instructions(&project.config).await;
-                            let projection = project_instructions_context_projection(&snapshot);
-                            if snapshot.scan_complete {
-                                json!({
-                                    "key": key,
-                                    "status": "available",
-                                    "projection": projection,
-                                })
+                                self.load_effective_coding_instructions(project, auth).await;
+                            let mut material = if snapshot.scan_complete {
+                                json!({"key": key, "status": "available", "projection": null})
                             } else {
                                 json!({
                                     "key": key,
                                     "status": "unavailable",
                                     "reason_code": "project_instructions_observation_incomplete",
-                                    "projection": projection,
+                                    "projection": null,
                                 })
-                            }
+                            };
+                            // Measure the complete prospective envelope, including
+                            // earlier materials and the unavailable-reason overhead.
+                            materials.push(material.clone());
+                            let reserved = serialized_json_len(&ContextProjectionMeasure {
+                                materials: &materials,
+                                truncated,
+                            })
+                            .unwrap_or(usize::MAX)
+                            .saturating_sub(4); // Replace the literal JSON null.
+                            materials.pop();
+                            material["projection"] = project_instructions_context_projection(
+                                &snapshot,
+                                MAX_CONTEXT_PROJECTION_BYTES.saturating_sub(reserved),
+                            );
+                            material
+                        }
+                        "jobs.attention" => {
+                            let project =
+                                resolved_project.expect("registry requires project target");
+                            // Project-level attention only. Recorder/ambient Sessions never
+                            // select a business Session or grant Job inventory authority.
+                            let projection = Box::pin(self.active_jobs_summary(
+                                Some(&project.resolved_id),
+                                None,
+                                auth,
+                                8,
+                            ))
+                            .await;
+                            json!({
+                                "key": key,
+                                "status": "available",
+                                "projection": projection,
+                            })
                         }
                         "skills.catalog" => {
                             let project =
@@ -252,7 +308,7 @@ impl ToolRuntime {
                         "webcodex.workflow" => json!({
                             "key": key,
                             "status": "available",
-                            "projection": builtin_coding_workflow_projection(Default::default()),
+                            "projection": builtin_coding_workflow_projection(guidance_profile),
                         }),
                         _ => unreachable!("context material registry/provider match drifted"),
                     }

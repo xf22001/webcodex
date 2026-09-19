@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
+#[path = "code_mode_e2c.rs"]
+mod e2c;
+
 const E2B_MUTATION_ONLY_POLICY: OrchestrationPolicy = OrchestrationPolicy {
     frontend: "code_mode_e2b_test",
     policy_name: "Code Mode E2b test",
@@ -23,6 +26,7 @@ const E2B_MUTATION_ONLY_POLICY: OrchestrationPolicy = OrchestrationPolicy {
     additional_forbidden_argument_fields: &[],
     nested_sync_wait_max_secs: None,
     max_mutation_calls: Some(1),
+    validation_after_mutation: false,
 };
 
 const READ_ONLY_TEST_POLICY: OrchestrationPolicy = OrchestrationPolicy {
@@ -33,6 +37,7 @@ const READ_ONLY_TEST_POLICY: OrchestrationPolicy = OrchestrationPolicy {
     additional_forbidden_argument_fields: &[],
     nested_sync_wait_max_secs: None,
     max_mutation_calls: None,
+    validation_after_mutation: false,
 };
 
 #[derive(Debug, Clone)]
@@ -188,6 +193,8 @@ async fn complete_mutation_fixture(
             let would_change = next != current;
             let dry_run = payload["dry_run"].as_bool().unwrap_or(false);
             let changed = would_change && !dry_run;
+            let old_sha256 = crate::tool_runtime::files::sha256_hex_bytes(current.as_bytes());
+            let new_sha256 = crate::tool_runtime::files::sha256_hex_bytes(next.as_bytes());
             if changed {
                 fs::write(&full, next).unwrap();
             }
@@ -196,18 +203,29 @@ async fn complete_mutation_fixture(
                 "applied_count": 1,
                 "changed": changed,
                 "would_change": would_change,
-                "files": [{"index": 0, "kind": "edit", "path": path}],
+                "files": [{
+                    "index": 0, "kind": "edit", "path": path, "to_path": null,
+                    "old_sha256": old_sha256, "new_sha256": new_sha256,
+                    "changed": changed, "would_change": would_change, "edits": []
+                }],
                 "changed_paths": if changed { vec![path] } else { Vec::<&str>::new() },
             })
         }
-        MutationFixtureReply::Noop => json!({
-            "dry_run": payload["dry_run"].as_bool().unwrap_or(false),
-            "applied_count": 1,
-            "changed": false,
-            "would_change": false,
-            "files": [{"index": 0, "kind": "edit", "path": path}],
-            "changed_paths": [],
-        }),
+        MutationFixtureReply::Noop => {
+            let sha256 = crate::tool_runtime::files::sha256_hex_bytes(&fs::read(&full).unwrap());
+            json!({
+                "dry_run": payload["dry_run"].as_bool().unwrap_or(false),
+                "applied_count": 1,
+                "changed": false,
+                "would_change": false,
+                "files": [{
+                    "index": 0, "kind": "edit", "path": path, "to_path": null,
+                    "old_sha256": sha256, "new_sha256": sha256,
+                    "changed": false, "would_change": false, "edits": []
+                }],
+                "changed_paths": [],
+            })
+        }
         MutationFixtureReply::ShaConflict { replacement } => {
             fs::write(&full, replacement).unwrap();
             let expected = change["expected_sha256"]
@@ -660,7 +678,9 @@ async fn e2b_timeout_after_mutation_dispatch_reconciles_known_true_result() {
         }]});
         while (true) {}
     "#;
-    let task = spawn_e2b_call(&runtime, &project, &session_id, source, Some(50));
+    // Keep the frontend deadline above host scheduling jitter so this test
+    // exercises timeout only after the mutation has entered canonical dispatch.
+    let task = spawn_e2b_call(&runtime, &project, &session_id, source, Some(1000));
     let request = wait_for_patch_agent_request(&runtime, "e2b-timeout-known").await;
     assert_eq!(request.kind, "file_apply_text_edits");
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -706,10 +726,12 @@ async fn e2b_mutation_stall_beyond_bounded_drain_returns_outcome_unknown() {
         }]});
         while (true) {}
     "#;
-    let task = spawn_e2b_call(&runtime, &project, &session_id, source, Some(50));
+    // Keep the frontend deadline above host scheduling jitter so the child
+    // reaches canonical dispatch before bounded drain is exercised.
+    let task = spawn_e2b_call(&runtime, &project, &session_id, source, Some(1000));
     let request = wait_for_patch_agent_request(&runtime, "e2b-timeout-unknown").await;
     assert_eq!(request.kind, "file_apply_text_edits");
-    let result = tokio::time::timeout(Duration::from_secs(7), task)
+    let result = tokio::time::timeout(Duration::from_secs(8), task)
         .await
         .expect("E2b must return after the bounded five-second reconciliation")
         .unwrap();
@@ -1127,7 +1149,7 @@ async fn e2b_nested_edit_drives_real_final_changes_baseline_to_full_final_worksp
     assert!(finish.success, "{:?}", finish.error);
     assert_eq!(
         finish.output["presentation"]["suggested_call"]["tool"],
-        "present_changes"
+        "present_work_result"
     );
 
     let present = tokio::spawn({
@@ -1137,14 +1159,14 @@ async fn e2b_nested_edit_drives_real_final_changes_baseline_to_full_final_worksp
         let auth = auth.clone();
         async move {
             runtime
-                .present_changes(project, session_id, Some(&auth))
+                .present_work_result(project, session_id, Some(&auth))
                 .await
         }
     });
     service_tool_task(&runtime, client_id, &present).await;
     let present = present.await.unwrap();
     assert!(present.success, "{:?}", present.error);
-    let files = present.output["changes"]["files"]
+    let files = present.output["work_result"]["final_changes"]["files"]
         .as_array()
         .expect("Final Changes files");
     for expected in ["README.md", "other.txt"] {
@@ -1154,7 +1176,10 @@ async fn e2b_nested_edit_drives_real_final_changes_baseline_to_full_final_worksp
             present.output
         );
     }
-    assert_eq!(present.output["changes"]["files_changed"], 2);
+    assert_eq!(
+        present.output["work_result"]["final_changes"]["files_changed"],
+        2
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1424,13 +1449,19 @@ async fn e2b_parent_omits_retired_continuity_overlays_after_nested_edit() {
 }
 
 #[tokio::test]
-async fn e2b_denies_validation_shell_other_mutation_and_recursion_before_business_dispatch() {
+async fn e2b_denies_shell_other_mutation_nested_jobs_and_recursion_before_business_dispatch() {
     let (_root, runtime, project, session_id) = e2b_fixture("e2b-denials", "x\n").await;
     for tool in [
-        "cargo_check",
-        "cargo_test",
         "run_shell",
+        "run_process",
+        "observe_jobs",
+        "wait_for_job_terminal",
         "apply_patch",
+        "write_file",
+        "git_commit",
+        "plugin_tool",
+        "code_mode_exec",
+        "code_mode_exec_effectful",
         "code_mode_exec_mutating",
     ] {
         let source =

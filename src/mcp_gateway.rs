@@ -132,7 +132,7 @@ pub(crate) fn authorized(auth: Option<&AuthContext>) -> bool {
 pub(crate) fn tool_spec() -> Value {
     json!({
         "name": MCP_TOOL_NAME,
-        "description": "Access explicitly authorized Runner-owned local MCP servers through WebCodex's built-in gateway. This is NOT the WebCodex project/tool catalog: action=list only reports external local MCP providers under Runner [mcp]. Empty servers means no local providers are configured—not that Projects, runners, or Adaptive Runtime tools are missing. Use work_on_project, list_projects (via call_runtime_tool), read_files, or runtime_status for coding work. No-argument action=list reports registration routing resolvability. action=status with server passively reports bounded provider lifecycle state without starting, initializing, or pinging the provider; healthy means the retained connection's child is still running, not an end-to-end protocol probe. action=list with server and action=describe interact with the provider. Use action=describe before action=call, and re-describe when WebCodex reports a schema change. Provider process identities, paths, stderr, environment, and schema revision tokens are intentionally hidden.",
+        "description": "Access explicitly authorized Runner-owned local MCP servers through WebCodex's built-in gateway. No-argument action=list reports registration routing resolvability. action=status with server passively reports bounded provider lifecycle state without starting, initializing, or pinging the provider; healthy means the retained connection's child is still running, not an end-to-end protocol probe. action=list with server and action=describe interact with the provider. Use action=describe before action=call, and re-describe when WebCodex reports a schema change. Provider process identities, paths, stderr, environment, and schema revision tokens are intentionally hidden.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -265,13 +265,6 @@ fn registration_routing_summary(candidates: &BTreeMap<String, Vec<ResolvedProvid
             "resolvable": entries.len() == 1,
             "status": if entries.len() == 1 { "resolvable" } else { "ambiguous" }
         }));
-    }
-    if servers.is_empty() {
-        return json!({
-            "servers": servers,
-            "empty": true,
-            "note": "No Runner-local external MCP providers are configured. This is not a Project or Adaptive Runtime tool list. Discover Projects with list_projects via call_runtime_tool, or bootstrap with work_on_project."
-        });
     }
     json!({"servers": servers})
 }
@@ -686,14 +679,8 @@ fn render_gateway_result(result: Result<GatewaySuccess, GatewayError>) -> Value 
 }
 
 fn gateway_success_result(value: Value) -> Value {
-    let text = match value.get("servers") {
-        Some(servers) if servers.as_array().is_some_and(|items| items.is_empty()) => {
-            "No Runner-local MCP providers configured. This is not the WebCodex project/tool catalog; use Adaptive Runtime tools such as work_on_project, read_files, or list_projects via call_runtime_tool."
-        }
-        _ => "Local MCP metadata available in structuredContent.",
-    };
     json!({
-        "content": [{"type": "text", "text": text}],
+        "content": [{"type": "text", "text": "Local MCP metadata available in structuredContent."}],
         "structuredContent": value,
         "isError": false
     })
@@ -763,17 +750,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("search_symbol"));
-
-        let empty = registration_routing_summary(&BTreeMap::new());
-        assert_eq!(empty["servers"], json!([]));
-        assert_eq!(empty["empty"], true);
-        let rendered = render_gateway_result(Ok(GatewaySuccess::Metadata(empty.clone())));
-        assert_eq!(rendered["isError"], false);
-        assert_eq!(rendered["structuredContent"], empty);
-        assert!(rendered["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("not the WebCodex project/tool catalog"));
 
         let message = "é".repeat(GATEWAY_ERROR_FALLBACK_BYTES);
         let rendered = gateway_error_result(GatewayError {

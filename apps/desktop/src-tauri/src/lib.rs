@@ -1,8 +1,11 @@
 mod activity;
 mod commands;
+mod connection_id;
+mod connections;
 mod deadline;
 mod desktop_shell;
 mod error;
+mod mcp_providers;
 mod models;
 mod operation;
 mod platform;
@@ -11,6 +14,7 @@ mod state;
 mod tray;
 mod tunnel_config;
 mod webcodex;
+mod workspace;
 
 use state::AppState;
 use tauri::Manager;
@@ -46,6 +50,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_desktop_state,
+            commands::workspace_query,
+            commands::get_computer_permissions,
+            commands::request_computer_permission,
+            commands::get_runner_settings,
+            commands::add_runner_plugin,
+            commands::update_runner_settings,
+            commands::restart_owned_runner,
             commands::open_powershell_install_guide,
             commands::get_launch_at_login,
             commands::set_launch_at_login,
@@ -54,6 +65,10 @@ pub fn run() {
             commands::resume_saved_runtime,
             commands::update_tunnel_proxy,
             commands::update_tunnel_config,
+            commands::save_tunnel_profile,
+            commands::save_mcp_provider,
+            commands::remove_mcp_provider,
+            commands::tunnel_profile_action,
             commands::inspect_project,
             commands::configure_local_setup,
             commands::activate_local_project,

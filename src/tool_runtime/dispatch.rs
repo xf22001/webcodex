@@ -9,6 +9,7 @@ use super::{permissions, session_context, sessions, ToolCall, ToolResult, ToolRu
 use crate::auth::AuthContext;
 use crate::tool_runtime::project_resolution::{ProjectResolverError, ResolvedProject};
 use crate::tool_runtime::tool_audit::ToolCallAuditProjection;
+use crate::tool_runtime::tool_inputs::CodingGuidanceProfile;
 use serde_json::Value;
 
 /// Add the Phase A lifecycle tuple to a definite pre-execution structured
@@ -371,6 +372,22 @@ fn add_run_process_expectation_projection(
     );
 }
 
+fn apply_text_edits_model_projection(result: &mut ToolResult) {
+    if !result.success {
+        return;
+    }
+    let Some(files) = result.output.get_mut("files").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for file in files {
+        let Some(file) = file.as_object_mut() else {
+            continue;
+        };
+        file.remove("old_sha256");
+        file.remove("new_sha256");
+    }
+}
+
 enum SearchModelProjection {
     None,
     Batch {
@@ -411,6 +428,7 @@ enum ModelFacingProjection {
     None,
     JobHandoff,
     AgentWait,
+    ApplyTextEdits,
     Read(super::read_files::ReadModelProjection),
     Search(SearchModelProjection),
 }
@@ -429,6 +447,7 @@ impl ModelFacingProjectionPlan {
             ToolCall::WaitForAgentEvents { .. }
             | ToolCall::ReadAgentWait { .. }
             | ToolCall::CancelAgentWait { .. } => ModelFacingProjection::AgentWait,
+            ToolCall::ApplyTextEdits { .. } => ModelFacingProjection::ApplyTextEdits,
             ToolCall::RunJob { .. }
             | ToolCall::RunProcess { .. }
             | ToolCall::RunSkillResource { .. }
@@ -473,6 +492,7 @@ impl ModelFacingProjectionPlan {
             ModelFacingProjection::AgentWait => {
                 super::agent_wait::agent_wait_model_projection(result)
             }
+            ModelFacingProjection::ApplyTextEdits => apply_text_edits_model_projection(result),
             ModelFacingProjection::JobHandoff => {
                 super::jobs::sparsify_job_handoff_model_result(result)
             }
@@ -976,13 +996,18 @@ impl ToolRuntime {
     /// the owner boundary and capability requirements through
     /// `authorize_runner_tool`; local-executor tools are unaffected. Wrappers
     /// stay thin: they only forward the depot `AuthContext` here.
-    pub async fn dispatch_with_auth(
-        &self,
+    pub fn dispatch_with_auth<'a>(
+        &'a self,
         call: ToolCall,
-        auth: Option<&AuthContext>,
-    ) -> ToolResult {
-        self.dispatch_with_auth_transport(call, auth, sessions::SessionTransport::Api)
-            .await
+        auth: Option<&'a AuthContext>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+        // The canonical dispatcher has grown into a large multi-specialist future. Keep that
+        // state on the heap at the public dispatch boundary so direct callers do not need a
+        // multi-megabyte stack frame merely to enter ToolRuntime.
+        Box::pin(async move {
+            self.dispatch_with_auth_transport(call, auth, sessions::SessionTransport::Api)
+                .await
+        })
     }
 
     pub(crate) async fn dispatch_with_auth_transport(
@@ -1102,6 +1127,15 @@ impl ToolRuntime {
     /// plan after the same authoritative Project resolution used for execution.
     /// The returned ToolResult is still canonical with respect to domain-local
     /// budgeting and sparse projection so an outer recorder can consume it first.
+    fn context_guidance_profile(call: &ToolCall) -> CodingGuidanceProfile {
+        match call {
+            ToolCall::WorkOnProject {
+                guidance_profile, ..
+            } => *guidance_profile,
+            _ => CodingGuidanceProfile::default(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_with_auth_transport_options_and_metadata_with_recording_mode_and_context_with_result_projection(
         &self,
@@ -1120,6 +1154,7 @@ impl ToolRuntime {
         super::window_activity::ToolCallCorrelation,
     ) {
         let mut result_projection = ModelFacingProjectionPlan::capture(&call);
+        let context_guidance_profile = Self::context_guidance_profile(&call);
         let immediate_tool_name = call.tool_name();
         let immediate_expectation = recorder_metadata.expectation.clone();
         let mut correlation = super::window_activity::ToolCallCorrelation::default();
@@ -1153,12 +1188,13 @@ impl ToolRuntime {
         // answering the explicit sidecar request conservatively: static material
         // remains available, but project-scoped material must not guess a target.
         if !context_request.is_empty() && result.output.get("context_projection").is_none() {
-            self.add_requested_context_projection(
+            self.add_requested_context_projection_with_guidance(
                 &mut result,
                 &context_request,
                 None,
                 auth,
                 material_capabilities,
+                context_guidance_profile,
             )
             .await;
         }
@@ -1370,6 +1406,7 @@ impl ToolRuntime {
         } else {
             resolved_project.cloned()
         };
+        let context_guidance_profile = Self::context_guidance_profile(&call);
         // work_on_project.session_id is explicit coding-resume business input,
         // never a generic tool recorder. Its implementation delegates exact
         // Session/project/lifecycle/authority handling to the coding workflow
@@ -1616,7 +1653,7 @@ impl ToolRuntime {
         let permission = super::permissions::evaluate_permission_for_tool(
             &self.permission_evaluator,
             call.tool_name(),
-            call.project(),
+            activity_project.as_deref().or_else(|| call.project()),
         );
         if let Some(decision) = permission.as_ref() {
             if !decision.allows_execution() {
@@ -1670,6 +1707,13 @@ impl ToolRuntime {
                     .and_then(|resolved| resolved.as_ref().ok()),
             )
             .await;
+        let source_mutation = if super::validation_source::observes_potential_mutation(&call) {
+            activity_project
+                .as_deref()
+                .and_then(|project| self.validation_sources.begin(project))
+        } else {
+            None
+        };
         let mut result = self
             .dispatch_authorized_inner(
                 call,
@@ -1686,6 +1730,9 @@ impl ToolRuntime {
                 correlation,
             )
             .await;
+        if let Some(observation) = source_mutation {
+            observation.finish(&result);
+        }
         if !result.success
             && result.output["command_started"] == false
             && result.output["execution_state"] == "not_started"
@@ -1761,12 +1808,13 @@ impl ToolRuntime {
                 );
             }
         }
-        self.add_requested_context_projection(
+        self.add_requested_context_projection_with_guidance(
             &mut result,
             &context_request,
             context_projection_project.as_ref(),
             auth,
             material_capabilities,
+            context_guidance_profile,
         )
         .await;
         sparsify_terminal_structured_execution_success(tool_name, &mut result);
@@ -1874,11 +1922,6 @@ impl ToolRuntime {
                 project,
                 session_id,
             } => self.work_result_state(project, session_id, auth).await,
-
-            ToolCall::PresentChanges {
-                project,
-                session_id,
-            } => self.present_changes(project, session_id, auth).await,
 
             ToolCall::ChangesFileDiff {
                 project,
@@ -2246,8 +2289,15 @@ impl ToolRuntime {
             ToolCall::CreateGoal {
                 title,
                 objective,
+                controller_agent_id,
                 idempotency_key,
-            } => self.create_goal(auth, title, objective, idempotency_key),
+            } => self.create_goal_with_controller(
+                auth,
+                title,
+                objective,
+                controller_agent_id,
+                idempotency_key,
+            ),
 
             ToolCall::GetGoal { goal_id } => self.get_goal(auth, goal_id),
 
@@ -2271,15 +2321,17 @@ impl ToolRuntime {
                 expected_revision,
                 title,
                 objective,
+                controller_agent_id,
                 lifecycle,
                 terminal_reason,
                 idempotency_key,
-            } => self.update_goal(
+            } => self.update_goal_with_controller(
                 auth,
                 goal_id,
                 expected_revision,
                 title,
                 objective,
+                controller_agent_id,
                 lifecycle.map(|value| value.as_str().to_string()),
                 terminal_reason,
                 idempotency_key,
@@ -2304,6 +2356,8 @@ impl ToolRuntime {
                 agent_id,
                 endpoint_id,
                 expected_controller_generation,
+                mode,
+                goal_id,
                 events,
                 idempotency_key,
             } => self.wait_for_agent_events(
@@ -2311,6 +2365,8 @@ impl ToolRuntime {
                 agent_id,
                 endpoint_id,
                 expected_controller_generation,
+                mode,
+                goal_id,
                 events,
                 idempotency_key,
             ),
@@ -2904,6 +2960,7 @@ impl ToolRuntime {
             | ToolCall::ListProjectTrackedFiles { .. }
             | ToolCall::ProjectOverview { .. }
             | ToolCall::SearchProjectTexts { .. }
+            | ToolCall::SearchAndRead { .. }
             | ToolCall::WriteProjectFile { .. }
             | ToolCall::SaveProjectArtifact { .. }
             | ToolCall::ProjectArtifact { .. }

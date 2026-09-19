@@ -322,6 +322,10 @@ fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime()
         let desc = sync_wait["description"].as_str().unwrap_or("");
         assert!(desc.contains("same execution"), "{name}: {desc}");
         assert!(
+            desc.contains("Runtime early-handoff default"),
+            "{name}: {desc}"
+        );
+        assert!(
             desc.contains("never extends timeout_secs"),
             "{name}: {desc}"
         );
@@ -337,6 +341,11 @@ fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime()
     assert_eq!(sync_wait["minimum"], 1);
     assert!(sync_wait.get("maximum").is_none());
     assert!(sync_wait.get("default").is_none());
+    let sync_wait_desc = sync_wait["description"].as_str().unwrap_or("");
+    assert!(
+        sync_wait_desc.contains("Runtime early-handoff default"),
+        "cargo_fmt: {sync_wait_desc}"
+    );
     for valid in [
         serde_json::json!({"project": "agent:demo:repo", "check": false, "sync_wait_secs": 1}),
         serde_json::json!({"project": "agent:demo:repo", "sync_wait_secs": 60}),
@@ -556,6 +565,38 @@ fn run_script_schema_is_typed_bounded_and_hides_execution_infrastructure() {
     assert!(properties["timeout_secs"].get("maximum").is_none());
     assert_eq!(properties["timeout_secs"]["default"], 60);
     assert_eq!(spec.input_schema["additionalProperties"], false);
+}
+
+#[test]
+fn execution_timeout_schema_descriptions_keep_form_specific_lifetime_ceilings() {
+    let specs = registered_tool_specs();
+    for name in ["run_process", "run_script", "run_detached_process"] {
+        let timeout = &spec_named(&specs, name).input_schema["properties"]["timeout_secs"];
+        assert_eq!(timeout["minimum"], 1, "{name}");
+        assert_eq!(timeout["default"], 60, "{name}");
+        assert!(timeout.get("maximum").is_none(), "{name}");
+        let description = timeout["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} timeout description"));
+        assert!(
+            description.contains("execution lifetime"),
+            "{name}: {description}"
+        );
+        assert!(description.contains("604800"), "{name}: {description}");
+        assert!(description.contains("7 days"), "{name}: {description}");
+    }
+
+    for name in ["run_shell", "run_skill_resource", "cargo_check"] {
+        let timeout = &spec_named(&specs, name).input_schema["properties"]["timeout_secs"];
+        let description = timeout["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} timeout description"));
+        assert!(description.contains("3600"), "{name}: {description}");
+        assert!(
+            !description.contains("604800"),
+            "{name} must retain the one-hour ceiling: {description}"
+        );
+    }
 }
 
 #[test]
@@ -788,6 +829,7 @@ fn bootstrap_agent_conversation_activation_key_is_inbox_only_contract() {
         "OMIT this field",
         "agent_task_attempt",
         "attention_event",
+        "agent_wait_events",
         "Endpoint carrier",
     ] {
         assert!(
@@ -802,6 +844,7 @@ fn bootstrap_agent_conversation_activation_key_is_inbox_only_contract() {
         "Inbox-style Wake",
         "agent_task_attempt",
         "attention_event",
+        "agent_wait_events",
         "omit it",
         "Endpoint carrier",
     ] {
@@ -979,8 +1022,12 @@ fn code_mode_mutating_schema_keeps_authority_outer_bound_and_mutation_scope_narr
     let source_description = properties["source"]["description"]
         .as_str()
         .unwrap_or_default();
-    assert!(source_description.contains("one canonical apply_text_edits mutation attempt"));
-    assert!(source_description.contains("Validation"));
+    assert!(source_description.contains("at most one canonical apply_text_edits attempt"));
+    assert!(
+        source_description.contains("cargo_check/cargo_test only after a successful known edit")
+    );
+    assert!(source_description.contains("source_state"));
+    assert!(source_description.contains("never wait inside JS"));
 }
 
 #[test]

@@ -44,6 +44,9 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
         "observe_jobs" => {
             args.insert("items".to_string(), json!([{"job_id": "job_123"}]));
         }
+        "search_and_read" => {
+            args.insert("query".to_string(), json!({"pattern": "fn main"}));
+        }
         "browser_observe" => {
             args.insert("action".to_string(), json!("targets"));
         }
@@ -95,7 +98,6 @@ fn sample_field_value(field: &str) -> Value {
         "instruction" => json!("implement the requested change"),
         "objective" => json!("Preserve durable high-level intent without execution authority."),
         "title" => json!("Durable agent work"),
-        "include_project_instructions" | "include_workflow_guidance" => json!(false),
         "content_base64" => json!("AA=="),
         "openaiFileIdRefs" => json!([{
             "download_url": "https://files.oaiusercontent.com/test",

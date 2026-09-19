@@ -999,7 +999,8 @@ async fn real_cargo_nonzero_failures_match_validation_failed_expectations() {
                 "project": &project,
                 "session_id": &sid,
                 "filter": "failing",
-                "timeout_secs": 60,
+                "timeout_secs": 55,
+                "sync_wait_secs": 55,
                 "expected_failure": true,
                 "expected_failure_kind": "validation_failed",
                 "assertion_name": "cargo_test expected validation failure"
@@ -1016,7 +1017,8 @@ async fn real_cargo_nonzero_failures_match_validation_failed_expectations() {
                 "project": &project,
                 "session_id": &sid,
                 "check": true,
-                "timeout_secs": 60,
+                "timeout_secs": 55,
+                "sync_wait_secs": 55,
                 "expected_failure": true,
                 "expected_failure_kind": "validation_failed",
                 "assertion_name": "cargo_fmt expected validation failure"
@@ -1032,7 +1034,8 @@ async fn real_cargo_nonzero_failures_match_validation_failed_expectations() {
             json!({
                 "project": &project,
                 "session_id": &sid,
-                "timeout_secs": 60,
+                "timeout_secs": 55,
+                "sync_wait_secs": 55,
                 "expected_failure": true,
                 "expected_failure_kind": "validation_failed",
                 "assertion_name": "cargo_check expected validation failure"
@@ -1163,7 +1166,8 @@ async fn public_failure_expectation_preserves_raw_cargo_failure_as_expected_vali
                     "project": project,
                     "session_id": sid,
                     "filter": "failing",
-                    "timeout_secs": 60,
+                    "timeout_secs": 55,
+                    "sync_wait_secs": 55,
                     "result_expectation": "failure",
                     "assertion_name": assertion_name
                 }),
@@ -1368,7 +1372,8 @@ async fn cargo_test_zero_tests_success_is_detected_and_warns_in_handoff() {
                     "project": project,
                     "session_id": sid,
                     "filter": "missing_filter",
-                    "timeout_secs": 60,
+                    "timeout_secs": 55,
+                    "sync_wait_secs": 55,
                     "expected_failure": true,
                     "expected_failure_kind": "validation_failed",
                     "assertion_name": "cargo_test expected failure but ran zero tests"
@@ -2603,7 +2608,7 @@ async fn session_handoff_historical_mixed_current_pass_does_not_block_closeout()
     );
     assert_eq!(
         result.output["validation"]["current_evidence"]["status"],
-        "passed"
+        "unproven"
     );
     assert_eq!(
         result.output["validation"]["current_evidence"]["unresolved_failure_count"],
@@ -2618,7 +2623,7 @@ async fn session_handoff_historical_mixed_current_pass_does_not_block_closeout()
         result.output["tool_failures"]["actionable_unexpected_count"],
         0
     );
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(result.output["task_outcome"]["blocking"], false);
     assert_eq!(
         result.output["evidence_history"]["status"],
@@ -2895,7 +2900,7 @@ async fn session_handoff_keeps_real_proof_after_later_zero_test_event() {
     assert_eq!(result.output["validation"]["latest_status"], "inconclusive");
     assert_eq!(
         result.output["validation"]["current_evidence"]["status"],
-        "passed"
+        "unproven"
     );
     assert_eq!(
         result.output["validation"]["current_evidence"]["unresolved_failure_count"],
@@ -2913,7 +2918,7 @@ async fn session_handoff_keeps_real_proof_after_later_zero_test_event() {
         result.output["validation"]["cargo_test_zero_tests_run"],
         true
     );
-    assert_eq!(result.output["task_outcome"]["status"], "pass");
+    assert_eq!(result.output["task_outcome"]["status"], "warn");
     assert_eq!(
         result.output["evidence_history"]["status"],
         "mixed_resolved"

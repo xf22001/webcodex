@@ -249,8 +249,21 @@ impl BrowserSupervisor {
         let mut nodes = Vec::new();
         let mut aggregate_bytes = 0usize;
         let mut truncated = snapshot.truncated;
+        let mut group_ids = HashMap::<String, String>::new();
+        let mut next_group_id = 1usize;
         for node in snapshot.nodes.into_iter().take(MAX_SNAPSHOT_NODES) {
-            let projected = runtime.project_node(page_id, &snapshot.document_id, generation, node);
+            let group_id = node.group_key.as_ref().map(|key| {
+                group_ids
+                    .entry(key.clone())
+                    .or_insert_with(|| {
+                        let id = format!("group_{next_group_id}");
+                        next_group_id = next_group_id.saturating_add(1);
+                        id
+                    })
+                    .clone()
+            });
+            let projected =
+                runtime.project_node(page_id, &snapshot.document_id, generation, node, group_id);
             let projected_bytes = serde_json::to_vec(&projected)
                 .map(|value| value.len())
                 .unwrap_or(MAX_SNAPSHOT_BYTES);
@@ -321,6 +334,57 @@ impl BrowserSupervisor {
         }
         self.element_effect(browser_id, page_id, element_id, |backend, target, node| {
             backend.input_text(target, node, text)
+        })
+    }
+
+    pub fn select_option(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        element_id: &str,
+        option: &str,
+    ) -> BrowserResult<()> {
+        self.touch_current(browser_id)?;
+        if option.is_empty() || option.contains('\0') || option.len() > MAX_INPUT_TEXT_BYTES {
+            return Err(BrowserError::not_started(
+                "invalid_option",
+                "select option must be non-empty, NUL-free, and within the Browser UTF-8 byte bound",
+            ));
+        }
+        self.element_effect(browser_id, page_id, element_id, |backend, target, node| {
+            backend.select_option(target, node, option)
+        })
+    }
+
+    pub fn set_value(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        element_id: &str,
+        value: &str,
+    ) -> BrowserResult<()> {
+        self.touch_current(browser_id)?;
+        if value.is_empty() || value.contains('\0') || value.len() > MAX_INPUT_TEXT_BYTES {
+            return Err(BrowserError::not_started(
+                "invalid_value",
+                "form value must be non-empty, NUL-free, and within the Browser UTF-8 byte bound",
+            ));
+        }
+        self.element_effect(browser_id, page_id, element_id, |backend, target, node| {
+            backend.set_value(target, node, value)
+        })
+    }
+
+    pub fn upload_file(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        element_id: &str,
+        path: &std::path::Path,
+    ) -> BrowserResult<()> {
+        self.touch_current(browser_id)?;
+        self.element_effect(browser_id, page_id, element_id, |backend, target, node| {
+            backend.upload_file(target, node, path)
         })
     }
 
@@ -592,6 +656,7 @@ impl BrowserRuntime {
         document_id: &str,
         snapshot_generation: u64,
         node: BackendNode,
+        group_id: Option<String>,
     ) -> SemanticNode {
         let mut element_id = None;
         if node.actionable {
@@ -615,9 +680,22 @@ impl BrowserRuntime {
             name: node
                 .name
                 .map(|value| clip_bytes(&value, MAX_NODE_TEXT_BYTES)),
+            description: node
+                .description
+                .map(|value| clip_bytes(&value, MAX_NODE_TEXT_BYTES)),
             value: node
                 .value
                 .map(|value| clip_bytes(&value, MAX_NODE_TEXT_BYTES)),
+            group_id,
+            group_role: node.group_role.map(|value| clip_chars(&value, 64)),
+            group_label: node
+                .group_label
+                .map(|value| clip_bytes(&value, MAX_NODE_TEXT_BYTES)),
+            checked: node.checked.map(|value| clip_chars(&value, 32)),
+            selected: node.selected,
+            required: node.required,
+            disabled: node.disabled,
+            read_only: node.read_only,
             element_id,
             actionable: node.actionable,
         }
@@ -812,7 +890,16 @@ mod tests {
                 .map(|index| BackendNode {
                     role: "button".to_string(),
                     name: Some(format!("Go {index}")),
+                    description: None,
                     value: Some("x".repeat(MAX_NODE_TEXT_BYTES * 2)),
+                    group_key: None,
+                    group_role: None,
+                    group_label: None,
+                    checked: None,
+                    selected: None,
+                    required: None,
+                    disabled: None,
+                    read_only: None,
                     backend_node_id: Some(index as i64 + 7),
                     actionable: true,
                 })
@@ -845,6 +932,30 @@ mod tests {
             _target_id: &str,
             _backend_node_id: i64,
             _text: &str,
+        ) -> BrowserResult<()> {
+            Ok(())
+        }
+        fn select_option(
+            &mut self,
+            _target_id: &str,
+            _backend_node_id: i64,
+            _option: &str,
+        ) -> BrowserResult<()> {
+            Ok(())
+        }
+        fn set_value(
+            &mut self,
+            _target_id: &str,
+            _backend_node_id: i64,
+            _value: &str,
+        ) -> BrowserResult<()> {
+            Ok(())
+        }
+        fn upload_file(
+            &mut self,
+            _target_id: &str,
+            _backend_node_id: i64,
+            _path: &std::path::Path,
         ) -> BrowserResult<()> {
             Ok(())
         }
@@ -1062,6 +1173,58 @@ mod tests {
             assert_eq!(error.kind, "invalid_text");
             assert_eq!(error.execution_state, ExecutionState::NotStarted);
         }
+    }
+
+    #[test]
+    fn form_value_bounds_fail_before_effect_dispatch() {
+        let supervisor = fixture();
+        let browser = supervisor.launch().unwrap();
+        let page = supervisor.pages(&browser.browser_id, 8).unwrap().remove(0);
+        let element = supervisor
+            .snapshot(&browser.browser_id, &page.page_id)
+            .unwrap()
+            .nodes[0]
+            .element_id
+            .clone()
+            .unwrap();
+
+        for invalid in ["", "nul\0value"] {
+            let option_error = supervisor
+                .select_option(&browser.browser_id, &page.page_id, &element, invalid)
+                .unwrap_err();
+            assert_eq!(option_error.kind, "invalid_option");
+            assert_eq!(option_error.execution_state, ExecutionState::NotStarted);
+
+            let value_error = supervisor
+                .set_value(&browser.browser_id, &page.page_id, &element, invalid)
+                .unwrap_err();
+            assert_eq!(value_error.kind, "invalid_value");
+            assert_eq!(value_error.execution_state, ExecutionState::NotStarted);
+        }
+        assert_eq!(
+            supervisor
+                .select_option(
+                    &browser.browser_id,
+                    &page.page_id,
+                    &element,
+                    &"x".repeat(MAX_INPUT_TEXT_BYTES + 1),
+                )
+                .unwrap_err()
+                .kind,
+            "invalid_option"
+        );
+        assert_eq!(
+            supervisor
+                .set_value(
+                    &browser.browser_id,
+                    &page.page_id,
+                    &element,
+                    &"x".repeat(MAX_INPUT_TEXT_BYTES + 1),
+                )
+                .unwrap_err()
+                .kind,
+            "invalid_value"
+        );
     }
 
     #[test]

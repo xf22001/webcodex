@@ -124,10 +124,6 @@ Recovery fields in a result describe the next safe **explicit** call. They never
 
 A hosted Server can expose Runner-owned local stdio MCP providers through the same `/mcp` endpoint. Authorized callers use the single `mcp_tool` entry to list, describe, and call configured providers; provider process/instance identities and schema-revision state stay internal.
 
-**`mcp_tool` is not the WebCodex business-tool catalog.** It only lists external/local providers configured under Runner `[mcp]`. With no providers configured, `action=list` successfully returns `{"servers":[]}`. That is expected: it does **not** mean the Server is unreachable, the Runner is offline, or no Project is registered.
-
-When discovering coding tools, prefer Adaptive Direct (`work_on_project`, `read_files`, `runtime_status`, `tool_manifest`). Long-tail tools such as `list_projects` are invoked through `call_runtime_tool`, not as direct tools (direct calls return `not a direct adaptive_runtime tool`). Compact `runtime_status` projections often expose only `projects.count`; call `list_projects` or `project_overview` when the model needs a `project id` or `path`. If a connector confuses `mcp_tool`'s `servers` array with the project catalog, see [Troubleshooting](TROUBLESHOOTING.md#connector-says-no-registered-projects--workspace-is-empty).
-
 Configure local providers on the Runner under `[mcp]`. Access requires the explicit `mcp:local` permission; hosted OAuth clients opt in with `webcodex connect ... --oauth-local-mcp`. See [Runner](RUNNER.md#provider-side-gateway-v1-compatibility) for provider compatibility details.
 
 ### Managed SSH resource onboarding
@@ -301,6 +297,36 @@ prose.
 ## Adaptive Runtime extensions
 
 The same ToolRuntime serves project-scoped local `share`/`run` instances and multi-project hosted Servers through one Adaptive Runtime contract. Project-scoped credentials change visibility and authority, not the model-facing runtime shape. Protocol-specific capabilities and MCP Apps may admit additional hidden presentation or resource operations without creating another runtime surface.
+
+Stateless MCP keeps Memory tools and the Skill compatibility tools `skill_list`
+and `skill_read_file` off the top-level `tools/list`, even with full OAuth scopes.
+Their exact contracts remain available through `tool_manifest(tool_name=...)`
+and execute through `call_runtime_tool` with unchanged scope, Project, permission,
+and capability checks. Existing direct protocol compatibility and the
+`memory.bootstrap` context sidecar remain supported. Ordinary Skill selection
+and execution keep the direct `skill_load` and `run_skill_resource` paths.
+The optional closeout helpers `workspace_hygiene_check` and `finish_coding_task`
+are model-visible gateway tools; review/coding catalogs still recommend them.
+
+`WEBCODEX_MCP_COMPACT_SCHEMAS` defaults to `true`. Compact `tools/list` omits
+`outputSchema` and projects shorter MCP-specific tool/input descriptions for
+selection: purpose, nearby tool distinctions, and essential continuation guidance.
+Repeated Session/context wrapper and audited common-argument copy is shortened
+too. Compact discovery omits only the exact opaque-ID regexes on
+`recording_session_id`, `ack_session_message_ids.items`, and
+`session_message_resolution.message_id`; their existing parent descriptions keep
+the `wc_sess_*` / `wc_msg_*` type hints. Copy the exact returned IDs.
+Business-ID, hash/Git fence and resource-path patterns, all bounds, field names,
+required fields, enums, object/union shape, annotations, and MCP App/file metadata
+are preserved. This is discovery presentation only; runtime argument validation
+and execution authority do not change.
+
+Use `tool_manifest(tool_name=...)` for the full exact input contract and operational
+description, or set compact schemas to `false` for full discovery schemas.
+Canonical ToolSpecs are never rewritten. Focused MCP tests compare inputs against
+canonical schemas (with the explicit host-file reference overlay) and enforce
+serialized-byte and advertised-tool-count budgets on final Stateless results,
+including Session wrappers, gateway tools, and optional App metadata/tools.
 
 ### ChatGPT file bridge
 

@@ -10,6 +10,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     for phrase in [
         "canonical bootstrap",
         "ordinary coding/review",
+        "project_ref",
         "omit session_id",
         "fresh workflow session",
         "does not imply a fresh model context",
@@ -18,16 +19,15 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "exact resume",
         "active accessible session",
         "never guesses prior session",
-        "project instructions",
-        "workflow guidance",
-        "skills",
-        "plugin",
-        "selection metadata",
-        "current model context",
-        "does not require git",
-        "never proves retention",
-        "skill_read_file",
-        "plugin_tool describe",
+        "context_request",
+        "project.instructions",
+        "webcodex.workflow",
+        "guidance_profile",
+        "no authority",
+        "principal-scoped",
+        "reauthorizes",
+        "include_extension_catalog",
+        "skills/plugins",
         "mode=worktree",
         "exact git base",
         "project authority",
@@ -81,23 +81,18 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "bounded structured results",
         "protected-path policy",
         "isolated failures",
-        "portable runtime search semantics",
         "broad discovery",
         "files_with_matches/count",
-        "small bounded match set with little context",
-        "target read_files/native reads",
+        "matched source will be read immediately",
+        "search_and_read",
         "small known-scope search",
-        "native rg via run_process or a shell command is first-class",
-        "batch only queries already known to be needed",
+        "native rg is first-class",
+        "batch only independent queries",
         "result-dependent follow-ups sequential",
         "pattern_mode=literal",
-        "request context explicitly",
-        "whole-query",
-        "parser-ready suggested_call",
-        "fits the model result budget",
-        "without a raw cursor or fake call",
-        "no safe match cursor",
-        "refined",
+        "returned suggested_call",
+        "whole-query continuation",
+        "truncated individual queries must be narrowed",
     ] {
         assert!(
             batch_search_desc.contains(phrase),
@@ -349,13 +344,11 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "may omit expected_read_revision",
         "occurrence or line_scope",
         "requires expected_read_revision",
-        "stronger whole-file stale-context fence",
+        "revisions fence whole-file snapshots",
         "model input never needs a digest",
         "preflighted transactionally",
         "conflicts fail closed",
-        "rechecks planned source content before mutation",
-        "expected correctness and reliability",
-        "minimal error facts",
+        "rechecks source before mutation",
         "one parser-ready read_files recovery call",
         "inspect the resulting diff",
         "validate the final source",
@@ -815,6 +808,14 @@ fn edit_tool_surface_keeps_mutation_options_visible_and_schemas_stable() {
             "apply_text_edits must keep field {field}"
         );
     }
+    let text_edit_output =
+        &spec_named(&specs, "apply_text_edits").output_schema["properties"]["output"]["properties"];
+    let text_edit_file_properties = text_edit_output["files"]["items"]["properties"]
+        .as_object()
+        .expect("apply_text_edits file summary properties");
+    assert!(text_edit_file_properties.contains_key("read_revision"));
+    assert!(!text_edit_file_properties.contains_key("old_sha256"));
+    assert!(!text_edit_file_properties.contains_key("new_sha256"));
     let codex_patch = &spec_named(&specs, "apply_patch").input_schema["properties"];
     for field in ["project", "patch", "dry_run", "matching_mode"] {
         assert!(
@@ -989,11 +990,7 @@ fn session_tool_specs_describe_explicit_targeting() {
         .as_str()
         .expect("work_on_project session_id description")
         .to_lowercase();
-    for phrase in [
-        "does not prove",
-        "fresh model context",
-        "include_* defaults true",
-    ] {
+    for phrase in ["does not prove", "fresh model context", "context_request"] {
         assert!(
             session_id_description.contains(phrase),
             "work_on_project session_id description should mention {phrase}: {session_id_description}"
@@ -1069,7 +1066,6 @@ fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
         "no wait_secs",
         "wake_on=change",
         "wake_on=terminal",
-        "wait_secs=100",
         "useful progress is blocked on terminal outcome",
         "independent work remains",
         "do not poll for visibility",
@@ -1077,11 +1073,24 @@ fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
     ] {
         assert!(spec.description.contains(phrase), "missing {phrase}");
     }
+    let recommended_wait = format!(
+        "wait_secs={}",
+        webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS
+    );
+    assert!(
+        spec.description.contains(&recommended_wait),
+        "missing {recommended_wait}"
+    );
     let wait_description = spec.input_schema["properties"]["wait_secs"]["description"]
         .as_str()
         .unwrap();
     assert!(wait_description.contains("above 100 seconds"));
     assert!(wait_description.contains("clamped to 100"));
+    let recommended_wait_description = format!(
+        "recommend {} seconds",
+        webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS
+    );
+    assert!(wait_description.contains(&recommended_wait_description));
     assert!(wait_description.contains("further useful progress depends on terminal outcome"));
     assert!(wait_description.contains("independent work continues"));
     let wake_description = wake["description"].as_str().unwrap();

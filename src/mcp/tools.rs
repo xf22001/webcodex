@@ -44,30 +44,31 @@ fn filter_specs_for_oauth(mut specs: Vec<ToolSpec>, auth: Option<&AuthContext>) 
     specs
 }
 
-fn stateless_operator_extension_specs_for_auth(
+// Discovery projection only. Canonical operator-extension specs still own
+// direct compatibility, capability-aware manifests, and gateway admission.
+fn stateless_advertised_operator_extension_specs_for_auth(
     stateless_2026: bool,
     auth: Option<&AuthContext>,
 ) -> Vec<ToolSpec> {
     if !stateless_2026 {
         return Vec::new();
     }
-    let oauth_scope_projection = auth.is_some_and(AuthContext::is_oauth_token);
     crate::tool_runtime::stateless_operator_extension_tool_specs()
         .into_iter()
         .filter(
             |spec| match runtime_tool_operator_extension_family(&spec.name) {
-                Some(ToolOperatorExtensionFamily::SkillRuntime) => {
-                    !oauth_scope_projection || check_runtime_tool_scope(auth, &spec.name).is_ok()
-                }
                 Some(ToolOperatorExtensionFamily::SkillManagement) => {
                     auth.is_some_and(|auth| auth.has_scope(crate::auth::SCOPE_ADMIN))
                 }
+                Some(ToolOperatorExtensionFamily::TraceDiagnostics) => {
+                    check_runtime_tool_scope(auth, &spec.name).is_ok()
+                }
                 Some(
-                    ToolOperatorExtensionFamily::MemoryRuntime
-                    | ToolOperatorExtensionFamily::MemoryManagement
-                    | ToolOperatorExtensionFamily::TraceDiagnostics,
-                ) => check_runtime_tool_scope(auth, &spec.name).is_ok(),
-                None => false,
+                    ToolOperatorExtensionFamily::SkillRuntime
+                    | ToolOperatorExtensionFamily::MemoryRuntime
+                    | ToolOperatorExtensionFamily::MemoryManagement,
+                )
+                | None => false,
             },
         )
         .collect()
@@ -308,7 +309,7 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
         crate::model_surface::adaptive_runtime_direct_tool_specs(),
         auth,
     );
-    specs.extend(stateless_operator_extension_specs_for_auth(
+    specs.extend(stateless_advertised_operator_extension_specs_for_auth(
         stateless_2026,
         auth,
     ));
@@ -329,7 +330,6 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
             crate::tool_runtime::goal_plan_app_tool_specs()
                 .into_iter()
                 .chain(crate::tool_runtime::work_result_app_tool_specs())
-                .chain(crate::tool_runtime::changes_app_tool_specs())
                 .chain(crate::tool_runtime::agent_continuation_app_tool_specs())
                 .chain(crate::tool_runtime::job_terminal_continuation_app_tool_specs())
                 .collect(),
@@ -756,6 +756,81 @@ fn log_agent_continuation_app_result(
     );
 }
 
+fn attach_job_terminal_resume_suggested_call_schema(
+    tool_name: &str,
+    app_enabled: bool,
+    value: &mut Value,
+) {
+    if !app_enabled || tool_name != "wait_for_job_terminal" {
+        return;
+    }
+    let Some(properties) = value
+        .pointer_mut("/outputSchema/properties/output/properties")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    properties.insert(
+        "suggested_call".to_string(),
+        json!({
+            "type": "object",
+            "description": "Host-specific parser-ready advisory call for the current MCP App continuation carrier. Present only for a still-waiting Job when this Host can create that carrier; it grants no authority and should be used only when no independent work remains and the current model turn can yield immediately after presentation.",
+            "additionalProperties": false,
+            "properties": {
+                "tool": {"type": "string", "const": "present_job_terminal_continuation"},
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "wait_id": {
+                            "type": "string",
+                            "pattern": "^wc_job_wait_[A-Za-z0-9_-]{16}$"
+                        }
+                    },
+                    "required": ["wait_id"]
+                }
+            },
+            "required": ["tool", "arguments"]
+        }),
+    );
+}
+
+pub(super) fn project_job_terminal_resume_suggested_call(
+    carrier_available: bool,
+    result: &mut ToolResult,
+) {
+    if !carrier_available || !result.success {
+        return;
+    }
+    let Some(output) = result.output.as_object_mut() else {
+        return;
+    };
+    if output
+        .get("automatic_resume_available")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || output.get("state").and_then(Value::as_str) != Some("waiting")
+        || output.get("delivery_state").and_then(Value::as_str) != Some("not_ready")
+    {
+        return;
+    }
+    let Some(wait_id) = output
+        .get("wait_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    output.insert(
+        "suggested_call".to_string(),
+        crate::tool_runtime::SuggestedToolCall::new(
+            "present_job_terminal_continuation",
+            json!({"wait_id": wait_id}),
+        )
+        .to_value(),
+    );
+}
+
 fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> Value {
     let tool_name = spec.name.clone();
     if matches!(tool_name.as_str(), "computer_observe" | "browser_observe") {
@@ -825,9 +900,6 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
     if app_enabled && presentation::tool_supports_work_result_app(&tool_name) {
         attach_app_metadata(&mut value, resources::MCP_WORK_RESULT_UI_RESOURCE_URI);
     }
-    if app_enabled && presentation::tool_supports_changes_app(&tool_name) {
-        attach_app_metadata(&mut value, resources::MCP_CHANGES_UI_RESOURCE_URI);
-    }
     if app_enabled && presentation::tool_supports_goal_plan_app(&tool_name) {
         attach_app_metadata(&mut value, resources::MCP_GOAL_PLAN_UI_RESOURCE_URI);
     }
@@ -842,6 +914,10 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
             &mut value,
             resources::MCP_JOB_TERMINAL_CONTINUATION_UI_RESOURCE_URI,
         );
+    }
+    attach_job_terminal_resume_suggested_call_schema(&tool_name, app_enabled, &mut value);
+    if compact {
+        super::discovery::compact_tool(&mut value);
     }
     value
 }
@@ -909,6 +985,15 @@ pub(super) async fn handle_list(
                 }
             }
             tools.push(spec);
+        }
+    }
+    if compact_schemas {
+        // Include adapter-added gateway and Session/context wrapper descriptions.
+        // Apply after overlays so none of their repeated full copy leaks into L1.
+        if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools {
+                super::discovery::compact_tool(tool);
+            }
         }
     }
     McpOutcome::Ok(rpc_result(
@@ -1827,12 +1912,11 @@ pub(super) async fn handle_call(
     // their independent server/protocol admission.
     let goal_plan_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let work_result_app_admitted = server_mcp_apps_enabled && stateless_2026;
-    let changes_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let agent_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let job_terminal_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let app_only_goal_plan_state = goal_plan_app_admitted && params.name == "goal_plan_state";
     let app_only_work_result_state = work_result_app_admitted && params.name == "work_result_state";
-    let app_only_changes_file_diff = changes_app_admitted && params.name == "changes_file_diff";
+    let app_only_changes_file_diff = work_result_app_admitted && params.name == "changes_file_diff";
     let app_only_agent_continuation =
         agent_continuation_app_admitted && is_agent_continuation_app_tool_name(&params.name);
     let app_only_job_terminal_continuation = job_terminal_continuation_app_admitted
@@ -1968,7 +2052,6 @@ pub(super) async fn handle_call(
     let trace_diagnostics_capable = stateless_2026;
     let goal_plan_app_capable = goal_plan_app_admitted;
     let work_result_app_capable = work_result_app_admitted;
-    let changes_app_capable = changes_app_admitted;
     let agent_continuation_app_capable = agent_continuation_app_admitted;
     let context_request = if context_sidecar_capable {
         match strip_stateless_context_request(&mut params.arguments) {
@@ -2024,7 +2107,6 @@ pub(super) async fn handle_call(
                 trace_diagnostics: trace_diagnostics_capable,
                 goal_plan_app: goal_plan_app_capable,
                 work_result_app: work_result_app_capable,
-                changes_app: changes_app_capable,
                 agent_continuation_app: agent_continuation_app_capable,
             },
         )
@@ -2068,6 +2150,12 @@ pub(super) async fn handle_call(
             .expect("tool kernel outcome without error must include result"),
     };
     debug_assert_eq!(outcome.success, result.success);
+    project_job_terminal_resume_suggested_call(
+        app_enabled
+            && job_terminal_continuation_app_admitted
+            && params.name == "wait_for_job_terminal",
+        &mut result,
+    );
     project_tool_result_suggested_calls(&params.name, &mut result, &|target| {
         mcp_suggested_tool_call_route(target, stateless_2026)
     });

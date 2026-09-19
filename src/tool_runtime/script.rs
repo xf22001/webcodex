@@ -57,7 +57,7 @@ impl ToolRuntime {
         auth: Option<&AuthContext>,
     ) -> ToolResult {
         let budget =
-            match StructuredExecutionBudget::resolve_with_sync_wait(timeout_secs, sync_wait_secs) {
+            match StructuredExecutionBudget::resolve_script_with_sync_wait(timeout_secs, sync_wait_secs) {
             Ok(budget) => budget,
             Err(error) => {
                 return process_tool_failure_result(
@@ -287,9 +287,7 @@ impl ToolRuntime {
                         "continuation": continuation,
                     }))
                 }
-                Err(error) => outcome_unknown_result(format!(
-                    "the durable script Job could not be observed during handoff: {error}"
-                )),
+                Err(failure) => return failure.into_tool_result(&project, budget),
             };
             if result.output["promoted_to_job"] != json!(true) {
                 add_structured_continuation_facts(

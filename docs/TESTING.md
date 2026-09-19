@@ -78,8 +78,6 @@ change is ready for review.
 
 The lanes above define test semantics; workflows decide when to run them.
 
-> **xiaofei branch workflow policy:** This branch does not import newly added workflows from `main`. Keep `.github/workflows/` limited to the workflows already owned by `xiaofei` (currently `build.yml`). In particular, a `main` merge must not add `.github/workflows/ci.yml` or other new workflow files. If `main` changes compilation/build parameters, selectively adapt the existing `build.yml` to those parameters instead of importing another workflow. After a merge, verify the final workflow tree and diff before committing.
-
 - `.github/workflows/ci.yml` is the ordinary repository gate. Its cheap `changes`
   job classifies the exact PR base...head path set before native scheduling, while
   the `contract` job remains mandatory for every configured pull request and every

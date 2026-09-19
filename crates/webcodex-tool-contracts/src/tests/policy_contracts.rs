@@ -30,7 +30,8 @@ fn tool_definitions_are_session_evidence_policy_ssot() {
             ToolExplorationEvidence::Read
             | ToolExplorationEvidence::ReadBatch
             | ToolExplorationEvidence::Search
-            | ToolExplorationEvidence::SearchBatch => {
+            | ToolExplorationEvidence::SearchBatch
+            | ToolExplorationEvidence::SearchCompound => {
                 assert_eq!(
                     definition.category, TOOL_CATEGORY_FILE,
                     "{}",
@@ -433,7 +434,6 @@ fn tool_definitions_drive_session_and_permission_policy() {
         vec![
             "finish_coding_task",
             "present_work_result",
-            "present_changes",
             "session_summary",
             "update_session_context",
             "close_session",
@@ -813,6 +813,11 @@ fn required_runner_capability_matches_metadata_risk_table() {
         ),
         (
             "search_project_texts",
+            ToolRisk::Read,
+            RunnerCapabilityRequirement::Shell,
+        ),
+        (
+            "search_and_read",
             ToolRisk::Read,
             RunnerCapabilityRequirement::Shell,
         ),

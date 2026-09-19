@@ -94,7 +94,7 @@ both old and new locations/fields are configured, WebCodex fails closed instead
 of merging or guessing precedence. Use `--project-registry-dir` in new CLI
 commands.
 
-Runtime project ids take the shape `agent:<client_id>:<project_id>`, for example `agent:workstation:my-repo`. ToolRuntime resolves these ids through the caller-visible Runner registry; ordinary users usually do not type them.
+Runtime Project ids take the canonical shape `agent:<client_id>:<project_id>`, for example `agent:workstation:my-repo`. That canonical identity remains the authorization, persistence, audit, Runner-routing, diagnostic, API and CLI address. Model-facing bootstrap/discovery may additionally return a short Server-issued `project_ref` such as `~p1`. Models should normally reuse that selector on later Project-scoped tool calls instead of copying the canonical id. The mapping is durable and scoped to the authenticated caller, is pinned to the canonical id plus Runner-reported Project root identity, and grants no authority: every use re-runs current Project visibility/authorization. It never depends on Workflow Session, ClientWindow, MCP session, transport connection, recent activity or hidden Host state, and a stale ref is never silently rebound to another Project.
 
 ### Allowed roots
 
@@ -177,6 +177,104 @@ use `expected_package_revision` to fence the immutable package. Changing the
 configured `roots` list is a hot-reloadable Runner configuration change: edit
 `runner.toml`, run `runner_config_check`, then `runner_config_reload` with the
 current generation. No Runner process restart is required.
+
+## Runner-level configured instructions
+
+A Runner can project the same coding guidance into every Project bootstrap on that
+Runner. v1 is configured manually in the Runner's `runner.toml`; Desktop file
+selection/upload UI is intentionally deferred.
+
+```toml
+[instructions]
+files = [
+    "/home/alice/.codex/AGENTS.md",
+]
+```
+
+On macOS use the equivalent Runner-local absolute path such as
+`/Users/alice/.codex/AGENTS.md`. On Windows, TOML literal strings avoid escaping
+backslashes:
+
+```toml
+[instructions]
+files = [
+    'C:\Users\alice\.codex\AGENTS.md',
+]
+```
+
+There is no implicit `~/.codex/AGENTS.md` discovery. Each configured path is
+absolute and Runner-local. At coding startup, Runner-configured sources are
+projected first in deterministic config order, followed by the existing
+project-local candidates (`AGENTS.md`, `agents.md`, `CLAUDE.md`,
+`.codex/AGENTS.md`, `.github/copilot-instructions.md`). Both classes are model
+guidance only; neither changes execution authority.
+
+Configured instruction files are read by a narrow Runner-owned instruction
+runtime. Their parent directories are **not** added to `[policy].allowed_roots`,
+ordinary Project file/shell/process tools do not gain access to them, and native
+absolute paths are not projected to the model. Model-facing sources use sanitized
+logical identities instead.
+
+Configured sources must be ordinary UTF-8 files, at most 1 MiB each. The file and
+its parent components must not be symbolic links or Windows reparse points
+(including directory junctions); configure the resolved physical path instead.
+Parent traversal is handle-relative on Unix and preserves search-only directory
+semantics where the platform exposes them. On Windows, the parent path is
+acquired with a native no-reparse open and the leaf is opened relative to that
+pinned parent handle; the parent identity is rechecked before accepting the
+observation, so a concurrent parent replacement cannot retarget the configured
+read. Non-Unix/non-Windows targets fail closed instead of falling back to a
+path-based open. Windows verbatim disk/UNC paths remain accepted, but remote filesystems
+depend on their server-side reparse and handle semantics and should not be
+treated as providing stronger guarantees than the remote server implements.
+The reader checks the opened file handle and enforces the byte bound during
+reading, not only through a prior metadata check. Unreadable, redirected, oversized, or invalid-UTF-8
+sources make the instruction scan incomplete without exposing their native paths
+or failing the entire Project bootstrap.
+
+Changing `[instructions].files` is hot-reloadable: edit `runner.toml`, run
+`runner_config_check`, then `runner_config_reload` with the current generation.
+No Runner restart is required. The files themselves remain live: editing a
+configured `AGENTS.md` is visible to the next `work_on_project`/new Project
+bootstrap without any config reload. Each Project bootstrap observes the current
+Runner-global instructions independently; v1 does not retain or suppress them
+across Projects. Truncated Runner-global sources stay bounded and do not create a
+generic arbitrary-file `read_more` authority.
+
+
+An empty configured file or a missing leaf beneath verified ordinary parent
+directories confirms removal. A missing, redirected, or unreadable parent leaves
+the Runner scope unavailable, as do other read failures. Removing an entry from
+`instructions.files` remains an explicit revocation after config reload.
+An explicit Session resume refreshes Runner and
+Project scopes independently, retaining an unavailable scope's last-known rules
+only in memory. A newly observed Runner instance or config generation cannot
+inherit the previous global rules. Within one instance, a higher known config
+generation wins regardless of request start order; an unknown generation cannot
+replace a known generation. Instance replacement uses live-instance verification
+order, so a late retired-instance observation cannot restore old guidance.
+Within one instance/generation, request observation order breaks ties. Project
+reads have their own start-order fence, independent of Runner availability;
+late Project observations retain newer local rules and report an incomplete
+scan. Retention is scope-wide, not per-file within an incomplete scope.
+Instruction bodies and observation fences are not persisted.
+
+Project-local text reserves its share of the 32 Ki-character snapshot before
+global text is shortened; presentation remains global-before-project. Session
+retention selects scopes before applying this shared budget. An independently
+bounded global source copy (at most 32 Ki characters) stays only in Session
+memory, so retaining a short Project scope or later shrinking it can recover
+global text hidden by an earlier aggregate budget. This source copy and all
+observation fences are omitted from public snapshots and summaries. Runner
+sources never receive a Project `read_file` continuation, including during final
+startup byte-budget reduction. `work_on_project` always re-observes instructions
+and change metadata while keeping instruction bodies out of its primary output.
+An explicit `context_request=["project.instructions"]` observes current Runner
+and Project sources together and projects their bounded bodies without reusing
+Session-retained bodies. The instruction
+projection fits the remaining 20 KiB shared sidecar envelope by dropping derived
+headings before shortening text, preserving source identities and Project rules
+instead of discarding the entire material solely because global sources were added.
 
 ## Local MCP providers
 
@@ -601,8 +699,9 @@ of finding its PID or sending signals manually:
 4. Inspect `runtime_status(client_id=...)` (or `list_runners`) after reload.
 
 `runner_config_reload` never writes `runner.toml`; it only activates the candidate
-already on disk. Hot-reloadable policy, shell, configured Skill roots, Native Plugin, and static SSH-resource changes can
-become active immediately, while fields reported in `restart_required_fields`
+already on disk. Hot-reloadable policy, shell, configured Skill roots, configured
+instruction files, Native Plugin, and static SSH-resource changes can become active
+immediately, while fields reported in `restart_required_fields`
 remain startup-only until the Runner restarts. Invalid candidates leave the active
 snapshot and generation unchanged. Managed `ssh_resource` mutations are different:
 they use a frozen startup snapshot and require a Runner restart exactly when the

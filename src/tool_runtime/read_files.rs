@@ -17,9 +17,95 @@ pub(crate) const MAX_READ_FILES_ITEMS: usize = 8;
 // and downstream Runner admission (for example polling capacity) remain hard bounds.
 pub(crate) const MAX_READ_FILES_CONCURRENCY: usize = 8;
 pub(crate) const DEFAULT_READ_FILES_DEADLINE: Duration = Duration::from_secs(30);
+const READ_FILES_MERGE_GAP_LINES: usize = 20;
+const READ_FILES_MAX_MERGED_LINES: usize = 400;
 pub(crate) use webcodex_core::runtime_contract::{
     DEFAULT_READ_FILES_RESULT_BYTES, MIN_READ_FILES_RESULT_BYTES,
 };
+
+#[derive(Clone, Debug)]
+struct PlannedReadMember {
+    index: usize,
+    start_line: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct PlannedRead {
+    item: ReadFilesItem,
+    members: Vec<PlannedReadMember>,
+}
+
+fn plan_read_files(items: Vec<ReadFilesItem>) -> Vec<PlannedRead> {
+    let mut normalized = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let (start, _, end) =
+                super::files::effective_read_file_range(item.start_line, item.limit);
+            (
+                item.path.clone(),
+                item.expected_read_revision,
+                start,
+                end,
+                PlannedReadMember {
+                    index,
+                    start_line: item.start_line,
+                    limit: item.limit,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.3.cmp(&right.3))
+    });
+
+    let mut planned: Vec<PlannedRead> = Vec::with_capacity(normalized.len());
+    for (path, expected_read_revision, start, end, member) in normalized {
+        let merge_into_last = planned.last_mut().filter(|existing| {
+            existing.item.path == path
+                && existing.item.expected_read_revision == expected_read_revision
+        });
+        if let Some(existing) = merge_into_last {
+            let (existing_start, _, existing_end) = super::files::effective_read_file_range(
+                existing.item.start_line,
+                existing.item.limit,
+            );
+            let merged_end = existing_end.max(end);
+            let merged_lines = merged_end.saturating_sub(existing_start).saturating_add(1);
+            let close_enough = start <= existing_end.saturating_add(READ_FILES_MERGE_GAP_LINES);
+            if close_enough && merged_lines <= READ_FILES_MAX_MERGED_LINES {
+                existing.item.limit = Some(merged_lines);
+                existing.members.push(member);
+                continue;
+            }
+        }
+
+        planned.push(PlannedRead {
+            item: ReadFilesItem {
+                path,
+                start_line: Some(start),
+                limit: Some(end.saturating_sub(start).saturating_add(1)),
+                expected_read_revision,
+            },
+            members: vec![member],
+        });
+    }
+    planned
+}
+
+/// Inspect the unique ranges of the canonical physical read plan in tests.
+#[cfg(test)]
+pub(crate) fn coalesce_read_files_items(items: Vec<ReadFilesItem>) -> Vec<ReadFilesItem> {
+    plan_read_files(items)
+        .into_iter()
+        .map(|planned| planned.item)
+        .collect()
+}
 
 /// Read request facts captured before the ToolCall is moved into execution.
 /// Canonical read results remain independent of this projection; these facts
@@ -738,27 +824,141 @@ impl ToolRuntime {
             .await
     }
 
+    async fn read_planned_member(
+        &self,
+        resolved: &ResolvedProject,
+        runner_project_id: &str,
+        runner_instance_id: &str,
+        path: &str,
+        member: PlannedReadMember,
+        expected_sha256: Option<&str>,
+        with_line_numbers: bool,
+        deadline: Instant,
+    ) -> Value {
+        let mut result = self
+            .read_one_resolved_project_file(
+                &resolved.config,
+                runner_project_id,
+                runner_instance_id,
+                path.to_string(),
+                member.start_line,
+                member.limit,
+                false,
+                deadline,
+            )
+            .await;
+        if result.success {
+            if let Some(expected_sha256) = expected_sha256 {
+                let actual_sha256 = result.output.get("sha256").and_then(Value::as_str);
+                if actual_sha256 != Some(expected_sha256) {
+                    result = stale_read_revision_failure(path);
+                }
+            }
+        }
+        let success = result.success;
+        let error = result.error.clone();
+        let output = result.output;
+        if !success {
+            return json!({
+                "index": member.index,
+                "path": path,
+                "success": false,
+                "output": output,
+                "error": error,
+            });
+        }
+
+        let target = read_revision_target(resolved, path, runner_instance_id);
+        let read_revision = output
+            .get("sha256")
+            .and_then(Value::as_str)
+            .map(|sha256| self.read_revisions.observe(target, sha256.to_string()));
+        let Some(mut member_output) = super::files::slice_read_file_success_output(
+            &output,
+            member.start_line,
+            member.limit,
+            with_line_numbers,
+            path,
+        ) else {
+            return json!({
+                "index": member.index,
+                "path": path,
+                "success": false,
+                "output": {
+                    "error_kind": "read_file_failed",
+                    "reason_code": "malformed_agent_response",
+                    "path": path,
+                    "state_changed": false,
+                },
+                "error": "read_file failed: malformed_agent_response",
+            });
+        };
+        if let Some(read_revision) = read_revision {
+            if let Some(object) = member_output.as_object_mut() {
+                object.insert("read_revision".to_string(), json!(read_revision));
+            }
+        }
+        json!({
+            "index": member.index,
+            "path": path,
+            "success": true,
+            "output": member_output,
+            "error": Value::Null,
+        })
+    }
+
     pub(crate) async fn read_files_resolved(
         &self,
         resolved: &ResolvedProject,
         items: Vec<ReadFilesItem>,
         with_line_numbers: Option<bool>,
     ) -> ToolResult {
+        self.read_files_planned_resolved(resolved, items, with_line_numbers, false)
+            .await
+            .0
+    }
+
+    /// Return successful union ranges once, while retaining the original member
+    /// fallback. The accompanying items describe the actual output order/ranges
+    /// so compound inspection can use canonical budget and continuation logic.
+    pub(crate) async fn read_files_coalesced_resolved(
+        &self,
+        resolved: &ResolvedProject,
+        items: Vec<ReadFilesItem>,
+        with_line_numbers: Option<bool>,
+    ) -> (ToolResult, Vec<ReadFilesItem>) {
+        self.read_files_planned_resolved(resolved, items, with_line_numbers, true)
+            .await
+    }
+
+    async fn read_files_planned_resolved(
+        &self,
+        resolved: &ResolvedProject,
+        items: Vec<ReadFilesItem>,
+        with_line_numbers: Option<bool>,
+        coalesced_output: bool,
+    ) -> (ToolResult, Vec<ReadFilesItem>) {
         if !(1..=MAX_READ_FILES_ITEMS).contains(&items.len())
             || items.iter().any(|item| item.path.trim().is_empty())
         {
-            return ToolResult::err("read_files requires 1 to 8 items with non-empty paths");
+            return (
+                ToolResult::err("read_files requires 1 to 8 items with non-empty paths"),
+                Vec::new(),
+            );
         }
 
         let runtime_project_id = resolved.resolved_id.clone();
         let Some(runner_project_id) =
             crate::tool_runtime::runner_local_project_id(&resolved.resolved_id).map(str::to_string)
         else {
-            return ToolResult::err(
-                "read_files could not bind the resolved Project to a Runner-local project id",
+            return (
+                ToolResult::err(
+                    "read_files could not bind the resolved Project to a Runner-local project id",
+                ),
+                Vec::new(),
             );
         };
-        let requested_count = items.len();
+        let planned_reads = plan_read_files(items.clone());
         let with_line_numbers = with_line_numbers.unwrap_or(false);
         let deadline = Instant::now() + self.read_files_deadline;
         // Capture the active Runner process before dispatch. A replacement that
@@ -771,14 +971,17 @@ impl ToolRuntime {
         {
             Some(view) => view.runner_instance_id,
             None => {
-                return ToolResult::err_with_output(
-                    "read_files could not bind the read snapshot to an active Runner process; retry after the Runner is available",
-                    json!({
-                        "project": runtime_project_id,
-                        "state_changed": false,
-                        "error_kind": "runner_unavailable",
-                        "retry_guidance": "retry read_files after the owning Runner is available"
-                    }),
+                return (
+                    ToolResult::err_with_output(
+                        "read_files could not bind the read snapshot to an active Runner process; retry after the Runner is available",
+                        json!({
+                            "project": runtime_project_id,
+                            "state_changed": false,
+                            "error_kind": "runner_unavailable",
+                            "retry_guidance": "retry read_files after the owning Runner is available"
+                        }),
+                    ),
+                    Vec::new(),
                 )
             }
         };
@@ -787,12 +990,13 @@ impl ToolRuntime {
         // No request can reach the Runner until its future is polled by
         // `buffer_unordered`, so at most MAX_READ_FILES_CONCURRENCY file reads
         // are actually in flight.
-        let mut completed: Vec<Value> =
-            stream::iter(items.into_iter().enumerate().map(|(index, item)| {
+        let completed_groups: Vec<Vec<Value>> =
+            stream::iter(planned_reads.into_iter().map(|planned| {
                 let project = &resolved.config;
                 let runner_project_id = runner_project_id.clone();
                 let runner_instance_id = runner_instance_id.clone();
                 async move {
+                    let PlannedRead { item, members } = planned;
                     let path = item.path;
                     let target = read_revision_target(resolved, &path, &runner_instance_id);
                     let expected_sha256 = match item.expected_read_revision {
@@ -800,13 +1004,18 @@ impl ToolRuntime {
                             Ok(sha256) => Some(sha256),
                             Err(_) => {
                                 let result = stale_read_revision_failure(&path);
-                                return json!({
-                                    "index": index,
-                                    "path": path,
-                                    "success": false,
-                                    "output": result.output,
-                                    "error": result.error,
-                                });
+                                return members
+                                    .into_iter()
+                                    .map(|member| {
+                                        json!({
+                                            "index": member.index,
+                                            "path": path,
+                                            "success": false,
+                                            "output": result.output,
+                                            "error": result.error,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
                             }
                         },
                         None => None,
@@ -819,7 +1028,7 @@ impl ToolRuntime {
                             path.clone(),
                             item.start_line,
                             item.limit,
-                            with_line_numbers,
+                            false,
                             deadline,
                         )
                         .await;
@@ -831,43 +1040,160 @@ impl ToolRuntime {
                             }
                         }
                     }
+
+                    // Coalescing is an optimization, never a semantic reason for
+                    // otherwise-valid member reads to fail. A merged UTF-8 range
+                    // can cross the canonical raw-byte ceiling even when each
+                    // caller range fits independently; only that bounded failure
+                    // falls back to the original member reads.
+                    if members.len() > 1
+                        && !result.success
+                        && result.output.get("reason_code").and_then(Value::as_str)
+                            == Some("range_too_large")
+                    {
+                        let mut fallback = Vec::with_capacity(members.len());
+                        for member in members {
+                            fallback.push(
+                                self.read_planned_member(
+                                    resolved,
+                                    &runner_project_id,
+                                    &runner_instance_id,
+                                    &path,
+                                    member,
+                                    expected_sha256.as_deref(),
+                                    with_line_numbers,
+                                    deadline,
+                                )
+                                .await,
+                            );
+                        }
+                        return fallback;
+                    }
+
+                    // Only a successful physical union can replace its members.
+                    // Ordinary read_files and all failures retain caller ranges.
+                    let members = if coalesced_output && result.success {
+                        vec![PlannedReadMember {
+                            index: members
+                                .iter()
+                                .map(|member| member.index)
+                                .min()
+                                .expect("planned read has at least one member"),
+                            start_line: item.start_line,
+                            limit: item.limit,
+                        }]
+                    } else {
+                        members
+                    };
                     let success = result.success;
-                    let error = result.error;
-                    let mut output = result.output;
-                    if success {
-                        if let Some(sha256) = output
+                    let error = result.error.clone();
+                    let output = result.output;
+                    let read_revision = if success {
+                        output
                             .get("sha256")
                             .and_then(Value::as_str)
-                            .map(str::to_string)
-                        {
-                            let read_revision = self.read_revisions.observe(target, sha256);
-                            if let Some(output) = output.as_object_mut() {
-                                output.insert("read_revision".to_string(), json!(read_revision));
+                            .map(|sha256| self.read_revisions.observe(target, sha256.to_string()))
+                    } else {
+                        None
+                    };
+                    members
+                        .into_iter()
+                        .map(|member| {
+                            if success {
+                                let Some(mut member_output) =
+                                    super::files::slice_read_file_success_output(
+                                        &output,
+                                        member.start_line,
+                                        member.limit,
+                                        with_line_numbers,
+                                        &path,
+                                    )
+                                else {
+                                    return json!({
+                                        "index": member.index,
+                                        "path": path,
+                                        "success": false,
+                                        "output": {
+                                            "error_kind": "read_file_failed",
+                                            "reason_code": "malformed_agent_response",
+                                            "path": path,
+                                            "state_changed": false,
+                                        },
+                                        "error": "read_file failed: malformed_agent_response",
+                                    });
+                                };
+                                if let Some(read_revision) = read_revision {
+                                    if let Some(object) = member_output.as_object_mut() {
+                                        object.insert(
+                                            "read_revision".to_string(),
+                                            json!(read_revision),
+                                        );
+                                    }
+                                }
+                                json!({
+                                    "index": member.index,
+                                    "path": path,
+                                    "success": true,
+                                    "output": member_output,
+                                    "error": Value::Null,
+                                })
+                            } else {
+                                json!({
+                                    "index": member.index,
+                                    "path": path,
+                                    "success": false,
+                                    "output": output,
+                                    "error": error,
+                                })
                             }
-                        }
-                    }
-                    json!({
-                        "index": index,
-                        "path": path,
-                        "success": success,
-                        "output": output,
-                        "error": error,
-                    })
+                        })
+                        .collect::<Vec<_>>()
                 }
             }))
             .buffer_unordered(MAX_READ_FILES_CONCURRENCY)
             .collect()
             .await;
+        let mut completed: Vec<Value> = completed_groups.into_iter().flatten().collect();
         completed.sort_by_key(|item| item["index"].as_u64().unwrap_or(u64::MAX));
 
-        ToolResult::ok(batch_output(
-            &runtime_project_id,
-            requested_count,
-            completed,
-            false,
-            None,
-            None,
-        ))
+        let output_items = if coalesced_output {
+            completed
+                .iter_mut()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let original_index = entry["index"]
+                        .as_u64()
+                        .expect("planned result retains its member index")
+                        as usize;
+                    let mut item = items[original_index].clone();
+                    if entry["success"].as_bool() == Some(true) {
+                        let output = &entry["output"];
+                        item.start_line =
+                            Some(output["start_line"].as_u64().expect("canonical read start")
+                                as usize);
+                        item.limit =
+                            Some(output["limit"].as_u64().expect("canonical read limit") as usize);
+                    }
+                    // Budget continuation indexes must refer to this actual plan,
+                    // including original ranges returned by byte-ceiling fallback.
+                    entry["index"] = json!(index);
+                    item
+                })
+                .collect::<Vec<_>>()
+        } else {
+            items
+        };
+        (
+            ToolResult::ok(batch_output(
+                &runtime_project_id,
+                output_items.len(),
+                completed,
+                false,
+                None,
+                None,
+            )),
+            output_items,
+        )
     }
 }
 
@@ -1554,5 +1880,150 @@ mod tests {
             };
             assert_eq!(max_result_bytes, Some(effective));
         }
+    }
+
+    #[test]
+    fn read_plan_coalesces_duplicate_and_nearby_ranges() {
+        let planned = plan_read_files(vec![
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(100),
+                limit: Some(50),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(100),
+                limit: Some(50),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(160),
+                limit: Some(20),
+                expected_read_revision: None,
+            },
+        ]);
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].item.start_line, Some(100));
+        assert_eq!(planned[0].item.limit, Some(80));
+        assert_eq!(planned[0].members.len(), 3);
+        assert_eq!(
+            planned[0]
+                .members
+                .iter()
+                .map(|member| member.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn read_plan_merges_ranges_transitively_after_sorting() {
+        let planned = plan_read_files(vec![
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(1),
+                limit: Some(20),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(55),
+                limit: Some(16),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(21),
+                limit: Some(34),
+                expected_read_revision: None,
+            },
+        ]);
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].item.start_line, Some(1));
+        assert_eq!(planned[0].item.limit, Some(70));
+        assert_eq!(planned[0].members.len(), 3);
+    }
+
+    #[test]
+    fn read_plan_benchmark_scenarios_reduce_runner_reads() {
+        let duplicate = (0..8)
+            .map(|_| ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(100),
+                limit: Some(50),
+                expected_read_revision: None,
+            })
+            .collect::<Vec<_>>();
+        let adjacent = (0..8)
+            .map(|index| ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(1 + index * 40),
+                limit: Some(40),
+                expected_read_revision: None,
+            })
+            .collect::<Vec<_>>();
+        let mixed = vec![
+            ("src/a.rs", 1, 40),
+            ("src/a.rs", 35, 40),
+            ("src/a.rs", 120, 40),
+            ("src/a.rs", 155, 40),
+            ("src/b.rs", 10, 30),
+            ("src/b.rs", 25, 30),
+            ("src/c.rs", 1, 20),
+            ("src/d.rs", 1, 20),
+        ]
+        .into_iter()
+        .map(|(path, start, limit)| ReadFilesItem {
+            path: path.to_string(),
+            start_line: Some(start),
+            limit: Some(limit),
+            expected_read_revision: None,
+        })
+        .collect::<Vec<_>>();
+
+        let duplicate_plans = plan_read_files(duplicate);
+        let adjacent_plans = plan_read_files(adjacent);
+        let mixed_plans = plan_read_files(mixed);
+
+        eprintln!(
+            "read_plan_benchmark duplicate=8->{} adjacent=8->{} mixed=8->{}",
+            duplicate_plans.len(),
+            adjacent_plans.len(),
+            mixed_plans.len()
+        );
+        assert_eq!(duplicate_plans.len(), 1);
+        assert_eq!(adjacent_plans.len(), 1);
+        assert_eq!(mixed_plans.len(), 5);
+    }
+
+    #[test]
+    fn read_plan_keeps_distant_or_differently_fenced_ranges_independent() {
+        let planned = plan_read_files(vec![
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(1),
+                limit: Some(20),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(200),
+                limit: Some(20),
+                expected_read_revision: None,
+            },
+            ReadFilesItem {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(15),
+                limit: Some(20),
+                expected_read_revision: Some(7),
+            },
+        ]);
+
+        assert_eq!(planned.len(), 3);
+        assert!(planned.iter().all(|plan| plan.members.len() == 1));
     }
 }
