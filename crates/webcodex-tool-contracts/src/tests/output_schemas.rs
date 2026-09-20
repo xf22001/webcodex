@@ -528,7 +528,7 @@ fn generic_agent_task_read_schema_never_exposes_attempt_fence_or_active_turn_tok
 fn goal_plan_activity_schema_is_bounded_soft_and_payload_free() {
     let schema = output_schema_for_tool("present_goal_plan");
     let plan = &schema["properties"]["output"]["properties"]["goal_plan"];
-    assert_eq!(plan["properties"]["version"]["const"], 1);
+    assert_eq!(plan["properties"]["version"]["const"], 2);
     assert!(plan["required"]
         .as_array()
         .unwrap()
@@ -1883,7 +1883,6 @@ fn project_onboarding_output_schemas_include_result_metadata_fields() {
         "path",
         "description",
         "project_record_path",
-        "projects_config_path",
         "created_config",
         "overwritten",
         "allow_patch",
@@ -1902,7 +1901,6 @@ fn project_onboarding_output_schemas_include_result_metadata_fields() {
         "path",
         "description",
         "project_record_path",
-        "projects_config_path",
         "created_directory",
         "created_config",
         "overwritten",
@@ -1947,7 +1945,7 @@ fn project_onboarding_output_schemas_include_result_metadata_fields() {
             );
         }
 
-        for field in ["path", "project_record_path", "projects_config_path"] {
+        for field in ["path", "project_record_path"] {
             let description = output_schema_property(&specs, tool, field)["description"]
                 .as_str()
                 .expect("path-like field description")

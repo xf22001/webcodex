@@ -109,6 +109,26 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         );
     }
 
+    let search_and_read_desc = desc("search_and_read");
+    for phrase in [
+        "one bounded project-text query or 1..8 predetermined independent queries",
+        "query xor queries",
+        "max_reads is one global read budget",
+        "shared fairly across the batch",
+        "preserving per-query batch failures",
+        "batch only independent queries",
+        "result-dependent follow-ups sequential",
+    ] {
+        assert!(
+            search_and_read_desc.contains(phrase),
+            "search_and_read description should mention {phrase}: {search_and_read_desc}"
+        );
+    }
+    assert!(
+        !search_and_read_desc.contains("run one bounded project-text search"),
+        "obsolete single-query search_and_read description returned: {search_and_read_desc}"
+    );
+
     let save_artifact_desc = desc("save_project_artifact");
     for phrase in [
         "already holds the bounded binary/base64 content",
@@ -124,7 +144,12 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     for phrase in [
         "preferred host-native attachment-to-project transfer path",
         "do not base64-transfer files",
-        "trusted mcp host/oauth client",
+        "active authenticated oauth client",
+        "openai file hosts",
+        "arbitrary public https",
+        "up to 256 mib per file",
+        "batch is not atomic",
+        "partial_success=true",
     ] {
         assert!(
             import_artifact_desc.contains(phrase),
@@ -132,6 +157,19 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         );
     }
     let project_artifact_desc = desc("project_artifact");
+    let transfer_artifact_desc = desc("transfer_project_artifact");
+    for phrase in [
+        "source project:read",
+        "destination project:write",
+        "independently resolved and authorized",
+        "exact source bytes/sha-256/mime snapshot",
+        "do not pass through host attachments or model text",
+    ] {
+        assert!(
+            transfer_artifact_desc.contains(phrase),
+            "transfer_project_artifact: {phrase}"
+        );
+    }
     for phrase in [
         "metadata=facts",
         "inspect=fenced segment",
@@ -145,18 +183,6 @@ fn tool_specs_describe_default_coding_loop_preferences() {
             "project_artifact: {phrase}"
         );
     }
-    let export_artifact_desc = desc("export_project_artifact");
-    for phrase in [
-        "compatibility project artifact export specialist",
-        "resourcelink",
-        "without routing base64 through model output",
-        "prefer project_artifact(action=export)",
-    ] {
-        assert!(
-            export_artifact_desc.contains(phrase),
-            "export_project_artifact: {phrase}"
-        );
-    }
     let read_artifact_desc = desc("read_project_artifact");
     for phrase in [
         "bounded chunk inspection api",
@@ -165,7 +191,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "snapshot_changed",
         "do not manually translate",
         "do not loop over base64 chunks",
-        "export_project_artifact",
+        "project_artifact(action=export)",
     ] {
         assert!(
             read_artifact_desc.contains(phrase),

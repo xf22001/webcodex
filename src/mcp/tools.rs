@@ -2,6 +2,7 @@ use super::presentation;
 use super::resources;
 use super::response::{
     mcp_runtime_tool_result_fallback, mcp_stateless_result, rpc_error, rpc_result,
+    McpToolResultPresentation,
 };
 use super::{require_mcp_scope, scope_forbidden, McpOutcome};
 use crate::auth::AuthContext;
@@ -272,7 +273,7 @@ pub(super) fn project_from_tool_call_params(params: &Value) -> Option<String> {
 /// the canonical auth/surface renderer below directly.
 #[cfg(test)]
 pub(super) fn mcp_tools_list_payload_with_compact(compact: bool) -> Value {
-    mcp_tools_list_payload_with_features(compact, false, false)
+    mcp_tools_list_payload_with_features(compact, false)
 }
 
 #[cfg(test)]
@@ -280,28 +281,17 @@ pub(super) fn mcp_tools_list_payload_with_compact_and_app(
     compact: bool,
     app_enabled: bool,
 ) -> Value {
-    mcp_tools_list_payload_with_features(compact, app_enabled, true)
+    mcp_tools_list_payload_with_features(compact, app_enabled)
 }
 
 #[cfg(test)]
-fn mcp_tools_list_payload_with_features(
-    compact: bool,
-    app_enabled: bool,
-    artifact_export_enabled: bool,
-) -> Value {
-    mcp_tools_list_payload_with_features_for_auth(
-        compact,
-        app_enabled,
-        artifact_export_enabled,
-        false,
-        None,
-    )
+fn mcp_tools_list_payload_with_features(compact: bool, app_enabled: bool) -> Value {
+    mcp_tools_list_payload_with_features_for_auth(compact, app_enabled, false, None)
 }
 
 pub(super) fn mcp_tools_list_payload_with_features_for_auth(
     compact: bool,
     app_enabled: bool,
-    artifact_export_enabled: bool,
     stateless_2026: bool,
     auth: Option<&AuthContext>,
 ) -> Value {
@@ -316,7 +306,6 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
 
     let mut tools = specs
         .into_iter()
-        .filter(|spec| artifact_export_enabled || spec.name != "export_project_artifact")
         .map(|spec| {
             mcp_tool_spec_json(
                 project_mcp_tool_spec_output_schema(spec, stateless_2026),
@@ -475,7 +464,12 @@ pub(super) fn add_stateless_workflow_recorder_metadata(payload: &mut Value) {
         let tool_name = tool.get("name").and_then(Value::as_str);
         if matches!(
             tool_name,
-            Some("goal_plan_state" | "work_result_state" | "changes_file_diff")
+            Some(
+                "goal_plan_state"
+                    | "goal_plan_recheck_attention"
+                    | "work_result_state"
+                    | "changes_file_diff"
+            )
         ) || tool_name.is_some_and(is_host_continuation_app_tool_name)
         {
             continue;
@@ -928,9 +922,7 @@ pub(super) fn mcp_runtime_tool_result(
     as_image_requested: bool,
     result: ToolResult,
 ) -> Value {
-    if tool_name == "export_project_artifact" {
-        return mcp_runtime_tool_result_fallback(result);
-    }
+    let result_presentation = McpToolResultPresentation::Standard;
     let artifact_presentation = if as_image_requested {
         resources::ProjectArtifactPresentationMode::Image
     } else {
@@ -941,10 +933,11 @@ pub(super) fn mcp_runtime_tool_result(
         artifact_presentation,
         result,
         resources::McpResourceToolCallContext::default(),
+        result_presentation,
     ) {
         resources::McpResourceToolResultAdaptation::Framed(value) => value,
         resources::McpResourceToolResultAdaptation::Unhandled(result) => {
-            mcp_runtime_tool_result_fallback(result)
+            mcp_runtime_tool_result_fallback(result, result_presentation)
         }
     }
 }
@@ -959,7 +952,6 @@ pub(super) async fn handle_list(
     let mut result = mcp_tools_list_payload_with_features_for_auth(
         compact_schemas,
         app_enabled,
-        stateless_2026,
         stateless_2026,
         auth,
     );
@@ -1017,7 +1009,7 @@ pub(super) enum HostFileImportTrustReason {
     NotOAuthToken,
     MissingAllowedClientId,
     OAuthDisabled,
-    ClientIdNotConfigured,
+    AuthenticatedOAuthOpenAiHostOnly,
     ClientRegistrationMissingOrRevoked,
     ClientRegistrationLookupFailed,
 }
@@ -1036,7 +1028,7 @@ impl HostFileImportTrustReason {
             Self::NotOAuthToken => "not_oauth_token",
             Self::MissingAllowedClientId => "missing_allowed_client_id",
             Self::OAuthDisabled => "oauth_disabled",
-            Self::ClientIdNotConfigured => "client_id_not_configured",
+            Self::AuthenticatedOAuthOpenAiHostOnly => "authenticated_oauth_openai_host_only",
             Self::ClientRegistrationMissingOrRevoked => "client_registration_missing_or_revoked",
             Self::ClientRegistrationLookupFailed => "client_registration_lookup_failed",
         }
@@ -1160,30 +1152,35 @@ pub(super) fn mcp_host_file_import_trust_decision_from_state(
         .trusted_mcp_file_client_ids
         .iter()
         .any(|trusted_client_id| trusted_client_id == client_id);
-    if !client_id_configured {
-        return HostFileImportTrustDecision {
-            reason: HostFileImportTrustReason::ClientIdNotConfigured,
-            client_id_configured: Some(false),
-            ..base
-        };
-    }
     match db.get_oauth_client_by_client_id(client_id) {
-        Ok(Some(client)) if client.client_id == client_id => HostFileImportTrustDecision {
-            trust: HostFileImportTrust::TrustedMcpHostFile,
-            reason: HostFileImportTrustReason::Trusted,
-            client_id_configured: Some(true),
-            active_client_registration_found: Some(true),
-            ..base
-        },
+        Ok(Some(client)) if client.client_id == client_id => {
+            if client_id_configured {
+                HostFileImportTrustDecision {
+                    trust: HostFileImportTrust::TrustedMcpHostFile,
+                    reason: HostFileImportTrustReason::Trusted,
+                    client_id_configured: Some(true),
+                    active_client_registration_found: Some(true),
+                    ..base
+                }
+            } else {
+                HostFileImportTrustDecision {
+                    trust: HostFileImportTrust::AuthenticatedMcpOpenAiHostFile,
+                    reason: HostFileImportTrustReason::AuthenticatedOAuthOpenAiHostOnly,
+                    client_id_configured: Some(false),
+                    active_client_registration_found: Some(true),
+                    ..base
+                }
+            }
+        }
         Ok(_) => HostFileImportTrustDecision {
             reason: HostFileImportTrustReason::ClientRegistrationMissingOrRevoked,
-            client_id_configured: Some(true),
+            client_id_configured: Some(client_id_configured),
             active_client_registration_found: Some(false),
             ..base
         },
         Err(_) => HostFileImportTrustDecision {
             reason: HostFileImportTrustReason::ClientRegistrationLookupFailed,
-            client_id_configured: Some(true),
+            client_id_configured: Some(client_id_configured),
             active_client_registration_found: None,
             ..base
         },
@@ -1476,6 +1473,7 @@ pub(super) async fn handle_call(
     mut model_ergonomics_out: Option<&mut Option<ModelErgonomicsRecord>>,
     mut correlation_out: Option<&mut crate::tool_runtime::ToolCallCorrelation>,
 ) -> McpOutcome {
+    let result_presentation = McpToolResultPresentation::from_request_params(&request_params);
     let mut params: McpToolCallParams = match serde_json::from_value(request_params) {
         Ok(params) => params,
         Err(e) => {
@@ -1521,6 +1519,7 @@ pub(super) async fn handle_call(
                 }
                 let rendered = mcp_runtime_tool_result_fallback(
                     adaptive_runtime_gateway_unknown_target(&target),
+                    result_presentation,
                 );
                 return McpOutcome::Ok(rpc_result(
                     id,
@@ -1677,7 +1676,7 @@ pub(super) async fn handle_call(
                     &ack_session_message_ids,
                 );
 
-                let result = mcp_runtime_tool_result_fallback(result);
+                let result = mcp_runtime_tool_result_fallback(result, result_presentation);
                 return McpOutcome::Ok(rpc_result(
                     id,
                     if stateless_2026 {
@@ -1851,7 +1850,7 @@ pub(super) async fn handle_call(
                     &ack_session_message_ids,
                 );
 
-                let result = mcp_runtime_tool_result_fallback(result);
+                let result = mcp_runtime_tool_result_fallback(result, result_presentation);
                 return McpOutcome::Ok(rpc_result(
                     id,
                     if stateless_2026 {
@@ -1914,7 +1913,11 @@ pub(super) async fn handle_call(
     let work_result_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let agent_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let job_terminal_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
-    let app_only_goal_plan_state = goal_plan_app_admitted && params.name == "goal_plan_state";
+    let app_only_goal_plan_state = goal_plan_app_admitted
+        && matches!(
+            params.name.as_str(),
+            "goal_plan_state" | "goal_plan_recheck_attention"
+        );
     let app_only_work_result_state = work_result_app_admitted && params.name == "work_result_state";
     let app_only_changes_file_diff = work_result_app_admitted && params.name == "changes_file_diff";
     let app_only_agent_continuation =
@@ -2161,7 +2164,7 @@ pub(super) async fn handle_call(
     });
     if let Some(lc) = lifecycle.as_deref() {
         // Protocol layer produced a JSON-RPC result (not -32xxx).
-        // Tool kernel success is independent (isError / structuredContent).
+        // Canonical tool success is independent of the MCP presentation signal.
         let category = if result.success {
             "success"
         } else {
@@ -2178,13 +2181,14 @@ pub(super) async fn handle_call(
         artifact_presentation,
         result,
         resource_tool_call,
+        result_presentation,
     ) {
         resources::McpResourceToolResultAdaptation::Framed(value) => value,
         resources::McpResourceToolResultAdaptation::Unhandled(result) => {
             // App-only tools use the standard CallToolResult channel too. Their
             // visibility/admission boundary, not custom result metadata, keeps
             // continuation protocol data out of ordinary model tool results.
-            mcp_runtime_tool_result_fallback(result)
+            mcp_runtime_tool_result_fallback(result, result_presentation)
         }
     };
     if app_only_agent_continuation || app_only_job_terminal_continuation {

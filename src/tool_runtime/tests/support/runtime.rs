@@ -59,7 +59,7 @@ pub(in crate::tool_runtime::tests) fn sample_tool_args_for_spec(spec: &ToolSpec)
         "work_on_project" => {
             args.insert("project".to_string(), json!(SAMPLE_PROJECT));
         }
-        "update_goal" => {
+        "update_goal" | "checkpoint_goal" => {
             args.insert("expected_revision".to_string(), json!(1));
         }
         "observe_jobs" => {
@@ -103,7 +103,8 @@ pub(in crate::tool_runtime::tests) fn sample_tool_args_for_spec(spec: &ToolSpec)
 
 pub(in crate::tool_runtime::tests) fn sample_field_value(field: &str) -> Value {
     match field {
-        "project" => json!(SAMPLE_PROJECT),
+        "project" | "source_project" => json!(SAMPLE_PROJECT),
+        "destination_project" => json!("agent:fixture:destination"),
         "command" => json!("true"),
         "executable" => json!("git"),
         "language" => json!("sh"),
@@ -113,7 +114,8 @@ pub(in crate::tool_runtime::tests) fn sample_field_value(field: &str) -> Value {
         "paths" => json!(["old.txt"]),
         "items" => json!([{"path": "src/lib.rs"}]),
         "queries" => json!([{"pattern": "fn main"}]),
-        "path" => json!("src/lib.rs"),
+        "path" | "source_path" => json!("src/lib.rs"),
+        "destination_path" => json!("artifacts/copied.bin"),
         "old" | "old_text" => json!("a"),
         "new" | "new_text" => json!("b"),
         "pattern" => json!("fn main"),
@@ -121,6 +123,7 @@ pub(in crate::tool_runtime::tests) fn sample_field_value(field: &str) -> Value {
         "content" => json!("fn main() {}\n"),
         "instruction" => json!("implement the requested change"),
         "objective" => json!("Preserve durable high-level intent without execution authority."),
+        "summary" => json!("Recovery-worthy checkpoint summary"),
         "title" => json!("Durable agent work"),
         "include_extension_catalog" => json!(false),
         "content_base64" => json!("AA=="),

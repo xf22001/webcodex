@@ -301,6 +301,12 @@ fn tool_definitions_are_activity_semantics_ssot() {
         ("runtime_status", Support, NonMeaningful, NoKind),
         ("tool_manifest", Support, NonMeaningful, NoKind),
         ("goal_plan_state", Transport, NonMeaningful, NoKind),
+        (
+            "goal_plan_recheck_attention",
+            Transport,
+            NonMeaningful,
+            NoKind,
+        ),
         ("agent_continuation_state", Transport, NonMeaningful, NoKind),
     ] {
         assert_eq!(
@@ -471,6 +477,7 @@ fn every_runtime_tool_has_an_explicit_fail_closed_audit_contract() {
             ),
             ToolAuditSessionInputPolicy::Bounded
             | ToolAuditSessionInputPolicy::SearchProjectTexts
+            | ToolAuditSessionInputPolicy::SearchAndRead
             | ToolAuditSessionInputPolicy::ObserveJobs => {}
         }
         match definition.audit_policy().context {
@@ -666,6 +673,7 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         ("rotate_agent_continuation_endpoint", 19),
         ("import_conversation_files_to_project", 55),
         ("project_artifact", 56),
+        ("transfer_project_artifact", 57),
         ("run_detached_process", 72),
         ("run_shell", 75),
         ("observe_jobs", 80),
@@ -697,7 +705,6 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         "apply_patch",
         "save_project_artifact",
         "read_project_artifact",
-        "export_project_artifact",
         "artifact_upload_begin",
         "artifact_upload_chunk",
         "artifact_upload_finish",
@@ -779,7 +786,6 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         "present_goal_plan",
         "present_agent_continuation",
         "present_work_result",
-        "export_project_artifact",
         "rotate_agent_continuation_endpoint",
     ] {
         assert!(

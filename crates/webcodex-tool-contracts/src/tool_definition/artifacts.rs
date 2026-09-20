@@ -1,7 +1,7 @@
 use super::RunnerCapabilityRequirement::{FileRead, FileWrite};
 use super::ToolVisibility::ModelVisible;
 use super::{
-    adaptive_runtime_direct, def, model_spec, permission_risk,
+    adaptive_runtime_direct, def, model_spec, permission_risk, require_all_scopes,
     requires_artifact_upload_path_binding, ToolDefinition, PERMISSION_RISK_ARTIFACT_WRITE,
     TOOL_CATEGORY_ARTIFACT,
 };
@@ -61,11 +61,43 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     false,
                     super::ToolSessionEvidencePolicy::NONE,
                 ),
-                "Import 1..10 current ChatGPT/host attachments into a Runner project using openaiFileIdRefs from the host file-reference mechanism. This is the preferred host-native attachment-to-project transfer path: do not base64-transfer files, construct download URLs, or use local /mnt/data paths; Control downloads and saves them as project artifacts. Existing trusted MCP host/OAuth client and host rewrite checks still apply.",
-            ).with_gpt_action_description("Import current ChatGPT attachments into a Runner project through host-populated openaiFileIdRefs. Do not invent file ids/URLs or base64-transfer attachments. Host provenance is adapter-derived; runtime authority remains canonical."),
+                "Import 1..10 current ChatGPT/host attachments into a Runner project using openaiFileIdRefs from the host file-reference mechanism, up to 256 MiB per file. This is the preferred host-native attachment-to-project transfer path: do not base64-transfer files, construct download URLs, or use local /mnt/data paths; Control streams downloads into project artifacts. A multi-file batch is not atomic: if a later item fails, structured output preserves imported/succeeded items, identifies the failed item and reason, and sets partial_success=true. MCP trust has two tiers: an active authenticated OAuth client may import only from OpenAI file hosts; an exact WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS match may import from arbitrary public HTTPS. Both retain DNS/public-IP, pinning, redirect, bounded-download, and Project write protections.",
+            ).with_gpt_action_description("Import 1..10 current ChatGPT attachments (max 256 MiB each) into a Runner project through host-populated openaiFileIdRefs. Do not invent ids/URLs or base64-transfer attachments. Multi-file import is non-atomic and reports partial success; host provenance and runtime authority remain canonical."),
             PERMISSION_RISK_ARTIFACT_WRITE,
         ),
         55,
+    ),
+    adaptive_runtime_direct(
+        permission_risk(
+            model_spec(
+                require_all_scopes(
+                    def(
+                        "transfer_project_artifact",
+                        super::ToolAuditPolicy::TYPED_CANONICAL,
+                        ModelVisible,
+                        TOOL_CATEGORY_ARTIFACT,
+                        None,
+                        TOOL_PROVIDER_CONTROL,
+                        super::ToolSemanticContract {
+                            effect: super::ToolEffect::Mutate,
+                            risk: ProjectWrite,
+                            approval: super::ToolApprovalPolicy::Standard,
+                            idempotency: super::ToolIdempotency::NonIdempotent,
+                        },
+                        None,
+                        false,
+                        Artifact,
+                        true,
+                        false,
+                        super::ToolSessionEvidencePolicy::NONE,
+                    ),
+                    &[PROJECT_READ, PROJECT_WRITE],
+                ),
+                "Transfer one regular artifact directly from a source Project to a destination Project through Control. Requires source project:read and destination project:write; each Project is independently resolved and authorized. Control fences the exact source bytes/SHA-256/MIME snapshot, streams bounded internal chunks into the existing destination artifact upload protocol, and verifies the committed destination bytes/SHA-256. Binary payloads do not pass through Host attachments or model text. overwrite defaults to false.",
+            ).with_gpt_action_description("Transfer one Project artifact directly through Control. Requires project:read on source and project:write on destination; both are independently authorized. Streams exact bytes/SHA without Host attachments or model base64. overwrite defaults to false."),
+            PERMISSION_RISK_ARTIFACT_WRITE,
+        ),
+        57,
     ),
     adaptive_runtime_direct(
         model_spec(
@@ -94,30 +126,6 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         .with_gpt_action_description("Project artifact read surface. GPT Actions supports metadata and bounded inspect; native image and ResourceLink export require MCP."),
         56,
     ),
-    model_spec(
-        def(
-            "export_project_artifact",
-            super::ToolAuditPolicy::TYPED_CANONICAL,
-            ModelVisible,
-            TOOL_CATEGORY_ARTIFACT,
-            Some(FileRead),
-            TOOL_PROVIDER_CONTROL,
-            super::ToolSemanticContract {
-                effect: super::ToolEffect::Observe,
-                risk: Read,
-                approval: super::ToolApprovalPolicy::None,
-                idempotency: super::ToolIdempotency::PureRead,
-            },
-            Some(PROJECT_READ),
-            true,
-            Artifact,
-            false,
-            false,
-            super::ToolSessionEvidencePolicy::NONE,
-        ),
-        "Compatibility project artifact export specialist. Create one short-lived authenticated MCP ResourceLink for a bounded project artifact so the host/user can fetch the complete binary with resources/read without routing base64 through model output. Prefer project_artifact(action=export) on model surfaces that expose the unified facade.",
-    )
-    .with_gpt_action_unsupported(),
     model_spec(
         def(
             "read_project_artifact_metadata",
@@ -162,7 +170,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Bounded chunk inspection API for a project artifact. Returns base64 for one small segment plus full-file sha256/MIME metadata. A truncated ranged read emits one parser-ready suggested_call that carries the observed full-file sha256 as expected_sha256, so continuation either reads the same exact content incarnation or fails closed with snapshot_changed before returning changed bytes; do not manually translate next_offset or sha256 bookkeeping. If the goal is to deliver the complete file to ChatGPT/host/user, do not loop over base64 chunks; prefer export_project_artifact instead.",
+        "Bounded chunk inspection API for a project artifact. Returns base64 for one small segment plus full-file sha256/MIME metadata. A truncated ranged read emits one parser-ready suggested_call that carries the observed full-file sha256 as expected_sha256, so continuation either reads the same exact content incarnation or fails closed with snapshot_changed before returning changed bytes; do not manually translate next_offset or sha256 bookkeeping. If the goal is to deliver the complete file to ChatGPT/host/user, do not loop over base64 chunks; use project_artifact(action=export) instead.",
     ),
     model_spec(
         def(
@@ -185,7 +193,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Begin a bounded low-level chunked binary artifact upload up to 256 MiB. Creates a project-local temporary upload session; finish commits atomically to the target path. This is not the preferred path for a current ChatGPT/host attachment; use import_conversation_files_to_project for host-native import. For smoke octet-stream uploads, use artifacts/smoke/<name>.artifact or omit mime_type when appropriate.",
+        "Begin a bounded low-level chunked binary artifact upload up to 256 MiB. Creates a project-local temporary upload session; finish commits atomically to the target path. This is not the preferred path for a current ChatGPT/host attachment; use import_conversation_files_to_project for host-native import. MIME is presentation metadata: unknown regular artifacts may use application/octet-stream; Project authorization, sensitive-path checks, root containment, symlink protection, fencing, and byte/SHA validation remain the safety boundary.",
     ),
     requires_artifact_upload_path_binding(model_spec(
         def(

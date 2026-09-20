@@ -3,7 +3,7 @@
 //! All durable session-map mutations flow through `SessionStoreInner` helpers.
 //! Callers outside this module use `SessionStore` methods only.
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -49,7 +49,7 @@ use super::model::{
     StoredSession, ToolCallExpectation, ToolCallRecorderMetadata, ToolCallStart,
     ToolEffectEventEvidence, WithdrawSessionMessageOutcome, CALL_ID_PREFIX,
     DEFAULT_MAX_EVENTS_PER_SESSION, DEFAULT_MAX_MESSAGES_PER_SESSION, DEFAULT_MAX_SESSIONS,
-    DEFAULT_SUMMARY_LIMIT, EVENT_ID_PREFIX, MAX_CODING_INSTRUCTION_CHARS,
+    DEFAULT_SUMMARY_LIMIT, EVENT_ID_PREFIX, MAX_CODING_INSTRUCTION_CHARS, MAX_INPUT_ARRAY_ITEMS,
     MAX_MATERIALIZED_VALIDATION_JOB_IDS, MAX_SUMMARY_LIMIT, MESSAGE_ID_PREFIX, SESSION_ID_PREFIX,
     SESSION_LEDGER_VERSION,
 };
@@ -835,6 +835,40 @@ impl SessionStore {
         })
     }
 
+    /// Exact retained changed-path evidence for recovery attribution. Unlike
+    /// `summary`, this scans the full bounded durable event ledger instead of the
+    /// model-facing 200-event tail, so ordinary presentation truncation does not
+    /// masquerade as history loss. The boolean is true only when the retained
+    /// ledger and each event's changed-path projection are known complete.
+    pub fn retained_changed_path_evidence(&self, session_id: &str) -> Option<(Vec<String>, bool)> {
+        self.with_record_for_query(session_id, |record, _cold| {
+            let retained_events = record
+                .events
+                .iter()
+                .map(|event| event.as_ref().clone())
+                .collect::<Vec<_>>();
+            let mut paths = BTreeSet::new();
+            let mut complete = record.events_observed <= retained_events.len() as u64;
+            // Every persisted event sanitizes changed_paths to MAX_INPUT_ARRAY_ITEMS,
+            // and runtime audit arguments can already be bounded before the Store
+            // observes them. Equality to that durable bound therefore cannot prove
+            // the original path set was complete, even while the Session is hot.
+            for event in super::events::canonical_tool_call_finished_events(&retained_events) {
+                // Path attribution is consequence evidence, not an attempted-write
+                // list. A failed/no-op edit can name the same path without proving
+                // that this Session caused the current dirty state.
+                if !event_observes_repository_edit(event) {
+                    continue;
+                }
+                if event.changed_paths.len() >= MAX_INPUT_ARRAY_ITEMS {
+                    complete = false;
+                }
+                paths.extend(event.changed_paths.iter().cloned());
+            }
+            (paths.into_iter().collect(), complete)
+        })
+    }
+
     /// Bounded, read-only Workflow Session rows for one exact runtime project.
     /// The project is authoritative caller context, never request-controlled UI state.
     pub fn console_list_for_project(
@@ -982,6 +1016,28 @@ impl SessionStore {
     pub fn session_target_authority(&self, session_id: &str) -> Option<(Option<String>, String)> {
         let inner = self.inner.lock().expect("session store mutex poisoned");
         inner.session_target_authority(session_id)
+    }
+
+    /// Synchronous revalidation boundary for an already authorized current-work
+    /// target. Identity and creation authority remain explicit; this closure
+    /// cannot close/reassign a Session or confer authority through a Window.
+    /// The callback must not reenter SessionStore or perform asynchronous work.
+    pub fn with_active_session_authority_fence<T>(
+        &self,
+        session_id: &str,
+        expected_project: &str,
+        expected_owner_authority_fingerprint: &str,
+        commit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let inner = self.inner.lock().ok()?;
+        let record = inner.sessions.get(session_id)?;
+        if !record.lifecycle().allows_mutation()
+            || record.project() != Some(expected_project)
+            || record.owner_authority_fingerprint() != expected_owner_authority_fingerprint
+        {
+            return None;
+        }
+        Some(commit())
     }
 
     /// Return inherited defaults only for an active Session whose registered

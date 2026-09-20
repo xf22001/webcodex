@@ -100,6 +100,7 @@ pub(crate) enum RouteId {
     RuntimeConsoleProjectGit,
     RuntimeConsolePluginReload,
     RuntimeConsoleWorkflowSessions,
+    RuntimeConsoleWorkflowSessionLocate,
     RuntimeConsoleWorkflowSession,
     RuntimeConsoleWorkflowSessionMessages,
     RuntimeConsoleWorkflowSessionObserve,
@@ -128,23 +129,7 @@ pub(crate) enum RouteId {
     ToolsCall,
     GptActionsInvoke,
     ArtifactsImport,
-    JobsStop,
-    JobsList,
-    JobsTail,
-    RunnerConfigCheck,
-    RunnerConfigReload,
-    ProjectsList,
-    ProjectsRegister,
-    ProjectsCreate,
-    ProjectsUnregister,
     ProjectsResolveOrRegister,
-    ProjectsGitStatus,
-    ProjectsListFiles,
-    ProjectsApplyUnifiedDiff,
-    ProjectsRunShell,
-    ProjectsGitRestorePaths,
-    ProjectsDiscardUntracked,
-    ProjectsRunJob,
     RuntimeStatus,
     OAuthClientsCreate,
     OAuthClientsList,
@@ -498,25 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_project_activation_operator_routes_stay_hidden_and_narrowly_scoped() {
-        let check = spec(RouteId::RunnerConfigCheck);
-        assert_eq!(
-            check.scope_policy,
-            webcodex_core::authority::OAuthRouteScopePolicy::Require(
-                webcodex_core::authority::SCOPE_RUNTIME_READ,
-            )
-        );
-        assert_eq!(check.openapi_projection, RouteOpenApiProjection::Hidden);
-
-        let reload = spec(RouteId::RunnerConfigReload);
-        assert_eq!(
-            reload.scope_policy,
-            webcodex_core::authority::OAuthRouteScopePolicy::Require(
-                webcodex_core::authority::SCOPE_RUNNER_MANAGE,
-            )
-        );
-        assert_eq!(reload.openapi_projection, RouteOpenApiProjection::Hidden);
-
+    fn desktop_project_activation_internal_route_stays_hidden_and_narrowly_scoped() {
         let activate = spec(RouteId::ProjectsResolveOrRegister);
         assert_eq!(
             activate.scope_policy,
@@ -704,13 +671,9 @@ mod tests {
     #[test]
     fn audit_class_preserves_existing_http_stats_semantics() {
         for (path, class) in [
-            ("/api/projects/apply_unified_diff", Edit),
-            ("/api/projects/run_job", Job),
             ("/api/tools/call", Command),
             ("/api/runtime/status", Report),
             ("/api/artifacts/import", Artifact),
-            ("/api/projects/git_status", Git),
-            ("/api/projects/run_shell", Shell),
             ("/api/actions/{tool_name}", Other),
         ] {
             assert_eq!(audit_class_for_path(path), Some(class), "{path}");

@@ -459,18 +459,7 @@ mod tests {
         assert!(ids.contains(ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME));
         assert!(ids.len() < GPT_ACTION_OPERATION_LIMIT);
         assert!(ids.iter().all(|name| !name.chars().any(char::is_uppercase)));
-        for legacy in [
-            "listRuntimeTools",
-            "listProjects",
-            "getRuntimeStatus",
-            "getProjectGitStatus",
-            "listProjectFiles",
-            "applyUnifiedDiff",
-            "runProjectShellCommand",
-            "startProjectShellJob",
-            "getRuntimeJobTail",
-            "callRuntimeTool",
-        ] {
+        for legacy in ["listRuntimeTools", "getRuntimeStatus", "callRuntimeTool"] {
             assert!(!ids.contains(legacy));
         }
         for path in spec["paths"].as_object().unwrap().keys() {
@@ -488,7 +477,6 @@ mod tests {
             "present_goal_plan",
             "present_agent_continuation",
             "rotate_agent_continuation_endpoint",
-            "export_project_artifact",
             "present_work_result",
         ] {
             assert!(!webcodex_tool_contracts::gpt_action_tool_supported(tool));

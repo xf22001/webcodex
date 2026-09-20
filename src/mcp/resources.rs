@@ -1,13 +1,13 @@
 use super::protocol::request_client_capabilities;
 use super::response::{
     mcp_runtime_tool_result_fallback, mcp_stateless_result, rpc_error, rpc_error_with_data,
-    rpc_result, MCP_STATELESS_CACHE_SCOPE, MCP_STATELESS_CACHE_TTL_MS,
+    rpc_result, McpToolResultPresentation, MCP_STATELESS_CACHE_SCOPE, MCP_STATELESS_CACHE_TTL_MS,
 };
 use super::{require_mcp_scope, scope_forbidden, McpOutcome};
 use crate::auth::AuthContext;
 use crate::tool_runtime::{
     validate_project_artifact_export_snapshot, ProjectArtifactExportSnapshot, ToolResult,
-    ToolRuntime, MAX_PROJECT_ARTIFACT_EXPORT_BYTES, MAX_READ_PROJECT_ARTIFACT_LENGTH,
+    ToolRuntime, INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_PROJECT_ARTIFACT_EXPORT_BYTES,
 };
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::future::join_all;
@@ -65,7 +65,7 @@ pub(super) const MCP_WORK_RESULT_UI_RESOURCE_URI: &str = "ui://webcodex/work-res
 // reads working with the safe canonical template, not a second admitted App.
 // Legacy payloads are never promoted into authoritative Work Result state.
 pub(super) const MCP_WORK_RESULT_UI_RESOURCE_LEGACY_URIS: &[&str] = &["ui://webcodex/changes/v3"];
-pub(super) const MCP_GOAL_PLAN_UI_RESOURCE_URI: &str = "ui://webcodex/goal-plan/v2";
+pub(super) const MCP_GOAL_PLAN_UI_RESOURCE_URI: &str = "ui://webcodex/goal-plan/v3";
 pub(super) const MCP_AGENT_CONTINUATION_UI_RESOURCE_URI: &str =
     "ui://webcodex/agent-continuation/v17";
 pub(super) const MCP_JOB_TERMINAL_CONTINUATION_UI_RESOURCE_URI: &str =
@@ -137,8 +137,8 @@ pub(super) fn mcp_app_resources_list(domain: Option<&str>) -> Value {
         .expect("computer App resource list must be an array")
         .push(json!({
             "uri": MCP_WORK_RESULT_UI_RESOURCE_URI,
-            "name": "WebCodex Work",
-            "description": "Persistent read-only coding Work Result for one explicitly presented project-scoped Workflow Session. The initial present_work_result ToolResult is the authoritative snapshot; the mounted App stays static until the user explicitly refreshes, then performs one exact bounded live state read without replacing its initial frozen final changes. File expansion reads only an advertised path from that frozen snapshot. Ordinary work tools keep native Host presentation. Legacy Changes resources remain hidden readable compatibility aliases.",
+            "name": "WebCodex Progress",
+            "description": "Persistent read-only progress card for one explicitly presented project-scoped Workflow Session. The initial present_work_result ToolResult is authoritative, then the mounted App performs bounded app-only live reads while visible at a faster cadence and while hidden at a slower cadence. It shows current Session activity together with workspace, validation, and review state without creating model-visible polling turns. Frozen final changes remain presentation-time snapshots and lazy file expansion reads only advertised paths.",
             "mimeType": MCP_UI_RESOURCE_MIME_TYPE,
             "_meta": mcp_app_resource_meta(domain)
         }));
@@ -232,8 +232,8 @@ pub(super) fn mcp_work_result_app_resource_read(uri: &str, domain: Option<&str>)
 }
 
 pub(super) fn is_mcp_goal_plan_app_resource_uri(uri: &str) -> bool {
-    // Hidden read alias for existing cards; discovery advertises only v2.
-    uri == MCP_GOAL_PLAN_UI_RESOURCE_URI || uri == "ui://webcodex/goal-plan/v1"
+    // Goal workflow is pre-production: one current resource and wire contract.
+    uri == MCP_GOAL_PLAN_UI_RESOURCE_URI
 }
 
 pub(super) fn mcp_goal_plan_app_resource_read(uri: &str, domain: Option<&str>) -> Option<Value> {
@@ -716,16 +716,18 @@ pub(super) fn mcp_issue_artifact_export(
 pub(super) fn mcp_artifact_export_tool_result(
     result: ToolResult,
     caller: McpArtifactExportCallerBinding,
+    result_presentation: McpToolResultPresentation,
 ) -> Value {
     if !result.success {
-        return mcp_runtime_tool_result_fallback(result);
+        return mcp_runtime_tool_result_fallback(result, result_presentation);
     }
     let (uri, snapshot) = match mcp_issue_artifact_export(caller, &result) {
         Ok(value) => value,
         Err(error) => {
-            return mcp_runtime_tool_result_fallback(ToolResult::err(format!(
-                "cannot frame artifact export resource: {error}"
-            )))
+            return mcp_runtime_tool_result_fallback(
+                ToolResult::err(format!("cannot frame artifact export resource: {error}")),
+                result_presentation,
+            )
         }
     };
     json!({
@@ -762,6 +764,7 @@ pub(super) fn mcp_runtime_tool_result_with_snapshot_resource(
     as_image_requested: bool,
     mut result: ToolResult,
     snapshot_caller: Option<McpArtifactExportCallerBinding>,
+    result_presentation: McpToolResultPresentation,
 ) -> Value {
     let native_image_requested = as_image_requested
         || (matches!(tool_name, "computer_observe" | "browser_observe")
@@ -777,7 +780,7 @@ pub(super) fn mcp_runtime_tool_result_with_snapshot_resource(
         }
     }
 
-    mcp_runtime_tool_result_fallback(result)
+    mcp_runtime_tool_result_fallback(result, result_presentation)
 }
 
 pub(super) fn mcp_native_image_tool_result(
@@ -1062,6 +1065,7 @@ pub(super) async fn mcp_artifact_export_read_chunk(
             &record.project,
             &record.snapshot.path,
             record.snapshot.bytes,
+            &record.snapshot.sha256,
             offset,
             length,
             auth,
@@ -1139,13 +1143,13 @@ pub(super) async fn mcp_artifact_export_stream_plan_with_gate_timeout(
     )
     .await?;
     let max_chunks = MAX_PROJECT_ARTIFACT_EXPORT_BYTES
-        .div_ceil(MAX_READ_PROJECT_ARTIFACT_LENGTH)
+        .div_ceil(INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES)
         .saturating_add(1);
     let mut first_chunk = Vec::new();
     let mut offset = 0usize;
     let mut chunks = 0usize;
     if snapshot.bytes > 0 {
-        let length = snapshot.bytes.min(MAX_READ_PROJECT_ARTIFACT_LENGTH);
+        let length = snapshot.bytes.min(INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES);
         let chunk = mcp_artifact_export_with_read_budget(
             runtime,
             &mut read_budget,
@@ -1350,7 +1354,8 @@ pub(super) async fn mcp_artifact_export_stream_transfer(
                 return Err(McpArtifactExportReadError::Unsafe);
             }
             plan.chunks = plan.chunks.saturating_add(1);
-            let length = (snapshot.bytes - batch_offset).min(MAX_READ_PROJECT_ARTIFACT_LENGTH);
+            let length =
+                (snapshot.bytes - batch_offset).min(INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES);
             batch.push((batch_offset, length));
             batch_offset = batch_offset
                 .checked_add(length)
@@ -1686,7 +1691,6 @@ pub(super) fn project_artifact_presentation_mode(
     arguments: &Value,
 ) -> ProjectArtifactPresentationMode {
     match tool_name {
-        "export_project_artifact" => ProjectArtifactPresentationMode::Export,
         "read_project_artifact"
             if arguments.get("as_image").and_then(Value::as_bool) == Some(true) =>
         {
@@ -1701,12 +1705,8 @@ pub(super) fn project_artifact_presentation_mode(
     }
 }
 
-fn artifact_export_operation_label(tool_name: &str) -> &'static str {
-    if tool_name == "project_artifact" {
-        "project_artifact(action=export)"
-    } else {
-        "export_project_artifact"
-    }
+fn artifact_export_operation_label(_tool_name: &str) -> &'static str {
+    "project_artifact(action=export)"
 }
 
 #[derive(Debug, Default)]
@@ -1780,6 +1780,7 @@ pub(super) fn adapt_tool_result(
     artifact_presentation: ProjectArtifactPresentationMode,
     result: ToolResult,
     context: McpResourceToolCallContext,
+    result_presentation: McpToolResultPresentation,
 ) -> McpResourceToolResultAdaptation {
     if artifact_presentation == ProjectArtifactPresentationMode::Export {
         return McpResourceToolResultAdaptation::Framed(mcp_artifact_export_tool_result(
@@ -1787,6 +1788,7 @@ pub(super) fn adapt_tool_result(
             context
                 .artifact_export_caller
                 .expect("validated artifact export caller binding"),
+            result_presentation,
         ));
     }
     if artifact_presentation == ProjectArtifactPresentationMode::Image
@@ -1798,6 +1800,7 @@ pub(super) fn adapt_tool_result(
                 artifact_presentation == ProjectArtifactPresentationMode::Image,
                 result,
                 context.snapshot_resource_caller,
+                result_presentation,
             ),
         );
     }

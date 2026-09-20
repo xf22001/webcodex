@@ -538,6 +538,9 @@ pub enum HostFileImportProvenance {
     #[default]
     Untrusted,
     GptActionOpenAiHost,
+    /// Authenticated MCP OAuth client that may import only from OpenAI file hosts.
+    AuthenticatedMcpOpenAiHostFile,
+    /// Explicitly allowlisted MCP client that may import from arbitrary public HTTPS.
     TrustedMcpHostFile,
 }
 
@@ -1037,6 +1040,31 @@ pub struct ComputerSnapshotRegion {
     pub width: u32,
     #[schemars(range(min = 1, max = 4294967295u64))]
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GoalStepInputCall {
+    /// Stable step id, fixed for the lifetime of this Goal plan.
+    #[schemars(regex(pattern = "^[A-Za-z0-9_-]{1,32}$"))]
+    pub id: String,
+    /// Bounded plan milestone, not a Task instruction or execution selector.
+    #[schemars(length(min = 1, max = 120))]
+    pub title: String,
+}
+
+fn goal_conditions_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array", "maxItems": 8,
+        "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    })
+}
+
+fn goal_step_ids_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array", "maxItems": 32, "uniqueItems": true,
+        "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"}
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -2637,6 +2665,16 @@ pub enum ToolCall {
 
     /// Create explicit high-level durable intent/control state without execution authority.
     CreateGoal {
+        /// Fixed durable completion intent; the Server does not evaluate natural-language conditions.
+        /// At most 8 conditions, each additionally bounded to 512 UTF-8 bytes.
+        #[serde(default)]
+        #[schemars(schema_with = "goal_conditions_schema")]
+        completion_conditions: Vec<String>,
+        /// Fixed bounded plan. Stable ids are unique; all steps start pending. Use checkpoint_goal
+        /// for atomic progress at recovery-worthy milestones, not after every tool call.
+        #[serde(default)]
+        #[schemars(length(max = 32))]
+        steps: Vec<GoalStepInputCall>,
         /// Bounded human-readable Goal title.
         #[schemars(length(min = 1, max = 200))]
         title: String,
@@ -2672,7 +2710,42 @@ pub enum ToolCall {
     },
 
     /// App-only exact read of the same bounded Goal Plan projection.
-    GoalPlanState { goal_id: String },
+    GoalPlanState {
+        #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
+        goal_id: String,
+    },
+
+    /// App-only detector request. The Server recomputes activity, current Window
+    /// relation, Session/Goal authority and epoch dedup. No caller timestamps,
+    /// controller selection, Session selection or effect replay is accepted.
+    GoalPlanRecheckAttention {
+        #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
+        goal_id: String,
+    },
+
+    /// Atomically checkpoint one Goal's mechanical plan and recovery summary.
+    CheckpointGoal {
+        #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
+        goal_id: String,
+        /// Exact current Goal revision; stale writes fail closed.
+        #[schemars(range(min = 1))]
+        expected_revision: i64,
+        /// Pending or in-progress steps to complete together. Duplicate/unknown ids fail closed.
+        #[serde(default)]
+        #[schemars(schema_with = "goal_step_ids_schema")]
+        completed_step_ids: Vec<String>,
+        /// Optional next/current step. Complete any other in-progress step in the same batch;
+        /// a completed step can never be selected as current.
+        #[serde(default)]
+        #[schemars(regex(pattern = "^[A-Za-z0-9_-]{1,32}$"))]
+        current_step_id: Option<String>,
+        /// Required bounded recovery point; additionally limited to 2048 UTF-8 bytes.
+        #[schemars(length(min = 1, max = 2048))]
+        summary: String,
+        /// Exact keyed replay does not mutate; changed reuse conflicts.
+        #[schemars(length(min = 1, max = 128))]
+        idempotency_key: String,
+    },
 
     /// List caller-visible durable Goals with an optional authoritative lifecycle filter.
     ListGoals {
@@ -3826,9 +3899,16 @@ pub enum ToolCall {
     SearchAndRead {
         /// Runner-registered project id.
         project: String,
-        /// One bounded search query. Runtime forces match mode and zero search
-        /// context because source context is returned by the read phase.
-        query: SearchProjectTextsQuery,
+        /// One bounded search query. Exactly one of `query` or `queries` is required.
+        /// Runtime forces match mode and zero search context because source context
+        /// is returned by the read phase.
+        #[serde(default)]
+        query: Option<SearchProjectTextsQuery>,
+        /// Batch of 1..8 predetermined independent queries. Exactly one of `query`
+        /// or `queries` is required; all queries share the global `max_reads` budget.
+        #[schemars(length(max = 8))]
+        #[serde(default)]
+        queries: Option<Vec<SearchProjectTextsQuery>>,
         /// Optional explicit wc_sess_* Workflow Session id.
         #[serde(default)]
         session_id: Option<String>,
@@ -3841,7 +3921,7 @@ pub enum ToolCall {
         #[serde(default)]
         read_after: Option<usize>,
         #[schemars(extend("default" = 8))]
-        /// Maximum match-derived read requests; clamped to 1..8.
+        /// Global maximum match-derived read requests across all queries; clamped to 1..8.
         #[serde(default)]
         max_reads: Option<usize>,
         /// When true, successful source reads return numbered text.
@@ -3994,6 +4074,22 @@ pub enum ToolCall {
         host_file_import_provenance: HostFileImportProvenance,
     },
 
+    /// Stream one exact source artifact snapshot directly from one Project to
+    /// another through Control, without Host attachments or model-facing base64.
+    TransferProjectArtifact {
+        /// Exact or resolvable source Runtime Project.
+        source_project: String,
+        /// Project-relative source artifact path.
+        source_path: String,
+        /// Exact or resolvable destination Runtime Project.
+        destination_project: String,
+        /// Project-relative destination artifact path.
+        destination_path: String,
+        /// Allow replacing an existing destination artifact (default false).
+        #[serde(default)]
+        overwrite: Option<bool>,
+    },
+
     /// Preferred unified read-side facade for Project artifacts. Physical
     /// dispatch remains action-specific: Runner-backed metadata/inspection and
     /// MCP presentation/authority for native images and complete export.
@@ -4014,6 +4110,7 @@ pub enum ToolCall {
         #[serde(default)]
         offset: Option<usize>,
         /// inspect only; bytes (default 32768, max 65536).
+        #[schemars(range(min = 1, max = 65536))]
         #[serde(default)]
         length: Option<usize>,
         /// inspect only; 64-char lowercase SHA-256 fence.
@@ -4021,21 +4118,6 @@ pub enum ToolCall {
         #[schemars(regex(pattern = "^[0-9a-f]{64}$"))]
         #[serde(default)]
         expected_sha256: Option<String>,
-    },
-
-    /// Prepare one project artifact for standards-native MCP resource export.
-    /// The runtime returns only stable metadata; the MCP transport owns the
-    /// short-lived resource handle and complete binary framing.
-    ExportProjectArtifact {
-        /// Runner-registered project id.
-        project: String,
-        /// Project-relative artifact path.
-        path: String,
-        /// Optional explicit wc_sess_* Workflow Session id from a prior compatible bootstrap. When
-        /// provided, this tool call is recorded in that exact Session ledger; omission leaves the call
-        /// unlinked to Workflow Session state.
-        #[serde(default)]
-        session_id: Option<String>,
     },
 
     /// Read bounded metadata for a binary project artifact. Zip files are
@@ -4077,6 +4159,7 @@ pub enum ToolCall {
         #[serde(default)]
         offset: Option<usize>,
         /// Optional chunk length in bytes; defaults to 32768 and cannot exceed 65536.
+        #[schemars(range(min = 1, max = 65536))]
         #[serde(default)]
         length: Option<usize>,
         /// Optional exact full-file snapshot fence. Normally do not invent or manually transfer it: Runtime
@@ -5057,6 +5140,8 @@ impl ToolCall {
             Self::GetGoal { .. } => "get_goal",
             Self::PresentGoalPlan { .. } => "present_goal_plan",
             Self::GoalPlanState { .. } => "goal_plan_state",
+            Self::GoalPlanRecheckAttention { .. } => "goal_plan_recheck_attention",
+            Self::CheckpointGoal { .. } => "checkpoint_goal",
             Self::ListGoals { .. } => "list_goals",
             Self::UpdateGoal { .. } => "update_goal",
             Self::AssociateGoalAgentTask { .. } => "associate_goal_agent_task",
@@ -5127,8 +5212,8 @@ impl ToolCall {
             Self::WriteProjectFile { .. } => "write_project_file",
             Self::SaveProjectArtifact { .. } => "save_project_artifact",
             Self::ImportConversationFilesToProject { .. } => "import_conversation_files_to_project",
+            Self::TransferProjectArtifact { .. } => "transfer_project_artifact",
             Self::ProjectArtifact { .. } => "project_artifact",
-            Self::ExportProjectArtifact { .. } => "export_project_artifact",
             Self::ReadProjectArtifactMetadata { .. } => "read_project_artifact_metadata",
             Self::ReadProjectArtifact { .. } => "read_project_artifact",
             Self::ArtifactUploadBegin { .. } => "artifact_upload_begin",
@@ -5213,7 +5298,6 @@ impl ToolCall {
             | Self::SaveProjectArtifact { session_id, .. }
             | Self::ComputerSaveSnapshot { session_id, .. }
             | Self::ProjectArtifact { session_id, .. }
-            | Self::ExportProjectArtifact { session_id, .. }
             | Self::ReadProjectArtifactMetadata { session_id, .. }
             | Self::ReadProjectArtifact { session_id, .. }
             | Self::ArtifactUploadBegin { session_id, .. }
@@ -5359,7 +5443,6 @@ impl ToolCall {
             | Self::ComputerSaveSnapshot { project, .. }
             | Self::ImportConversationFilesToProject { project, .. }
             | Self::ProjectArtifact { project, .. }
-            | Self::ExportProjectArtifact { project, .. }
             | Self::ReadProjectArtifactMetadata { project, .. }
             | Self::ReadProjectArtifact { project, .. }
             | Self::ArtifactUploadBegin { project, .. }

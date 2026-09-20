@@ -165,8 +165,7 @@ fn memory_tools_remain_canonical_extensions_without_top_level_advertising() {
     full_auth.scopes.push(crate::auth::SCOPE_ADMIN.to_string());
     for compact in [false, true] {
         for auth in [None, Some(&full_auth)] {
-            let payload =
-                mcp_tools_list_payload_with_features_for_auth(compact, false, true, true, auth);
+            let payload = mcp_tools_list_payload_with_features_for_auth(compact, false, true, auth);
             for spec in &specs {
                 assert!(!payload["tools"]
                     .as_array()
@@ -382,7 +381,7 @@ async fn hidden_extensions_keep_exact_manifest_and_gateway_execution() {
 #[test]
 fn trace_reader_is_stateless_protocol_extension_admin_scoped_and_schema_static() {
     let render = |stateless_2026: bool, auth: Option<&crate::auth::AuthContext>| {
-        mcp_tools_list_payload_with_features_for_auth(false, false, true, stateless_2026, auth)
+        mcp_tools_list_payload_with_features_for_auth(false, false, stateless_2026, auth)
     };
     let names = |payload: &Value| {
         payload["tools"]
@@ -438,8 +437,7 @@ fn skill_runtime_tools_are_stateless_protocol_extensions_and_schema_static() {
     assert!(!generic_names.iter().any(|name| name == "skill_read_file"));
 
     let render_full = || {
-        let mut payload =
-            mcp_tools_list_payload_with_features_for_auth(false, false, true, true, None);
+        let mut payload = mcp_tools_list_payload_with_features_for_auth(false, false, true, None);
         add_stateless_workflow_recorder_metadata(&mut payload);
         payload
     };
@@ -536,7 +534,7 @@ fn skill_runtime_tools_are_stateless_protocol_extensions_and_schema_static() {
 #[test]
 fn skill_management_tools_require_admin_and_remain_fixed_schema() {
     let render = |auth: Option<&crate::auth::AuthContext>| {
-        mcp_tools_list_payload_with_features_for_auth(false, false, true, true, auth)
+        mcp_tools_list_payload_with_features_for_auth(false, false, true, auth)
     };
     let shared = crate::auth::shared_key_context("skill-management-test");
     let shared_payload = render(Some(&shared));
@@ -956,7 +954,7 @@ fn mcp_file_params_keep_raw_object_shape_and_reject_model_mask_strings() {
 }
 
 #[test]
-fn mcp_file_import_trust_requires_exact_configured_active_client_id() {
+fn mcp_file_import_trust_distinguishes_exact_tier1_from_active_oauth_tier2() {
     const CALLBACK: &str = "https://chatgpt.example/connector/oauth/test";
     let mut config = (*test_config_oauth2(Some("secret"))).clone();
     let (_tmp, db) = test_db();
@@ -1002,8 +1000,8 @@ fn mcp_file_import_trust_requires_exact_configured_active_client_id() {
             &db,
             Some(&auth_for(&same_redirect.client_id))
         ),
-        HostFileImportTrust::Untrusted,
-        "sharing a redirect URI must not grant authority"
+        HostFileImportTrust::AuthenticatedMcpOpenAiHostFile,
+        "sharing a redirect URI must not grant Tier 1 authority"
     );
     assert_eq!(
         mcp_host_file_import_trust_from_state(&config, &db, Some(&trusted_auth)),
@@ -1015,8 +1013,8 @@ fn mcp_file_import_trust_requires_exact_configured_active_client_id() {
     db.insert_oauth_client(&same_name).unwrap();
     assert_eq!(
         mcp_host_file_import_trust_from_state(&config, &db, Some(&auth_for(&same_name.client_id))),
-        HostFileImportTrust::Untrusted,
-        "sharing the display name must not grant authority"
+        HostFileImportTrust::AuthenticatedMcpOpenAiHostFile,
+        "sharing the display name must not grant Tier 1 authority"
     );
 
     let unknown_client_id = crate::auth::generate_oauth_client_id();
@@ -1036,8 +1034,8 @@ fn mcp_file_import_trust_requires_exact_configured_active_client_id() {
     empty_config.oauth2.trusted_mcp_file_client_ids.clear();
     assert_eq!(
         mcp_host_file_import_trust_from_state(&empty_config, &db, Some(&trusted_auth)),
-        HostFileImportTrust::Untrusted,
-        "empty operator trust config must fail closed"
+        HostFileImportTrust::AuthenticatedMcpOpenAiHostFile,
+        "empty Tier 1 config still permits only authenticated OpenAI-host import"
     );
 
     db.revoke_oauth_client(&trusted.id, chrono::Utc::now().timestamp())
@@ -1057,8 +1055,8 @@ fn mcp_file_import_trust_requires_exact_configured_active_client_id() {
             &db,
             Some(&auth_for(&replacement.client_id))
         ),
-        HostFileImportTrust::Untrusted,
-        "recreating a client with the same callback cannot inherit the configured client-ID trust"
+        HostFileImportTrust::AuthenticatedMcpOpenAiHostFile,
+        "recreated active client cannot inherit Tier 1 but keeps OpenAI-host-only Tier 2"
     );
 
     let api_auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ApiToken);
@@ -1493,7 +1491,7 @@ fn mcp_tools_list_inputs_equal_canonical_except_descriptions_and_host_file_overl
         .collect::<std::collections::HashMap<_, _>>();
     for compact in [false, true] {
         let payload =
-            mcp_tools_list_payload_with_features_for_auth(compact, false, true, true, Some(&auth));
+            mcp_tools_list_payload_with_features_for_auth(compact, false, true, Some(&auth));
         for tool in payload["tools"].as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
             let canonical = &specs[name];
@@ -2139,9 +2137,9 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
     // plus 16,641 with Apps. About 10% byte headroom; new advertised tools
     // require an explicit count-budget review, rather than silent growth.
     for (label, auth, max_tools, max_bytes) in [
-        ("anonymous", None, 32, 95_000),
-        ("scoped", Some(&scoped), 33, 98_000),
-        ("admin", Some(&admin), 39, 110_000),
+        ("anonymous", None, 33, 95_000),
+        ("scoped", Some(&scoped), 34, 98_000),
+        ("admin", Some(&admin), 40, 110_000),
     ] {
         for app_enabled in [false, true] {
             let mut sizes = Vec::new();
@@ -2175,7 +2173,9 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
                 } else {
                     0
                 };
-                let count_budget = max_tools + if app_enabled { 16 } else { 0 } + feature_tools;
+                // G4 adds one selector-only hidden Goal detector. Account for
+                // that exact App-only tool without increasing the byte budget.
+                let count_budget = max_tools + if app_enabled { 17 } else { 0 } + feature_tools;
                 let byte_budget =
                     max_bytes + if app_enabled { 18_000 } else { 0 } + feature_tools * 4096;
                 if feature_tools == 0 {

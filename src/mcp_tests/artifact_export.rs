@@ -70,18 +70,31 @@ async fn poll_mcp_export_request(
     registry: &Arc<crate::runner_http::RunnerRegistry>,
 ) -> crate::runner_protocol::RunnerRequest {
     use crate::runner_protocol::RunnerPollRequest;
-    loop {
-        if let Some(request) = registry
-            .poll(RunnerPollRequest {
-                client_id: "exporter".to_string(),
-                runner_instance_id: "inst-export".to_string(),
-            })
-            .await
-            .unwrap()
-        {
-            return request;
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(request) = registry
+                .poll(RunnerPollRequest {
+                    client_id: "exporter".to_string(),
+                    runner_instance_id: "inst-export".to_string(),
+                })
+                .await
+                .unwrap()
+            {
+                return request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    })
+    .await;
+    match request {
+        Ok(request) => request,
+        Err(_) => {
+            let pending = registry
+                .get_runner_view("exporter")
+                .await
+                .map(|view| view.pending_requests);
+            panic!("timed out polling MCP export Runner request; pending_requests={pending:?}");
+        }
     }
 }
 
@@ -119,7 +132,7 @@ fn mcp_export_optimized_chunk_range(
     assert_eq!(payload["expected_file_bytes"], file_bytes);
     let offset = payload["offset"].as_u64().unwrap() as usize;
     let length = payload["length"].as_u64().unwrap() as usize;
-    assert!(length <= MAX_READ_PROJECT_ARTIFACT_LENGTH);
+    assert!(length <= INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES);
     let end = offset.saturating_add(length).min(file_bytes);
     (offset, end)
 }
@@ -265,7 +278,7 @@ async fn complete_mcp_export_resource_read(
         let offset = payload["offset"].as_u64().unwrap() as usize;
         let length = payload["length"].as_u64().unwrap() as usize;
         assert_eq!(offset, expected_offset);
-        assert!(length <= MAX_READ_PROJECT_ARTIFACT_LENGTH);
+        assert!(length <= INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES);
         let end = offset.saturating_add(length).min(bytes.len());
         let mut chunk = bytes[offset..end].to_vec();
         if (fault == McpExportChunkFault::MutateFirstChunk && offset == 0)
@@ -352,13 +365,11 @@ async fn issue_mcp_artifact_export_with_metadata_max(
                     "tools/call",
                     Some(json!(3101)),
                     mcp_2026_params(json!({
-                        "name": crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
+                        "name": "project_artifact",
                         "arguments": {
-                            "tool": "export_project_artifact",
-                            "arguments": {
-                                "project": "agent:exporter:demo",
-                                "path": path,
-                            }
+                            "project": "agent:exporter:demo",
+                            "path": path,
+                            "action": "export"
                         }
                     })),
                 ),
@@ -452,35 +463,23 @@ async fn project_artifact_export_uses_existing_resource_link_authority_path() {
 }
 
 #[tokio::test]
-async fn mcp_artifact_export_is_stateless_protocol_only() {
+async fn project_artifact_export_is_stateless_protocol_only() {
     let legacy = mcp_tools_list_payload_with_compact(false);
-    assert!(!legacy["tools"]
+    assert!(legacy["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "export_project_artifact"));
+        .any(|tool| tool["name"] == "project_artifact"));
 
     let stateless = mcp_tools_list_payload_with_compact_and_app(false, true);
-    assert!(!stateless["tools"]
+    assert!(stateless["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "export_project_artifact"));
-    let spec = registered_tool_specs()
+        .any(|tool| tool["name"] == "project_artifact"));
+    assert!(registered_tool_specs()
         .into_iter()
-        .find(|spec| spec.name == "export_project_artifact")
-        .expect("canonical export_project_artifact ToolSpec");
-    assert_eq!(spec.input_schema["required"], json!(["project", "path"]));
-    assert!(spec.input_schema["properties"].get("session_id").is_some());
-    assert!(spec.input_schema["properties"]
-        .get("allow_cross_project_session")
-        .is_none());
-    assert!(
-        super::super::tools::adaptive_runtime_gateway_target_admitted_for_test(
-            "export_project_artifact",
-            true
-        )
-    );
+        .all(|spec| spec.name != "export_project_artifact"));
 
     let runtime = test_runtime();
     let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::Bootstrap);
@@ -491,10 +490,11 @@ async fn mcp_artifact_export_is_stateless_protocol_only() {
             "tools/call",
             Some(json!(3100)),
             json!({
-                "name": crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
+                "name": "project_artifact",
                 "arguments": {
-                    "tool": "export_project_artifact",
-                    "arguments": {"project": "agent:any:any", "path": "report.pdf"}
+                    "project": "agent:any:any",
+                    "path": "report.pdf",
+                    "action": "export"
                 }
             }),
         ),
@@ -509,74 +509,54 @@ async fn mcp_artifact_export_is_stateless_protocol_only() {
                 .unwrap()
                 .contains("stateless-2026"));
         }
-        other => panic!("legacy artifact export must fail closed, got {other:?}"),
+        other => panic!("project_artifact export must fail closed on legacy MCP, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn adaptive_artifact_export_unified_direct_and_legacy_gateway_preserve_gates() {
+async fn project_artifact_export_preserves_protocol_and_auth_gates() {
     let runtime = test_runtime();
     let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::Bootstrap);
     auth.is_bootstrap = true;
-    let routes = [
-        (
-            "unified-direct",
-            json!({
-                "name": "project_artifact",
-                "arguments": {
-                    "project": "agent:any:any",
-                    "path": "report.pdf",
-                    "action": "export"
-                }
-            }),
-        ),
-        (
-            "legacy-gateway",
-            json!({
-                "name": crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
-                "arguments": {
-                    "tool": "export_project_artifact",
-                    "arguments": {"project": "agent:any:any", "path": "report.pdf"}
-                }
-            }),
-        ),
-    ];
-    for (route, params) in routes {
-        for (stateless, expected_error) in [
-            (false, "stateless-2026"),
-            (true, "authenticated caller identity is unavailable"),
-        ] {
-            let outcome = handle_mcp_request(
-                &runtime,
-                rpc(
-                    "tools/call",
-                    Some(json!(3101)),
-                    if stateless {
-                        mcp_2026_params(params.clone())
-                    } else {
-                        params.clone()
-                    },
-                ),
-                if stateless { None } else { Some(&auth) },
-            )
-            .await;
-            let McpOutcome::BadRequest(value) = outcome else {
-                panic!("export must reject route={route}, stateless={stateless}: {outcome:?}");
-            };
-            assert_eq!(value["error"]["code"], -32602);
-            assert!(
-                value["error"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains(expected_error),
-                "route={route}, stateless={stateless}: {value}"
-            );
+    let params = json!({
+        "name": "project_artifact",
+        "arguments": {
+            "project": "agent:any:any",
+            "path": "report.pdf",
+            "action": "export"
         }
+    });
+    for (stateless, expected_error) in [
+        (false, "stateless-2026"),
+        (true, "authenticated caller identity is unavailable"),
+    ] {
+        let outcome = handle_mcp_request(
+            &runtime,
+            rpc(
+                "tools/call",
+                Some(json!(3101)),
+                if stateless {
+                    mcp_2026_params(params.clone())
+                } else {
+                    params.clone()
+                },
+            ),
+            if stateless { None } else { Some(&auth) },
+        )
+        .await;
+        let McpOutcome::BadRequest(value) = outcome else {
+            panic!("export must reject stateless={stateless}: {outcome:?}");
+        };
+        assert_eq!(value["error"]["code"], -32602);
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(expected_error));
     }
 }
 
 #[tokio::test]
-async fn adaptive_artifact_export_gateway_returns_resource_link_and_round_trips_binary() {
+async fn project_artifact_export_returns_resource_link_and_round_trips_binary() {
     use base64::Engine as _;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -596,13 +576,11 @@ async fn adaptive_artifact_export_gateway_returns_resource_link_and_round_trips_
                     "tools/call",
                     Some(json!(3102)),
                     mcp_2026_params(json!({
-                        "name": crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
+                        "name": "project_artifact",
                         "arguments": {
-                            "tool": "export_project_artifact",
-                            "arguments": {
-                                "project": "agent:exporter:demo",
-                                "path": path
-                            }
+                            "project": "agent:exporter:demo",
+                            "path": path,
+                            "action": "export"
                         }
                     })),
                 ),
@@ -821,17 +799,22 @@ async fn mcp_artifact_export_oauth_resource_read_uses_project_read_and_stable_id
 }
 
 #[tokio::test]
-async fn export_project_artifact_non_mcp_path_fails_before_runner_read() {
+async fn project_artifact_export_non_mcp_path_fails_before_runner_read() {
     use crate::runner_protocol::RunnerPollRequest;
     let tmp = tempfile::tempdir().unwrap();
     let (runtime, registry) = mcp_export_runtime(tmp.path(), Some("alice")).await;
     let auth = mcp_export_api_auth("key-export", "alice");
     let result = runtime
         .dispatch_with_auth(
-            crate::tool_runtime::ToolCall::ExportProjectArtifact {
+            crate::tool_runtime::ToolCall::ProjectArtifact {
                 project: "agent:exporter:demo".to_string(),
                 path: "paper/report.pdf".to_string(),
+                action: crate::tool_runtime::ProjectArtifactAction::Export,
                 session_id: None,
+                allow_missing: None,
+                offset: None,
+                length: None,
+                expected_sha256: None,
             },
             Some(&auth),
         )
@@ -840,7 +823,7 @@ async fn export_project_artifact_non_mcp_path_fails_before_runner_read() {
     assert!(result
         .error
         .as_deref()
-        .is_some_and(|error| error.contains("MCP-only")));
+        .is_some_and(|error| error.contains("requires Stateless MCP 2026")));
     assert!(registry
         .poll(RunnerPollRequest {
             client_id: "exporter".to_string(),
@@ -1081,7 +1064,7 @@ async fn mcp_artifact_export_optimized_pipeline_is_four_way_bounded_and_offset_o
     let (runtime, registry) = mcp_export_runtime(tmp.path(), Some("alice")).await;
     let auth = mcp_export_api_auth("key-pipeline", "alice");
     let path = "paper/pipeline.pdf";
-    let size = MAX_READ_PROJECT_ARTIFACT_LENGTH * 9 + 123;
+    let size = INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES * 9 + 123;
     let bytes: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     let export = issue_mcp_artifact_export(
@@ -1143,7 +1126,7 @@ async fn mcp_artifact_export_optimized_pipeline_is_four_way_bounded_and_offset_o
     assert_eq!(
         first_offsets,
         (1..=4)
-            .map(|index| index * MAX_READ_PROJECT_ARTIFACT_LENGTH)
+            .map(|index| index * INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES)
             .collect::<Vec<_>>()
     );
     assert!(
@@ -1191,7 +1174,7 @@ async fn mcp_artifact_export_optimized_pipeline_is_four_way_bounded_and_offset_o
             .map(|request| mcp_export_optimized_chunk_range(request, path, bytes.len()).0)
             .collect::<Vec<_>>(),
         (5..=8)
-            .map(|index| index * MAX_READ_PROJECT_ARTIFACT_LENGTH)
+            .map(|index| index * INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES)
             .collect::<Vec<_>>()
     );
     assert!(
@@ -1212,7 +1195,7 @@ async fn mcp_artifact_export_optimized_pipeline_is_four_way_bounded_and_offset_o
     let final_chunk = poll_mcp_export_request(&registry).await;
     assert_eq!(
         mcp_export_optimized_chunk_range(&final_chunk, path, bytes.len()).0,
-        9 * MAX_READ_PROJECT_ARTIFACT_LENGTH
+        9 * INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES
     );
     complete_mcp_export_optimized_chunk(&registry, final_chunk, path, &bytes).await;
 
@@ -1240,7 +1223,7 @@ async fn mcp_artifact_export_total_timeout_cleans_abandoned_pending_reads() {
     let (runtime, registry) = mcp_export_runtime(tmp.path(), Some("alice")).await;
     let auth = mcp_export_api_auth("key-pipeline-timeout", "alice");
     let path = "paper/pipeline-timeout.pdf";
-    let bytes: Vec<u8> = (0..MAX_READ_PROJECT_ARTIFACT_LENGTH * 5)
+    let bytes: Vec<u8> = (0..INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES * 5)
         .map(|index| (index % 233) as u8)
         .collect();
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
@@ -1349,7 +1332,7 @@ async fn mcp_artifact_export_optimized_batch_drains_before_offset_ordered_error(
     let (runtime, registry) = mcp_export_runtime(tmp.path(), Some("alice")).await;
     let auth = mcp_export_api_auth("key-pipeline-error", "alice");
     let path = "paper/pipeline-error.pdf";
-    let bytes: Vec<u8> = (0..MAX_READ_PROJECT_ARTIFACT_LENGTH * 5)
+    let bytes: Vec<u8> = (0..INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES * 5)
         .map(|index| (index % 239) as u8)
         .collect();
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
@@ -1467,7 +1450,7 @@ async fn mcp_artifact_export_same_size_mutations_fail_final_sha() {
     let tmp = tempfile::tempdir().unwrap();
     let (runtime, registry) = mcp_export_runtime(tmp.path(), Some("alice")).await;
     let auth = mcp_export_api_auth("key-mutation", "alice");
-    let bytes = vec![0x5a; 70 * 1024];
+    let bytes = vec![0x5a; INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES + 17];
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     for fault in [
         McpExportChunkFault::MutateFirstChunk,
@@ -1959,7 +1942,7 @@ fn mcp_artifact_export_preserves_streaming_bound_and_durable_projection_has_no_h
         "name": "report.pdf",
     }));
     let durable =
-        crate::tool_runtime::audit_safe_result_for_tool("export_project_artifact", &stable.output);
+        crate::tool_runtime::audit_safe_result_for_tool("project_artifact", &stable.output);
     let serialized = serde_json::to_string(&durable).unwrap();
     assert!(!serialized.contains(MCP_ARTIFACT_EXPORT_URI_PREFIX));
     assert!(!serialized.contains("content_base64"));
@@ -1968,13 +1951,20 @@ fn mcp_artifact_export_preserves_streaming_bound_and_durable_projection_has_no_h
 
 #[test]
 fn mcp_artifact_export_incremental_base64_matches_whole_encoding() {
-    let bytes: Vec<u8> = (0..(2 * MAX_READ_PROJECT_ARTIFACT_LENGTH + 17))
+    let bytes: Vec<u8> = (0..(2 * INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES + 17))
         .map(|index| (index % 251) as u8)
         .collect();
     let mut encoder = McpArtifactExportBase64Encoder::default();
     let mut encoded = String::new();
     let mut offset = 0usize;
-    for length in [1usize, 2, 7, MAX_READ_PROJECT_ARTIFACT_LENGTH, 11, 65531] {
+    for length in [
+        1usize,
+        2,
+        7,
+        INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES,
+        11,
+        65531,
+    ] {
         if offset >= bytes.len() {
             break;
         }
@@ -2114,29 +2104,26 @@ async fn mcp_artifact_export_action_audit_does_not_persist_handle_or_blob() {
             true,
         )
         .add_header(MCP_METHOD_HEADER, "tools/call", true)
-        .add_header(
-            MCP_NAME_HEADER,
-            crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
-            true,
-        )
+        .add_header(MCP_NAME_HEADER, "project_artifact", true)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 3112,
             "method": "tools/call",
             "params": mcp_2026_params(json!({
-                "name": crate::mcp::tools::ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME,
+                "name": "project_artifact",
                 "arguments": {
-                    "tool": "export_project_artifact",
-                    "arguments": {
-                        "project": "agent:exporter:demo",
-                        "path": "paper/audit.pdf"
-                    }
+                    "project": "agent:exporter:demo",
+                    "path": "paper/audit.pdf",
+                    "action": "export"
                 }
             }))
         }))
         .send(&service)
         .await;
-    agent.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), agent)
+        .await
+        .expect("artifact export audit fixture timed out")
+        .unwrap();
     assert_eq!(effective_status(&response), StatusCode::OK);
     let body: Value = response.take_json().await.unwrap();
     let uri = body["result"]["content"][0]["uri"]
@@ -2153,7 +2140,7 @@ async fn mcp_artifact_export_action_audit_does_not_persist_handle_or_blob() {
         )
         .unwrap()
     };
-    assert_eq!(operation, "export_project_artifact");
+    assert_eq!(operation, "project_artifact");
     for durable in [&summary, &error] {
         assert!(!durable.contains(MCP_ARTIFACT_EXPORT_URI_PREFIX));
         assert!(!durable.contains("wc_export_"));

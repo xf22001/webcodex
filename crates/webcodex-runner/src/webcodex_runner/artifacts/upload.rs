@@ -17,9 +17,7 @@ use super::{
     parse_required_clean_string, parse_usize_field, project_root, validate_artifact_runner_path,
 };
 use crate::apply_edits_shared::is_lowercase_hex_sha256 as is_hex_sha256;
-use crate::artifact_policy::{
-    has_safe_octet_stream_artifact_extension, octet_stream_safe_extension_error,
-};
+use crate::artifact_policy::ooxml_extension_for_mime;
 
 pub(super) const MAX_ARTIFACT_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 pub(super) const MAX_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
@@ -335,17 +333,6 @@ pub(super) fn upload_error(
     })
 }
 
-fn upload_policy_rejected_error(
-    path: Option<&str>,
-    upload_id: Option<&str>,
-    msg: impl Into<String>,
-) -> Value {
-    let mut out = upload_error(path, upload_id, msg);
-    out["failure_kind"] = json!("policy_rejected");
-    out["error_kind"] = json!("policy_rejected");
-    out
-}
-
 pub(super) fn handle_artifact_upload_begin(
     request: &RunnerFilePayload,
     resolved: &Path,
@@ -414,14 +401,6 @@ pub(super) fn handle_artifact_upload_begin(
         Ok(value) => value,
         Err(e) => return line_edit_stdout(upload_error(Some(path), None, e), start),
     };
-    if matches!(mime_type.as_deref(), Some("application/octet-stream"))
-        && !has_safe_octet_stream_artifact_extension(path)
-    {
-        return line_edit_stdout(
-            upload_policy_rejected_error(Some(path), None, octet_stream_safe_extension_error()),
-            start,
-        );
-    }
     let overwrite = match parse_bool_field(&payload, "overwrite") {
         Ok(value) => value,
         Err(e) => return line_edit_stdout(upload_error(Some(path), None, e), start),
@@ -867,11 +846,24 @@ pub(super) fn handle_artifact_upload_finish(
             start,
         );
     }
-    let detected_mime = if state.mime_type.is_none() {
-        artifact_mime_from_file(path, &part, true)
-    } else {
-        None
-    };
+    let detected_mime = artifact_mime_from_file(path, &part, true);
+    if let Some(claimed_ooxml_mime) = state
+        .mime_type
+        .as_deref()
+        .filter(|mime| ooxml_extension_for_mime(mime).is_some())
+    {
+        if detected_mime.as_deref() != Some(claimed_ooxml_mime) {
+            return line_edit_stdout(
+                upload_error(
+                    Some(path),
+                    Some(&upload_id),
+                    "OOXML MIME type does not match uploaded package content",
+                ),
+                start,
+            );
+        }
+    }
+    let presentation_mime = detected_mime.or_else(|| state.mime_type.clone());
     let exists = std::fs::symlink_metadata(resolved).is_ok();
     if exists && !state.overwrite {
         return line_edit_stdout(
@@ -913,7 +905,7 @@ pub(super) fn handle_artifact_upload_finish(
             "expected_bytes": state.expected_bytes,
             "expected_sha256": state.expected_sha256,
             "sha256": sha256,
-            "mime_type": state.mime_type.or(detected_mime),
+            "mime_type": presentation_mime,
             "committed": true,
         }),
         start,

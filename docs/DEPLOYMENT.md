@@ -453,7 +453,7 @@ curl -fsS -X POST https://your-domain.example/api/oauth/clients/create \
 
 `allowed_scopes` limits what an OAuth client may request. Existing clients are not silently widened when WebCodex adds new permissions. To change an existing client, submit the complete desired non-empty allow-list to `POST /api/oauth/clients/update_scopes`. A real change invalidates the client's old OAuth grants and requires reauthorization; submitting the same canonical list is a no-op. See [Authentication](AUTH_MODEL.md#oauth2) for the security model.
 
-If ChatGPT MCP host-file import is enabled, configure the exact server-generated OAuth client id in `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS`. Reprovisioning the client creates a new id, so update this setting as part of that explicit trust rotation. Client display names and redirect URIs are not substitutes for the configured client id.
+ChatGPT MCP host-file import uses two trust tiers. An active authenticated OAuth client may import only from `files.oaiusercontent.com` or its subdomains; those URLs still require HTTPS, public DNS resolution with address pinning, port 443, no userinfo, no redirects, and the normal bounded download/write policy. Configure an exact server-generated OAuth client id in `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS` only when that client must also import from arbitrary public HTTPS hosts under the same SSRF controls. Reprovisioning changes the client id but does not break ordinary OpenAI-host attachment import; update the setting to restore the broader Tier 1 trust. Client display names and redirect URIs never grant Tier 1 trust.
 
 A separate local-only exception exists for an operator-controlled Server that is
 bound to loopback and reached through OpenAI Secure Tunnel with a locally
@@ -531,7 +531,7 @@ Recommended production smoke sequence:
 2. `POST /api/runtime/status` returns `service=webcodex` and the expected
    public URL.
 3. `list_runners` shows at least one online Runner.
-4. `listProjects` shows `agent:<client_id>:<project_id>` ids.
+4. `list_projects` shows `agent:<client_id>:<project_id>` ids.
 5. Read-only project tools work on a known project.
 6. Write/replace/validate tests are limited to disposable smoke projects.
 

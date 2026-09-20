@@ -6,6 +6,7 @@
 pub mod activity;
 mod agent_task;
 mod agent_wait;
+mod artifact_transfer;
 mod browser_tools;
 mod cargo;
 mod cargo_tools;
@@ -118,7 +119,7 @@ pub use crate::apply_edits_shared::ApplyTextLineScope;
 pub(crate) use files::MAX_PROJECT_ARTIFACT_BYTES;
 pub(crate) use files::{
     validate_project_artifact_export_snapshot, ProjectArtifactExportSnapshot,
-    MAX_PROJECT_ARTIFACT_EXPORT_BYTES, MAX_READ_PROJECT_ARTIFACT_LENGTH,
+    INTERNAL_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_PROJECT_ARTIFACT_EXPORT_BYTES,
 };
 #[cfg(test)]
 pub(crate) use permissions::{AuthorityMode, PermissionEvaluator};
@@ -149,12 +150,12 @@ pub(crate) use webcodex_tool_contracts::tool_call::{
 pub use webcodex_tool_contracts::tool_inputs::ApplyFileChangeInput;
 #[cfg(all(test, feature = "workspace-checkpoints"))]
 pub use webcodex_tool_contracts::tool_inputs::CheckpointValidationInput;
-pub use webcodex_tool_contracts::tool_inputs::{
-    default_true, ExecutionPurpose, ExecutionShell, ListToolsOptions,
-};
 #[cfg(test)]
 pub use webcodex_tool_contracts::tool_inputs::{
     ApplyFileChangeKind, ApplyTextEditInput, ApplyTextEditKind, SessionMode, StartupDetail,
+};
+pub use webcodex_tool_contracts::tool_inputs::{
+    ExecutionPurpose, ExecutionShell, ListToolsOptions,
 };
 pub use webcodex_tool_contracts::ToolSpec;
 pub use webcodex_tool_runtime_contracts::tool_result::ToolResult;

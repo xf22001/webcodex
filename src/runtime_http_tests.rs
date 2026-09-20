@@ -7,16 +7,8 @@ use std::time::Duration;
 
 #[path = "runtime_http/tests/import_http_tests.rs"]
 mod import_http_tests;
-#[path = "runtime_http/tests/jobs_tests.rs"]
-mod jobs_tests;
 #[path = "runtime_http/tests/model_ergonomics_tests.rs"]
 mod model_ergonomics_tests;
-#[path = "runtime_http/tests/project_files_tests.rs"]
-mod project_files_tests;
-#[path = "runtime_http/tests/projects_tests.rs"]
-mod projects_tests;
-#[path = "runtime_http/tests/runner_config_tests.rs"]
-mod runner_config_tests;
 
 #[test]
 fn computer_action_audit_projection_omits_sensitive_observation_payloads() {
@@ -203,10 +195,9 @@ fn runtime_with_local_project(root: &std::path::Path, project_id: &str) -> ToolR
     )
 }
 
-/// Build a router that mirrors the production /api wiring for the new
-/// dedicated project actions: Config, Database, and ToolRuntime are
-/// injected so AuthMiddleware and the handlers resolve state exactly as
-/// in `main.rs`.
+/// Build a router that mirrors the retained production runtime HTTP wiring.
+/// Config, Database, and ToolRuntime are injected so AuthMiddleware and the
+/// canonical handlers resolve state exactly as in `main.rs`.
 fn build_projects_router(
     config: Arc<crate::Config>,
     db: Arc<crate::Database>,
@@ -226,28 +217,32 @@ fn build_projects_router(
                     Router::with_path("artifacts/import")
                         .post(import_conversation_files_to_project),
                 )
-                .push(Router::with_path("projects/list").post(projects_list))
-                .push(Router::with_path("projects/register").post(projects_register))
-                .push(Router::with_path("projects/create").post(projects_create))
-                .push(Router::with_path("projects/git_status").post(projects_git_status))
                 .push(
-                    Router::with_path("projects/apply_unified_diff")
-                        .post(projects_apply_unified_diff),
+                    Router::with_path("projects/resolve-or-register")
+                        .post(projects_resolve_or_register),
                 )
-                .push(Router::with_path("projects/run_shell").post(projects_run_shell))
+                .push(Router::with_path("runtime/status").post(runtime_status)),
+        )
+}
+
+fn build_runner_registration_status_router(
+    config: Arc<crate::Config>,
+    db: Arc<crate::Database>,
+    runtime: Arc<ToolRuntime>,
+    registry: Arc<RunnerRegistry>,
+) -> Router {
+    Router::new()
+        .hoop(affix_state::inject(config))
+        .hoop(affix_state::inject(db))
+        .hoop(affix_state::inject(runtime))
+        .hoop(affix_state::inject(registry))
+        .push(
+            Router::with_path("api")
+                .hoop(crate::AuthMiddleware)
                 .push(
-                    Router::with_path("projects/git_restore_paths")
-                        .post(projects_git_restore_paths),
+                    Router::with_path("shell/agent/register")
+                        .post(crate::runner_http::runner_register),
                 )
-                .push(
-                    Router::with_path("projects/discard_untracked")
-                        .post(projects_discard_untracked),
-                )
-                .push(Router::with_path("projects/run_job").post(projects_run_job))
-                .push(Router::with_path("projects/list_files").post(projects_list_files))
-                .push(Router::with_path("jobs/list").post(jobs_list))
-                .push(Router::with_path("jobs/stop").post(job_stop))
-                .push(Router::with_path("jobs/tail").post(job_tail))
                 .push(Router::with_path("runtime/status").post(runtime_status)),
         )
 }
@@ -317,43 +312,6 @@ async fn register_import_agent_with_capabilities(
 
 async fn register_import_agent(root: &std::path::Path) -> (Arc<ToolRuntime>, Arc<RunnerRegistry>) {
     register_import_agent_with_capabilities(root, None).await
-}
-
-async fn complete_one_agent_request(
-    registry: Arc<RunnerRegistry>,
-    stdout: impl Into<String>,
-    stderr: impl Into<String>,
-    exit_code: i32,
-) {
-    use crate::runner_protocol::{RunnerPollRequest, RunnerResultRequest};
-    let request = loop {
-        if let Some(request) = registry
-            .poll(RunnerPollRequest {
-                client_id: "importer".to_string(),
-                runner_instance_id: "inst-import".to_string(),
-            })
-            .await
-            .unwrap()
-        {
-            break request;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-    registry
-        .complete(RunnerResultRequest {
-            client_id: "importer".to_string(),
-            runner_instance_id: "inst-import".to_string(),
-            request_id: request.request_id,
-            exit_code: Some(exit_code),
-            stdout: Some(stdout.into()),
-            stderr: Some(stderr.into()),
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration_ms: Some(1),
-            error: None,
-        })
-        .await
-        .unwrap();
 }
 
 fn spawn_startup_agent_executor(registry: Arc<RunnerRegistry>) -> tokio::task::JoinHandle<()> {
@@ -432,11 +390,11 @@ fn spawn_startup_agent_executor(registry: Arc<RunnerRegistry>) -> tokio::task::J
 }
 
 // =========================================================================
-// listProjects
+// list_projects
 // =========================================================================
 
 #[tokio::test]
-async fn all_project_endpoints_require_bearer_auth() {
+async fn retained_runtime_endpoints_require_bearer_auth() {
     let _env = crate::auth::AuthEnvGuard::auth_required();
     let config = test_config(Some("secret"));
     let (_tmp, db) = test_db();
@@ -445,22 +403,12 @@ async fn all_project_endpoints_require_bearer_auth() {
     let service = Service::new(build_projects_router(config, db, runtime));
 
     let endpoints: Vec<(&str, Value)> = vec![
-        ("/api/projects/list", json!({})),
-        ("/api/projects/git_status", json!({"project": "demo"})),
-        (
-            "/api/projects/apply_unified_diff",
-            json!({"project": "demo", "diff": "diff"}),
-        ),
         ("/api/tools/list", json!({})),
         ("/api/tools/call", json!({"tool": "list_tools"})),
         ("/api/runtime/status", json!({})),
         (
-            "/api/projects/register",
-            json!({"client_id": "oe", "id": "my-project", "name": "My Project", "path": "/root/git/my-project"}),
-        ),
-        (
-            "/api/projects/create",
-            json!({"client_id": "oe", "id": "hello", "name": "Hello", "path": "/root/git/hello"}),
+            "/api/projects/resolve-or-register",
+            json!({"client_id": "oe", "path": "/root/git/my-project"}),
         ),
     ];
     for (path, body) in &endpoints {
@@ -479,6 +427,42 @@ async fn all_project_endpoints_require_bearer_auth() {
 // =========================================================================
 // getRuntimeStatus / /api/runtime/status
 // =========================================================================
+
+#[tokio::test]
+async fn retired_dedicated_runtime_routes_are_unmounted() {
+    let config = test_config(Some("secret"));
+    let (_tmp, db) = test_db();
+    let tmp_proj = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(runtime_with_local_project(tmp_proj.path(), "demo"));
+    let service = Service::new(build_projects_router(config, db, runtime));
+
+    for (group, leaf) in [
+        ("projects", "git_status"),
+        ("projects", "list_files"),
+        ("projects", "apply_unified_diff"),
+        ("projects", "run_shell"),
+        ("projects", "run_job"),
+        ("projects", "git_restore_paths"),
+        ("projects", "discard_untracked"),
+        ("jobs", "list"),
+        ("jobs", "tail"),
+        ("jobs", "stop"),
+        ("projects", "list"),
+        ("projects", "register"),
+        ("projects", "create"),
+        ("projects", "unregister"),
+        ("runners/config", "check"),
+        ("runners/config", "reload"),
+    ] {
+        let path = format!("/api/{group}/{leaf}");
+        let resp = TestClient::post(format!("http://localhost{path}"))
+            .bearer_auth("secret")
+            .json(&json!({}))
+            .send(&service)
+            .await;
+        assert_eq!(effective_status(&resp), StatusCode::NOT_FOUND, "{path}");
+    }
+}
 
 #[tokio::test]
 async fn http_runtime_status_rejects_wrong_bearer() {
@@ -544,6 +528,145 @@ async fn http_runtime_status_correct_bearer_returns_summary() {
             forbidden
         );
     }
+}
+
+#[test]
+fn http_runtime_status_after_runner_registration_fits_default_worker_stack() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("build production-shaped runtime status regression runtime");
+
+    runtime.block_on(async {
+        tokio::spawn(async {
+            use crate::runner_protocol::{
+                RunnerBuildInfo, RunnerPolicySummary, RunnerProjectSummary, RunnerRegisterRequest,
+                ShellJobInventory,
+            };
+
+            let config = test_config(Some("secret"));
+            let (_tmp, db) = test_db();
+            let registry = Arc::new(RunnerRegistry::default());
+            let tool_runtime = Arc::new(ToolRuntime::new_for_tests_with_runner_registry(
+                registry.clone(),
+            ));
+            let service = Service::new(build_runner_registration_status_router(
+                config,
+                db,
+                tool_runtime,
+                registry.clone(),
+            ));
+            let policy: RunnerPolicySummary = serde_json::from_value(json!({
+                "allow_raw_shell": true,
+                "allow_cwd_anywhere": true,
+                "allowed_roots": ["/root"],
+                "max_timeout_secs": 60,
+                "max_output_bytes": 262144,
+                "shell_profiles": {
+                    "default_profile": null,
+                    "configured_count": 0,
+                    "prepared_cache_count": 0,
+                    "profiles": [],
+                    "default_dialect": "sh",
+                    "available_dialects": ["sh", "bash"]
+                },
+                "tool_providers": {
+                    "strategy": "native",
+                    "claude_code": {
+                        "enabled": false,
+                        "version": null,
+                        "available": false,
+                        "process_state": "not_started",
+                        "discovered_tool_names": [],
+                        "capabilities": {"search_project_text": "unmapped"},
+                        "last_error_code": null
+                    }
+                },
+                "mcp_gateway_providers": []
+            }))
+            .expect("realistic current Runner policy fixture");
+            let mut registration =
+                crate::test_support::current_runner_registration(RunnerRegisterRequest {
+                    process_started_at: Some(1),
+                    build: Some(RunnerBuildInfo {
+                        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                        git_commit: Some("0123456789abcdef".to_string()),
+                        git_dirty: Some(false),
+                    }),
+                    job_concurrency_limit: Some(4),
+                    job_inventory: Some(ShellJobInventory {
+                        active_complete: true,
+                        jobs: Vec::new(),
+                    }),
+                    coding_agent_providers: None,
+                    coding_agent_inventory: None,
+                    client_id: "status-stack-runner".to_string(),
+                    runner_instance_id: "status-stack-instance".to_string(),
+                    runner_protocol_generation:
+                        crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                    display_name: Some("Status Stack Runner".to_string()),
+                    owner: Some("status-stack".to_string()),
+                    hostname: Some("status-stack-host".to_string()),
+                    host_context: None,
+                    capabilities: Default::default(),
+                    policy: Some(policy),
+                });
+            registration.capabilities.job_state_reconciliation = true;
+
+            let mut register = TestClient::post("http://localhost/api/shell/agent/register")
+                .bearer_auth("secret")
+                .json(&registration)
+                .send(&service)
+                .await;
+            let register_status = effective_status(&register);
+            if register_status != StatusCode::OK {
+                let body: Value = register.take_json().await.unwrap_or(Value::Null);
+                panic!("realistic Runner registration failed with {register_status}: {body}");
+            }
+            crate::test_support::apply_project_inventory_snapshot(
+                registry.as_ref(),
+                "status-stack-runner",
+                "status-stack-instance",
+                vec![RunnerProjectSummary {
+                    id: "smoke-proj".to_string(),
+                    name: Some("Smoke Project".to_string()),
+                    path: "/tmp/status-stack-project".to_string(),
+                    allow_patch: true,
+                    kind: Some("repo".to_string()),
+                    registration_source: None,
+                    description: None,
+                    hooks: Vec::new(),
+                    disabled: false,
+                    revision: None,
+                    root_fingerprint: None,
+                    lineage: None,
+                    git_branch: Some("main".to_string()),
+                    git_head: None,
+                    git_dirty: Some(false),
+                    updated_at: 1,
+                    shell_profile: None,
+                }],
+            )
+            .await;
+
+            let mut status = TestClient::post("http://localhost/api/runtime/status")
+                .bearer_auth("secret")
+                .json(&json!({}))
+                .send(&service)
+                .await;
+            assert_eq!(effective_status(&status), StatusCode::OK);
+            let body: Value = status.take_json().await.unwrap();
+            assert_eq!(body["success"], true);
+            assert_eq!(body["output"]["agents"]["count"], 1);
+            assert_eq!(
+                body["output"]["agents"]["clients"][0]["client_id"],
+                "status-stack-runner"
+            );
+        })
+        .await
+        .expect("runtime status regression task must not abort or panic");
+    });
 }
 
 #[tokio::test]
@@ -2162,7 +2285,6 @@ async fn gpt_action_direct_and_gateway_admission_fail_closed() {
     for tool in [
         "present_goal_plan",
         "present_agent_continuation",
-        "export_project_artifact",
         "definitely_not_a_tool",
     ] {
         let (status, body, _) = oauth_action_call(&service, "secret", tool, json!({})).await;

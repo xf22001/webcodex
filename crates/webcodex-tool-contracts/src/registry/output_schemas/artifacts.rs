@@ -78,11 +78,7 @@ fn project_artifact_output_schema() -> Value {
     let target = merged["properties"]["output"]["properties"]
         .as_object_mut()
         .expect("project_artifact output properties");
-    for specialist in [
-        "read_project_artifact_metadata",
-        "read_project_artifact",
-        "export_project_artifact",
-    ] {
+    for specialist in ["read_project_artifact_metadata", "read_project_artifact"] {
         let source = output_schema_for_tool(specialist).expect("artifact specialist output schema");
         let properties = source["properties"]["output"]["properties"]
             .as_object()
@@ -91,6 +87,17 @@ fn project_artifact_output_schema() -> Value {
             target.entry(name.clone()).or_insert_with(|| schema.clone());
         }
     }
+    target.insert(
+        "project".to_string(),
+        schema_type("string", "Canonical resolved Runtime Project id."),
+    );
+    target.insert(
+        "name".to_string(),
+        schema_type(
+            "string",
+            "Safe basename presented by project_artifact(action=export).",
+        ),
+    );
     target.insert(
         "suggested_call".to_string(),
         project_artifact_suggested_call_schema(),
@@ -140,27 +147,34 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ),
             ),
         ])),
-        "export_project_artifact" => Some(wrapped_output_schema(vec![
+        "transfer_project_artifact" => Some(wrapped_output_schema(vec![
             (
-                "project",
-                schema_type("string", "Canonical Runner-registered project id."),
+                "source_project",
+                schema_type("string", "Canonical resolved source Runtime Project id."),
             ),
             (
-                "path",
-                schema_type("string", "Project-relative artifact path."),
+                "source_path",
+                schema_type("string", "Project-relative source artifact path."),
             ),
-            ("bytes", schema_type("integer", "Artifact size in bytes.")),
+            (
+                "destination_project",
+                schema_type("string", "Canonical resolved destination Runtime Project id."),
+            ),
+            (
+                "destination_path",
+                schema_type("string", "Project-relative destination artifact path."),
+            ),
+            (
+                "bytes",
+                schema_type("integer", "Transferred artifact size in bytes."),
+            ),
             (
                 "sha256",
-                schema_type("string", "sha256 digest of the full artifact file."),
+                schema_type("string", "SHA-256 of the exact source snapshot and committed destination."),
             ),
             (
                 "mime_type",
-                schema_type("string", "Validated artifact MIME type."),
-            ),
-            (
-                "name",
-                schema_type("string", "Safe basename presented by the MCP ResourceLink."),
+                schema_type("string", "Canonical artifact presentation MIME type."),
             ),
         ])),
         "read_project_artifact_metadata" => Some(wrapped_output_schema(vec![

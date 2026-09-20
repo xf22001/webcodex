@@ -71,38 +71,51 @@ impl ToolRuntime {
             ToolCall::SearchAndRead {
                 project,
                 query,
+                queries,
                 session_id,
                 read_before,
                 read_after,
                 max_reads,
                 with_line_numbers,
-            } => match project_resolution {
-                Some(Ok(resolved)) => {
-                    self.search_and_read_resolved(
-                        &resolved,
-                        query,
-                        session_id,
-                        read_before,
-                        read_after,
-                        max_reads,
-                        with_line_numbers,
-                    )
-                    .await
+            } => {
+                let queries = match (query, queries) {
+                    (Some(query), None) => vec![query],
+                    (None, Some(queries)) if !queries.is_empty() && queries.len() <= 8 => queries,
+                    (Some(_), Some(_)) => {
+                        return ToolResult::err(
+                            "search_and_read accepts query or queries, not both",
+                        )
+                    }
+                    _ => return ToolResult::err("search_and_read requires query or 1..8 queries"),
+                };
+                match project_resolution {
+                    Some(Ok(resolved)) => {
+                        self.search_and_read_resolved(
+                            &resolved,
+                            queries,
+                            session_id,
+                            read_before,
+                            read_after,
+                            max_reads,
+                            with_line_numbers,
+                        )
+                        .await
+                    }
+                    Some(Err(error)) => error.into_tool_result(),
+                    None => {
+                        self.search_and_read(
+                            project,
+                            queries,
+                            session_id,
+                            read_before,
+                            read_after,
+                            max_reads,
+                            with_line_numbers,
+                        )
+                        .await
+                    }
                 }
-                Some(Err(error)) => error.into_tool_result(),
-                None => {
-                    self.search_and_read(
-                        project,
-                        query,
-                        session_id,
-                        read_before,
-                        read_after,
-                        max_reads,
-                        with_line_numbers,
-                    )
-                    .await
-                }
-            },
+            }
             ToolCall::WriteProjectFile {
                 project,
                 path,
@@ -124,6 +137,24 @@ impl ToolRuntime {
             } => {
                 self.save_project_artifact(project, path, content_base64, mime_type, overwrite)
                     .await
+            }
+            ToolCall::TransferProjectArtifact {
+                source_project,
+                source_path,
+                destination_project,
+                destination_path,
+                overwrite,
+            } => {
+                self.transfer_project_artifact(
+                    source_project,
+                    source_path,
+                    destination_project,
+                    destination_path,
+                    overwrite,
+                    auth,
+                    transport.clone(),
+                )
+                .await
             }
             ToolCall::ProjectArtifact {
                 project,
@@ -224,28 +255,6 @@ impl ToolRuntime {
                     }
                 }
             },
-            ToolCall::ExportProjectArtifact {
-                project: _,
-                path,
-                session_id: _,
-            } => {
-                if !matches!(transport, SessionTransport::Mcp) {
-                    ToolResult::err(
-                        "export_project_artifact is MCP-only; use read_project_artifact for bounded inspection outside MCP",
-                    )
-                } else {
-                    match project_resolution {
-                        Some(Ok(resolved)) => {
-                            self.export_project_artifact_metadata_resolved(&resolved, path, auth)
-                                .await
-                        }
-                        Some(Err(error)) => error.into_tool_result(),
-                        None => ToolResult::err(
-                            "export_project_artifact requires an exact resolved Runner project",
-                        ),
-                    }
-                }
-            }
             ToolCall::ReadProjectArtifactMetadata {
                 project,
                 path,

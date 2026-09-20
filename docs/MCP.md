@@ -116,6 +116,8 @@ There is one model-facing MCP runtime contract: **Adaptive Runtime**. Canonical 
 
 Machine-readable MCP tool results are returned in `structuredContent`; `content` is a concise human-readable/protocol-native fallback. Clients that need fields should consume `structuredContent` rather than parse text.
 
+Ordinary clients retain standard MCP `isError` behavior. For requests whose `_meta["io.modelcontextprotocol/clientInfo"].name` is exactly `openai-mcp` (any version), the MCP adapter applies an **OpenAI structured-failure compatibility projection**: WebCodex-owned canonical `ToolResult` failures use `isError=false`, while `structuredContent.success=false` remains authoritative and the complete output/error is preserved. The current OpenAI Host promotes `isError=true` to an exception without exposing `structuredContent`; this projection preserves machine-actionable failure and recovery data and can be removed when that Host behavior changes. JSON-RPC/protocol errors remain errors, and upstream third-party MCP/Plugin passthrough results retain provider semantics.
+
 Some MCP hosts do not expose `structuredContent` to the model. This has been observed with Claude Custom Connector even when WebCodex successfully executes the tool and returns the complete structured result. Operators serving such a host can explicitly set `WEBCODEX_MCP_TEXT_JSON_COMPAT=true`. Ordinary runtime tool results then keep `structuredContent` canonical while also serializing that same JSON value into `content[0].text`. The option is off by default because the duplicate representation increases response/model-context size; protocol-native image/resource framing and the existing App-only compatibility paths remain unchanged.
 
 Recovery fields in a result describe the next safe **explicit** call. They never grant authority and never trigger a hidden retry. In particular, an uncertain outcome must be reconciled before repeating an effect.
@@ -354,11 +356,12 @@ payloads through model text:
   are short-lived process-local presentation state, and the normal size, MIME,
   path, and authorization bounds remain in force.
 
-The older `read_project_artifact_metadata`, `read_project_artifact`, and
-`export_project_artifact` tools remain compatibility/operator primitives, but
-new model-facing workflows should use `project_artifact`. Office artifacts such
-as DOCX/PPTX/XLSX and PDFs use the same underlying artifact transport and can
-therefore move between a project and a supporting ChatGPT host without a model
-manually carrying their Base64.
+The lower-level `read_project_artifact_metadata` and `read_project_artifact`
+tools remain operator/gateway primitives. The legacy `export_project_artifact`
+compatibility tool has been removed; complete host delivery is exposed only as
+`project_artifact(action=export)`. Office artifacts such as DOCX/PPTX/XLSX and
+PDFs use the same underlying artifact transport and can therefore move between
+a project and a supporting ChatGPT host without a model manually carrying their
+Base64.
 
 Use [Coding Workflow](CODING_WORKFLOW.md) for the canonical `work_on_project` bootstrap, behavioral-role mental model, and validation/closeout guidance. See [Architecture](ARCHITECTURE.md) and the `webcodex` CLI for operator tooling.

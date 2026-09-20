@@ -38,7 +38,7 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
         "work_on_project" => {
             args.insert("project".to_string(), json!(SAMPLE_PROJECT));
         }
-        "update_goal" => {
+        "update_goal" | "checkpoint_goal" => {
             args.insert("expected_revision".to_string(), json!(1));
         }
         "observe_jobs" => {
@@ -97,6 +97,7 @@ fn sample_field_value(field: &str) -> Value {
         "content" => json!("fn main() {}\n"),
         "instruction" => json!("implement the requested change"),
         "objective" => json!("Preserve durable high-level intent without execution authority."),
+        "summary" => json!("Recovery-worthy checkpoint summary"),
         "title" => json!("Durable agent work"),
         "content_base64" => json!("AA=="),
         "openaiFileIdRefs" => json!([{
@@ -150,6 +151,9 @@ fn sample_field_value(field: &str) -> Value {
         "checkpoint_id" => json!("wc_ckpt_1234"),
         "confirm" => json!(true),
         "client_id" => json!("oe"),
+        "source_project" | "destination_project" => json!("agent:oe:demo"),
+        "source_path" => json!("paper/source.bin"),
+        "destination_path" => json!("artifacts/source.bin"),
         "application_id" => json!("application_qqqqqqqqqqqqqqqq".to_string()),
         "display_id" => json!("display_qqqqqqqqqqqqqqqq".to_string()),
         "snapshot_generation" => json!(1),

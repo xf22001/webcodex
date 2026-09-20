@@ -6,6 +6,7 @@ fn read_project_artifact_uses_only_canonical_length_bound() {
     let spec = spec_named(&specs, "read_project_artifact");
     let props = spec.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("length"));
+    assert_eq!(props["length"]["maximum"], 65536);
     let expected_sha256 = &props["expected_sha256"];
     assert_eq!(expected_sha256["type"], "string");
     assert_eq!(expected_sha256["minLength"], 64);
@@ -56,6 +57,64 @@ fn artifact_upload_followup_descriptions_explain_required_path_binding() {
                 && path_desc.contains("bind upload_id"),
             "{name}: {path_desc}"
         );
+    }
+}
+
+#[test]
+fn transfer_project_artifact_has_two_project_contract_and_no_payload_field() {
+    let definition = lookup_tool_definition("transfer_project_artifact")
+        .expect("transfer_project_artifact definition");
+    assert_eq!(definition.metadata.effect, ToolEffect::Mutate);
+    assert_eq!(definition.metadata.risk, ToolRisk::ProjectWrite);
+    assert_eq!(definition.metadata.approval, ToolApprovalPolicy::Standard);
+    assert_eq!(
+        definition.metadata.authority,
+        ToolAuthorityPolicy::RequireAll(&[PROJECT_READ, PROJECT_WRITE])
+    );
+    assert!(definition.requires_permission());
+    assert!(
+        !definition.metadata.requires_project,
+        "two-project transfer has no singular generic project binding"
+    );
+
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "transfer_project_artifact");
+    let props = spec.input_schema["properties"].as_object().unwrap();
+    assert_eq!(spec.input_schema["additionalProperties"], false);
+    assert_eq!(
+        spec.input_schema["required"],
+        json!([
+            "source_project",
+            "source_path",
+            "destination_project",
+            "destination_path"
+        ])
+    );
+    for field in [
+        "source_project",
+        "source_path",
+        "destination_project",
+        "destination_path",
+        "overwrite",
+    ] {
+        assert!(props.contains_key(field), "{field}");
+    }
+    for forbidden in ["content_base64", "download_url", "upload_id"] {
+        assert!(!props.contains_key(forbidden), "{forbidden}");
+    }
+    let output = spec.output_schema["properties"]["output"]["properties"]
+        .as_object()
+        .unwrap();
+    for field in [
+        "source_project",
+        "source_path",
+        "destination_project",
+        "destination_path",
+        "bytes",
+        "sha256",
+        "mime_type",
+    ] {
+        assert!(output.contains_key(field), "{field}");
     }
 }
 
