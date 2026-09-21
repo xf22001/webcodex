@@ -2606,10 +2606,12 @@ mod tests {
             "# no frontmatter\nname: guessed",
             "---\ndescription: only desc\n---\nname in body",
             "---\nname: x\n---\nbody description",
-            "---\nname: x\ndescription: |\n  block\n---",
         ] {
             assert!(parse_skill_metadata(invalid).is_err(), "{invalid}");
         }
+
+        let block = parse_skill_metadata("---\nname: x\ndescription: |\n  block\n---").unwrap();
+        assert_eq!(block.description, "block\n");
     }
 
     #[test]

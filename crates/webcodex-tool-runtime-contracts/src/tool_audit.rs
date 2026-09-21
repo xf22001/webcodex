@@ -85,6 +85,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "page_id": page_id,
             "url_present": true,
         }),
+        BrowserActToolCall::Reload {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "reload",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+        }),
         BrowserActToolCall::Click {
             client_id,
             browser_id,
@@ -170,6 +180,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "browser_id": browser_id,
             "page_id": page_id,
             "key": key.as_str(),
+        }),
+        BrowserActToolCall::ClearDiagnostics {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "clear_diagnostics",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
         }),
         BrowserActToolCall::ClosePage {
             client_id,
@@ -1239,6 +1259,13 @@ fn browser_observation_result_audit(output: &Value) -> Value {
         "count",
         "total_count",
         "truncated",
+        "retained_count",
+        "console_retained",
+        "console_count",
+        "console_truncated",
+        "network_retained",
+        "network_count",
+        "network_truncated",
         "browser_id",
         "page_id",
         "snapshot_generation",
@@ -3715,8 +3742,19 @@ mod browser_privacy_tests {
             "browser_id":"browser_abcdefghijklmnop",
             "page_id":"page_abcdefghijklmnop",
             "node_count":1,
+            "retained_count":200,
+            "truncated":true,
+            "console_retained":200,
+            "console_count":2,
+            "console_truncated":true,
+            "network_retained":300,
+            "network_count":1,
+            "network_truncated":false,
             "pages":[{"title":"PAGE_BODY_SECRET","url":"https://example.test/?secret=QUERY_SECRET"}],
             "nodes":[{"role":"textbox","name":"AX_BODY_SECRET","value":"FORM_VALUE_SECRET","element_id":"element_abcdefghijklmnop"}],
+            "entries":[{"level":"error","text":"CONSOLE_BODY_SECRET"}],
+            "console":[{"level":"error","text":"DIAGNOSTIC_CONSOLE_SECRET"}],
+            "network":[{"method":"GET","url":"https://example.test/?secret=NETWORK_SECRET"}],
             "content_base64":"BASE64_IMAGE_SECRET",
             "raw_dom":"RAW_DOM_SECRET",
             "raw_ax":"RAW_AX_SECRET",
@@ -3726,12 +3764,22 @@ mod browser_privacy_tests {
         assert_eq!(projected["node_count"], 1);
         assert_eq!(projected["page_count"], 1);
         assert_eq!(projected["projected_node_count"], 1);
+        assert_eq!(projected["retained_count"], 200);
+        assert_eq!(projected["console_retained"], 200);
+        assert_eq!(projected["console_count"], 2);
+        assert_eq!(projected["console_truncated"], true);
+        assert_eq!(projected["network_retained"], 300);
+        assert_eq!(projected["network_count"], 1);
+        assert_eq!(projected["network_truncated"], false);
         let serialized = serde_json::to_string(&projected).unwrap();
         for private in [
             "PAGE_BODY_SECRET",
             "QUERY_SECRET",
             "AX_BODY_SECRET",
             "FORM_VALUE_SECRET",
+            "CONSOLE_BODY_SECRET",
+            "DIAGNOSTIC_CONSOLE_SECRET",
+            "NETWORK_SECRET",
             "BASE64_IMAGE_SECRET",
             "RAW_DOM_SECRET",
             "RAW_AX_SECRET",
@@ -3742,6 +3790,9 @@ mod browser_privacy_tests {
         assert!(projected.get("pages").is_none());
         assert!(projected.get("nodes").is_none());
         assert!(projected.get("content_base64").is_none());
+        assert!(projected.get("entries").is_none());
+        assert!(projected.get("console").is_none());
+        assert!(projected.get("network").is_none());
     }
 
     #[test]

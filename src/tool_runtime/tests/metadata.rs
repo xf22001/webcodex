@@ -374,6 +374,7 @@ async fn register_agent_projects_for_auth(
                 capabilities: crate::test_support::current_runner_capabilities(
                     RunnerCapabilities {
                         shell: true,
+                        explicit_shell_selection: false,
                         file_read: true,
                         file_write: true,
                         artifact_export_chunk_read: false,
@@ -3387,6 +3388,11 @@ async fn runtime_status_tools_summary_lists_names() {
     assert!(result.success);
     let tools = &result.output["tools"];
     let names = tools["names"].as_array().unwrap();
+    let expected_names = registered_tool_specs()
+        .into_iter()
+        .map(|spec| Value::String(spec.name))
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected_names.as_slice());
     assert!(!names.is_empty());
     assert!(
         names.iter().any(|n| n == "runtime_status"),

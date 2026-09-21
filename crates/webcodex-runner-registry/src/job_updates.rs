@@ -4,7 +4,7 @@ use super::access_control::{
 use super::jobs::{
     append_log_limited, assert_active_instance_locked, command_preview, is_final_job_status,
     job_view, notify_job_update, observe_job_terminal, parse_job_lifecycle, process_preview,
-    refresh_job_status_locked, replace_log_limited, script_preview, select_log_lines,
+    refresh_job_status_locked, script_preview, select_log_lines,
 };
 use super::reconciliation::validate_stream_snapshot;
 use super::requests::{
@@ -40,6 +40,7 @@ use webcodex_core::runner_protocol::{
     STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS,
 };
 use webcodex_core::runner_skill::RunnerSkillExecutionRequest;
+use webcodex_core::workflow_session_contract::ExecutionShell;
 
 #[derive(Clone, Copy)]
 struct ValidationProtocolError(&'static str);
@@ -559,7 +560,12 @@ pub struct ShellJobStartMetadata {
     pub ssh_resource: Option<String>,
     pub project_cwd: Option<String>,
     pub purpose: Option<String>,
+    /// Descriptive effective-shell metadata for observability/recovery.
     pub shell: Option<String>,
+    /// Authoritative semantic local-shell selector for raw shell execution.
+    /// Distinct from `shell`: descriptive metadata must never grant execution
+    /// semantics.
+    pub explicit_shell: Option<ExecutionShell>,
     pub validation_steps: Vec<ShellJobValidationStep>,
     pub validation: Option<ShellJobValidationMetadata>,
     pub visibility: ShellJobVisibility,
@@ -716,6 +722,12 @@ impl RunnerRegistry {
                 "ssh_session_required: an SSH resource requires a Workflow Session id".to_string(),
             );
         }
+        if metadata.ssh_resource.is_some() && metadata.explicit_shell.is_some() {
+            return Err(
+                "explicit_shell_selection is local-only; named SSH shell selection must stay in the remote compatibility path"
+                    .to_string(),
+            );
+        }
         if metadata.ssh_resource.as_deref().is_some_and(|resource| {
             resource.is_empty()
                 || resource.len() > 80
@@ -731,6 +743,7 @@ impl RunnerRegistry {
         let validation_identity = metadata.validation_identity.clone();
         let validation_tool = metadata.validation_tool.clone();
         let assertion_name = metadata.assertion_name.clone();
+        let explicit_shell = metadata.explicit_shell;
         let structured_execution = metadata.structured_execution;
         let javascript_script_request = matches!(
             structured_execution.as_ref(),
@@ -746,6 +759,15 @@ impl RunnerRegistry {
             structured_execution.as_ref(),
             Some(StructuredJobExecution::SkillResource(_))
         );
+        if explicit_shell.is_some()
+            && (structured_execution.is_some()
+                || !validation_steps.is_empty()
+                || validation.is_some())
+        {
+            return Err(
+                "explicit_shell_selection is valid only for raw shell Job starts".to_string(),
+            );
+        }
         let structured_stdin = metadata.stdin;
         if validation_steps.len() > 3
             || validation_steps.iter().any(|step| !step.is_canonical())
@@ -996,6 +1018,7 @@ impl RunnerRegistry {
                     job_id: job_id.clone(),
                     cwd: normalized_job_cwd.clone(),
                     command: command.clone(),
+                    shell: explicit_shell,
                     timeout_secs,
                     context: job_context,
                 })
@@ -1032,6 +1055,15 @@ impl RunnerRegistry {
             return Err(format!(
                 "runner {} does not support async shell jobs",
                 client_id
+            ));
+        }
+        if explicit_shell.is_some()
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::ExplicitShellSelection)
+        {
+            return Err(format!(
+                "capability_unavailable: runner {client_id} does not support explicit_shell_selection"
             ));
         }
         if structured_metadata.is_some()
@@ -2155,14 +2187,9 @@ impl RunnerRegistry {
         if let Some(snapshot) = body.log_snapshot.as_ref() {
             validate_stream_snapshot(&snapshot.stdout, "job update stdout snapshot")?;
             validate_stream_snapshot(&snapshot.stderr, "job update stderr snapshot")?;
-            if body.stdout_chunk.is_some()
-                || body.stderr_chunk.is_some()
-                || body.stdout_tail.is_some()
-                || body.stderr_tail.is_some()
-            {
+            if body.stdout_chunk.is_some() || body.stderr_chunk.is_some() {
                 return Err(
-                    "job update log_snapshot cannot be combined with chunk or legacy tail fields"
-                        .to_string(),
+                    "job update log_snapshot cannot be combined with chunk fields".to_string(),
                 );
             }
         }
@@ -2326,8 +2353,6 @@ impl RunnerRegistry {
                     super::jobs::replace_log_from_snapshot(&mut job.stdout, &snapshot.stdout);
                     super::jobs::replace_log_from_snapshot(&mut job.stderr, &snapshot.stderr);
                 } else {
-                    replace_log_limited(&mut job.stdout, body.stdout_tail);
-                    replace_log_limited(&mut job.stderr, body.stderr_tail);
                     append_log_limited(&mut job.stdout, body.stdout_chunk);
                     append_log_limited(&mut job.stderr, body.stderr_chunk);
                 }

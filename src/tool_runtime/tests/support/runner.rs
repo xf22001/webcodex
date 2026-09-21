@@ -47,6 +47,7 @@ pub(in crate::tool_runtime::tests) async fn register_runner_project_at_path(
             host_context: None,
             capabilities: crate::test_support::current_runner_capabilities(RunnerCapabilities {
                 shell: true,
+                explicit_shell_selection: true,
                 git: true,
                 file_read: true,
                 file_write: true,
@@ -1029,8 +1030,6 @@ pub(in crate::tool_runtime::tests) async fn seed_session_projection_job(
             status: "running".to_string(),
             stdout_chunk: (!stdout.is_empty()).then(|| stdout.to_string()),
             stderr_chunk: None,
-            stdout_tail: None,
-            stderr_tail: None,
             log_snapshot: None,
             exit_code: None,
             duration_ms: None,
@@ -1079,8 +1078,6 @@ pub(in crate::tool_runtime::tests) async fn finish_session_projection_job(
             status: status.to_string(),
             stdout_chunk: None,
             stderr_chunk: None,
-            stdout_tail: None,
-            stderr_tail: None,
             log_snapshot: None,
             exit_code: (status == "completed").then_some(0),
             duration_ms: Some(1),
@@ -1362,9 +1359,10 @@ pub(in crate::tool_runtime::tests) async fn register_agent_with_shell_profiles(
             owner: None,
             hostname: None,
             host_context: None,
-            capabilities: crate::test_support::current_runner_capabilities(
-                RunnerCapabilities::default(),
-            ),
+            capabilities: crate::test_support::current_runner_capabilities(RunnerCapabilities {
+                explicit_shell_selection: true,
+                ..Default::default()
+            }),
             policy,
         })
         .await

@@ -155,8 +155,6 @@ fn test_job_update() -> RunnerJobUpdateRequest {
         status: "running".to_string(),
         stdout_chunk: None,
         stderr_chunk: None,
-        stdout_tail: None,
-        stderr_tail: None,
         log_snapshot: None,
         exit_code: None,
         duration_ms: None,
@@ -958,6 +956,7 @@ fn start_concurrent_polling_server(
 
 fn sync_file_request(request_id: &str) -> RunnerRequest {
     RunnerRequest {
+        shell: None,
         request_id: request_id.to_string(),
         client_id: "oe".to_string(),
         kind: "file_read".to_string(),
@@ -991,6 +990,7 @@ fn sync_file_request(request_id: &str) -> RunnerRequest {
 #[cfg(unix)]
 fn polling_shell_request(request_id: &str, cwd: &Path, command: String) -> RunnerRequest {
     RunnerRequest {
+        shell: None,
         request_id: request_id.to_string(),
         client_id: "oe".to_string(),
         kind: "run_shell".to_string(),
@@ -3500,6 +3500,7 @@ async fn send_register_rejected_ack(
 
 fn start_job_request(cwd: &Path, command: &str) -> RunnerRequest {
     RunnerRequest {
+        shell: None,
         request_id: "req-active-job".to_string(),
         client_id: "oe".to_string(),
         kind: "start_job".to_string(),
