@@ -77,7 +77,7 @@ pub(crate) fn builtin_coding_workflow_projection(profile: CodingGuidanceProfile)
             "guidance": tool_strategy_guidance(profile),
         },
         "model_protocol": {
-            "goal_workflow": "For substantial multi-step/cross-turn development, fixes, refactoring, deployment, troubleshooting or migration needing validation/review, create or reuse a durable Goal with bounded completion_conditions and steps; explicitly associate the current Workflow Session and present_goal_plan. Tiny one-step lookups/trivial edits do not need a Goal. This WebCodex workflow applies across repositories, independently of AGENTS.md.",
+            "goal_workflow": "On exact Session re-entry, honor work_on_project.goal_context: reuse one exact active Goal with get_goal/present_goal_plan; choose explicitly among multiple candidates; never infer from Project/Window/title/recency. For ordinary new substantial multi-step/cross-turn work with no reusable Goal, call prepare_goal_workflow with the exact current Workflow Session, bounded completion_conditions/steps, and optional explicit controller Agent, then present_goal_plan. available=false never proves no Goal. Host continuation setup/readiness remains separate. Low-level create_goal and associate_goal_workflow_session remain available. Tiny one-step lookups/trivial edits need no Goal. This applies independently of AGENTS.md.",
             "goal_continuation": "Automatic continuation needs an exact explicit durable controller Agent and the existing production Host carrier. Reuse the same Agent already made callable by explicit setup or exact Wake context; never infer Agent identity from a Window or create a second Goal-only identity. An Agent may be both Task assignee and Goal controller: Tasks/Attempts own execution, the controller routes next reasoning only. Goal Plan detects; the separate Agent Continuation card carries turns. Stalled is not offline; dispatch acceptance is not resume. An exact stall Wake requires bootstrap, immediate consume, get_goal and exact Session handoff recovery; never retry an uncertain prior effect.",
             "goal_checkpoint": "Use checkpoint_goal at recovery-worthy milestones, not after every call: exact Goal revision + idempotency key, atomic completed_step_ids/current_step_id and bounded summary. Follow the latest checkpoint/current step on recovery. Complete every plan step, freshly verify/review completion intent, then explicitly update_goal to completed; the Server cannot judge natural-language conditions.",
             "handoff_recovery": "Use handoff recovery only after task-context loss/compaction/restart, explicit cross-window/Agent handoff, or user-requested recovery. Never use it for routine progress/baselines. A frontend timeout alone does not imply Workflow Session loss. If task context is genuinely lost and the exact session_id is unknown, request context_request=[\"workflow.resume\"], choose an exact authorized candidate, call session_handoff_summary with the exact session_id, check basis completeness, then resume with work_on_project(project=..., session_id=...). A dirty workspace after context loss is not evidence of external or concurrent modification by itself. Recover exact Workflow Session evidence first.",
@@ -428,10 +428,32 @@ pub(crate) fn startup_brief_from_output(output: &Value) -> Option<&Value> {
 fn workspace_projection(git: &Value) -> Value {
     let counts = git.get("counts").unwrap_or(&Value::Null);
     let git_available = git.get("available").and_then(Value::as_bool);
+    let non_git_project = git
+        .get("non_git_project")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let clean = git.get("clean").and_then(Value::as_bool);
     let conflicts = count(counts, "conflicted");
+    let git_status = if non_git_project {
+        "not_applicable"
+    } else if git_available == Some(false) || clean.is_none() {
+        "unavailable"
+    } else if conflicts > 0 {
+        "conflicted"
+    } else if clean == Some(true) {
+        "clean"
+    } else {
+        "dirty"
+    };
+    let git_reason_code = match git_status {
+        "not_applicable" => Some("non_git_project"),
+        "unavailable" => Some("git_unavailable"),
+        _ => None,
+    };
     let status = if conflicts > 0 {
         "blocked"
+    } else if non_git_project {
+        "available"
     } else if git_available == Some(false) || clean.is_none() {
         "unavailable"
     } else if clean == Some(true) {
@@ -447,6 +469,10 @@ fn workspace_projection(git: &Value) -> Value {
     json!({
         "status": status,
         "git_available": git_available,
+        "git": {
+            "status": git_status,
+            "reason_code": git_reason_code,
+        },
         "branch": git.get("branch").cloned().unwrap_or(Value::Null),
         "head": head,
         "clean": clean,
@@ -1290,7 +1316,9 @@ fn startup_issues(
     if workspace.get("status").and_then(Value::as_str) == Some("dirty") {
         push_unique(&mut warnings, "dirty_worktree");
     }
-    if workspace.get("git_available").and_then(Value::as_bool) == Some(false) {
+    if workspace.get("git_available").and_then(Value::as_bool) == Some(false)
+        && workspace.pointer("/git/status").and_then(Value::as_str) != Some("not_applicable")
+    {
         push_unique(&mut warnings, "git_unavailable");
     }
     if instructions.get("status").and_then(Value::as_str) == Some("unavailable") {

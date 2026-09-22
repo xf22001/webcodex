@@ -78,7 +78,7 @@ fn stateless_advertised_operator_extension_specs_for_auth(
 fn adaptive_runtime_gateway_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME.to_string(),
-        description: "Call one runtime tool admitted by Adaptive Runtime through the generic gateway. A tool with availability=direct should still be invoked through its direct callable when available, but call_runtime_tool is an allowed fallback when that callable is unavailable or not loaded. Directness changes preferred model exposure only: canonical runtime argument validation, OAuth scope, Project authority, permission gates, Runner capability, Session/context policy, host-file-import trust, protocol capability admission, and tool effects remain unchanged.".to_string(),
+        description: "Call one runtime tool admitted by Adaptive Runtime through the generic gateway. A tool with availability=direct should still be invoked through its direct callable when available; ordinary direct tools may fall back here when that callable is unavailable or not loaded. Explicit MCP App presentation tools are the exception: when MCP Apps are enabled they must use their direct callable because only that tool descriptor carries the Host App resource metadata. Directness otherwise changes preferred model exposure only: canonical runtime argument validation, OAuth scope, Project authority, permission gates, Runner capability, Session/context policy, host-file-import trust, protocol capability admission, and tool effects remain unchanged.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -86,7 +86,7 @@ fn adaptive_runtime_gateway_tool_spec() -> ToolSpec {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Exact runtime tool name admitted by Adaptive Runtime. availability=direct is the preferred route, but the same admitted target may use this gateway as a fallback when the direct callable is unavailable or not loaded."
+                    "description": "Exact runtime tool name admitted by Adaptive Runtime. availability=direct is normally preferred with gateway fallback when unavailable; explicit MCP App presentation tools remain direct-only while MCP Apps are enabled."
                 },
                 "arguments": {
                     "type": "object",
@@ -464,12 +464,7 @@ pub(super) fn add_stateless_workflow_recorder_metadata(payload: &mut Value) {
         let tool_name = tool.get("name").and_then(Value::as_str);
         if matches!(
             tool_name,
-            Some(
-                "goal_plan_state"
-                    | "goal_plan_recheck_attention"
-                    | "work_result_state"
-                    | "changes_file_diff"
-            )
+            Some("goal_plan_sync" | "work_result_state" | "changes_file_diff")
         ) || tool_name.is_some_and(is_host_continuation_app_tool_name)
         {
             continue;
@@ -1509,6 +1504,19 @@ pub(super) async fn handle_call(
         match mcp_adaptive_runtime_gateway_target_route(&target, stateless_2026) {
             crate::model_surface::AdaptiveRuntimeGatewayTargetRoute::Gateway
             | crate::model_surface::AdaptiveRuntimeGatewayTargetRoute::Direct => {
+                if app_enabled && presentation::tool_requires_direct_app_presentation(&target) {
+                    if let Some(lc) = lifecycle.as_deref() {
+                        lc.dispatch_failed("direct_presentation_required");
+                        lc.dispatch_finished(false, Some(false), "direct_presentation_required");
+                    }
+                    return McpOutcome::BadRequest(rpc_error(
+                        id,
+                        -32602,
+                        format!(
+                            "call_runtime_tool cannot invoke MCP App presentation tool '{target}' when MCP Apps are enabled; call '{target}' directly so the Host receives the required App resource metadata"
+                        ),
+                    ));
+                }
                 params.name = target;
                 params.arguments = arguments;
             }
@@ -1913,11 +1921,7 @@ pub(super) async fn handle_call(
     let work_result_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let agent_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let job_terminal_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
-    let app_only_goal_plan_state = goal_plan_app_admitted
-        && matches!(
-            params.name.as_str(),
-            "goal_plan_state" | "goal_plan_recheck_attention"
-        );
+    let app_only_goal_plan_sync = goal_plan_app_admitted && params.name == "goal_plan_sync";
     let app_only_work_result_state = work_result_app_admitted && params.name == "work_result_state";
     let app_only_changes_file_diff = work_result_app_admitted && params.name == "changes_file_diff";
     let app_only_agent_continuation =
@@ -1928,7 +1932,7 @@ pub(super) async fn handle_call(
         && crate::tool_runtime::stateless_operator_extension_tool_specs()
             .iter()
             .any(|spec| spec.name == params.name);
-    let direct_denied = !app_only_goal_plan_state
+    let direct_denied = !app_only_goal_plan_sync
         && !app_only_work_result_state
         && !app_only_changes_file_diff
         && !app_only_agent_continuation
@@ -2000,14 +2004,14 @@ pub(super) async fn handle_call(
             return McpOutcome::BadRequest(rpc_error(id, -32602, message));
         }
     };
-    // App-only presentation reads observe the exact business Session carried
-    // inside their own arguments. Never let the generic Stateless recording
-    // wrapper turn a user-driven refresh/expand action into a write to that or
-    // any other Workflow Session, even if a caller hand-crafts an unadvertised
-    // recording_session_id field.
+    // App-only synchronization/presentation calls must never let the generic
+    // Stateless recording wrapper manufacture Session authority or liveness.
+    // Goal Plan sync accepts only goal_id; Work Result reads carry their exact
+    // business Session separately. Discard a hand-crafted unadvertised
+    // recording_session_id before the kernel sees any of these calls.
     if matches!(
         params.name.as_str(),
-        "work_result_state" | "changes_file_diff"
+        "goal_plan_sync" | "work_result_state" | "changes_file_diff"
     ) {
         session_id = None;
     }

@@ -53,6 +53,7 @@ pub use self::agent_wait::{
     AgentWaitMutation, AgentWaitSourceRecord, AgentWaitState, NewAgentWait,
     AGENT_WAIT_EVENT_KIND_AGENT_TASK_TERMINAL, AGENT_WAIT_ID_PREFIX,
     MAX_ACTIVE_AGENT_WAITS_PER_AGENT, MAX_AGENT_WAITS_PER_SOURCE, MAX_AGENT_WAIT_SOURCES,
+    MAX_GOAL_AGENT_WAIT_LIST_LIMIT,
 };
 #[allow(unused_imports)]
 pub use self::agent_wake::{
@@ -187,6 +188,8 @@ pub use goal_plan::{
 };
 
 pub use goal_stall::{
-    GoalStallAttention, GoalStallCandidate, GOAL_ACTIVITY_ATTENTION_AFTER_MS,
-    GOAL_CARD_ALIVE_GRACE_MS, GOAL_CARD_OBSERVATION_ADVANCE_MS,
+    GoalStallAttention, GoalStallCandidate, GoalStallContinuityObservation,
+    GoalStallHostDeliveryObservation, GoalStallResumeObservation, GoalStallWakeObservation,
+    GOAL_ACTIVITY_ATTENTION_AFTER_MS, GOAL_CARD_OBSERVATION_ADVANCE_MS,
+    GOAL_CARD_OBSERVATION_LEASE_MS,
 };
