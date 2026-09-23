@@ -37,6 +37,12 @@ UI 文案可能随 rollout 变化；URL 与认证以 CLI 输出为准。Develope
 和 write/modify action 是否可用，还分别受 ChatGPT 套餐、workspace 与管理员设置控制；
 WebCodex scope 不会扩大这些客户端侧权限。
 
+如果 ChatGPT 自身返回 `FORBIDDEN: This conversation does not support developer MCPs`
+（或提示当前会话已禁用 developer MCP server），在有相反证据之前应先按 Host/conversation
+admission 问题处理。如果 Host 根本没有 dispatch `runtime_status`，这段文本并不是
+WebCodex tool result。修改 credential 或 Runner 配置前，先从独立路径确认 Server/Runner；
+完整流程见[故障排查](TROUBLESHOOTING.zh-CN.md)。
+
 ## Claude 与其他 MCP client
 
 使用同一份输出的 `/mcp` URL 与认证值。Claude 中添加 custom connector 并粘贴 MCP URL；
@@ -203,12 +209,15 @@ Grok Custom MCP UI 与可用范围以 xAI 的
 work_on_project
 → read_files / search_project_texts / 按需语义导航
 → apply_text_edits 或其它 canonical edit 工具
+→ substantial work 进入真实状态后调用一次 present_work_result
 → 按需 run_process / run_shell / focused validation
 → show_changes
 → finish_coding_task
 ```
 
 `work_on_project` 在普通 registered Project 上启动或精确恢复 Workflow Session。用户要求隔离时，`work_on_project(mode=worktree)` 才让 Runner 创建 canonical managed worktree，并把该 worktree 注册为另一个普通 Project；没有隔离要求时，本地 `share` / `run` 直接使用 setup 已注册的那一个 Project。
+
+`present_work_result` 是 substantial coding 的一次性可视化层，不是 correctness primitive。挂载后，卡片通过 App-only state read 持续显示 Progress、Workspace、Validation 与 Review，无需模型轮询。`finish_coding_task` 在 non-blocking closeout 时把 eligible final changes seal 到 presentation cache，同一张卡随后发现这份 immutable snapshot，并按文件 lazy 展开 diff。tiny/read-only 工作应跳过这张卡，同一 Session 不应重复 presentation。
 
 Adaptive Runtime 可以把常用工具直接暴露，把 long-tail 工具通过 `call_runtime_tool` 暴露。direct/gateway 只影响 model exposure，不改变 schema validation、OAuth scope、Project authority、permission policy、Runner capability、Session fence 或 tool effects。
 

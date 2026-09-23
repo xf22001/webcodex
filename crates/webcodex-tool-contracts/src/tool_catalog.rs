@@ -265,6 +265,7 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "complete_session_message",
             "session_discussion_summary",
             "session_handoff_summary",
+            "list_external_observations",
             #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_create",
             #[cfg(feature = "workspace-checkpoints")]
@@ -482,8 +483,8 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "browser",
-        summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, observe pages/semantic snapshots, act only through opaque identities, then re-observe after navigation or uncertain effects.",
-        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot and browser_act for the closed launch/new_page/navigate/click/input_text/key/close actions. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
+        summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, use adaptive semantic snapshots and diagnostic deltas, act only through opaque identities, then re-observe after navigation or uncertain effects.",
+        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot/diagnostics and browser_act for the closed launch/new_page/navigate/click/input_text/key/close actions. Snapshot auto mode reduces large pages to actionable controls; diagnostics since_cursor returns only later events. Successful page effects include bounded stability observation but still require a fresh snapshot before reusing element authority. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
         tools: &["browser_observe", "browser_act"],
     },
     ToolRecommendedFlow {

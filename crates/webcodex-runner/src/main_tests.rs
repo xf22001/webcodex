@@ -79,7 +79,7 @@ fn test_config(project_registry_dir: PathBuf) -> RunnerConfig {
         hostname: None,
         host_context: None,
         project_registry_dir: Some(project_registry_dir),
-        removed_projects_dir: None,
+        legacy_projects_dir: None,
         poll_interval_ms: 1000,
         capabilities: None,
         max_concurrent_jobs: None,
@@ -859,6 +859,7 @@ fn shell_job_native_exe_nonzero_exit_code_is_preserved() {
     // fixture. This test only verifies PowerShell native-exit propagation; a freshly
     // generated EXE can be delayed by Windows malware scanning under parallel CI and
     // would turn that unrelated startup latency into a false shell timeout.
+    // Allow time for PowerShell startup on a busy Windows CI host as well.
     let command_processor = std::env::var_os("ComSpec")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
@@ -876,7 +877,7 @@ fn shell_job_native_exe_nonzero_exit_code_is_preserved() {
         Some(&cwd),
         &command,
         None,
-        10,
+        30,
         None,
     );
     assert_eq!(result.exit_code, Some(3), "{result:?}");
