@@ -559,6 +559,57 @@ fn cargo_test_lib_false_canonicalizes_to_omission_and_true_is_preserved() {
 }
 
 #[test]
+fn cargo_check_package_selectors_canonicalize_to_one_internal_shape() {
+    let single = ToolCall::from_tool_name(
+        "cargo_check",
+        json!({"project": "demo", "package": " package-b "}),
+    )
+    .unwrap();
+    assert!(matches!(
+        single,
+        ToolCall::CargoCheck {
+            package: None,
+            packages: Some(ref packages),
+            ..
+        } if packages == &["package-b"]
+    ));
+
+    let multiple = ToolCall::from_tool_name(
+        "cargo_check",
+        json!({
+            "project": "demo",
+            "packages": ["package-c", " package-a ", "package-c", "package-b"]
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        multiple,
+        ToolCall::CargoCheck {
+            package: None,
+            packages: Some(ref packages),
+            ..
+        } if packages == &["package-a", "package-b", "package-c"]
+    ));
+
+    for invalid in [
+        json!({"project": "demo", "package": "package-a", "packages": ["package-b"]}),
+        json!({"project": "demo", "packages": []}),
+        json!({"project": "demo", "packages": ["   "]}),
+    ] {
+        let error = ToolCall::from_tool_name("cargo_check", invalid)
+            .expect_err("invalid package selector must fail closed");
+        assert!(error.contains("package"), "{error}");
+    }
+
+    let error = ToolCall::from_tool_name("cargo_check", json!({"project": "demo", "packages": []}))
+        .expect_err("empty package selection must fail closed");
+    assert_eq!(
+        error,
+        "invalid arguments for tool 'cargo_check': packages must contain between 1 and 32 items"
+    );
+}
+
+#[test]
 fn tool_manifest_default_flows_follow_discovery_shape() {
     for arguments in [
         json!({"tool_name": "cargo_test"}),
@@ -849,6 +900,134 @@ fn from_tool_name_parses_structured_run_process_boundaries() {
 }
 
 #[test]
+fn process_argv_alias_is_exact_and_canonical() {
+    for name in ["run_process", "run_detached_process"] {
+        let mut base = json!({"project":"demo", "executable":"git"});
+        if name == "run_detached_process" {
+            base["idempotency_key"] = json!("exact-key");
+        }
+        let mut alias = base.clone();
+        alias["argv"] = json!(["status"]);
+        let (call, code) =
+            ToolCall::from_tool_name_with_normalization(name, alias.clone()).unwrap();
+        assert_eq!(code, Some("argv_to_args"));
+        assert_eq!(
+            serde_json::to_value(&call).unwrap()["params"]["args"],
+            json!(["status"])
+        );
+        assert!(serde_json::to_string(&call).unwrap().find("argv").is_none());
+
+        let mut canonical = base.clone();
+        canonical["args"] = json!(["status"]);
+        assert_eq!(
+            ToolCall::from_tool_name_with_normalization(name, canonical.clone())
+                .unwrap()
+                .1,
+            None
+        );
+        alias["args"] = json!(["status"]);
+        assert_eq!(
+            ToolCall::from_tool_name_with_normalization(name, alias.clone())
+                .unwrap()
+                .1,
+            Some("argv_to_args")
+        );
+        alias["args"] = json!(["different"]);
+        assert_eq!(
+            ToolCall::from_tool_name(name, alias).unwrap_err(),
+            "ambiguous compatibility alias: args and argv differ"
+        );
+        for (field, value) in [("argv", json!("status")), ("arguments", json!(["status"]))] {
+            let mut invalid = base.clone();
+            invalid[field] = value;
+            assert!(
+                ToolCall::from_tool_name(name, invalid).is_err(),
+                "{name}: {field}"
+            );
+        }
+        for field in ["timeout", "workdir", "arg", "command_args", "params"] {
+            let mut invalid = base.clone();
+            invalid[field] = json!("value");
+            assert!(
+                ToolCall::from_tool_name(name, invalid).is_err(),
+                "{name}: {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn python_is_semantic_script_language_without_interpreter_alias() {
+    let (call, code) = ToolCall::from_tool_name_with_normalization(
+        "run_script",
+        json!({
+            "project":"demo", "language":"python", "script":"print('雪')"
+        }),
+    )
+    .unwrap();
+    assert_eq!(code, None);
+    assert!(matches!(
+        call,
+        ToolCall::RunScript {
+            language: webcodex_core::runner_protocol::ShellScriptLanguage::Python,
+            ..
+        }
+    ));
+    assert!(ToolCall::from_tool_name(
+        "run_script",
+        json!({
+            "project":"demo", "language":"python3", "script":"print('x')"
+        })
+    )
+    .is_err());
+    for field in ["python_path", "interpreter", "runtime_flags"] {
+        let mut request = json!({"project":"demo", "language":"python", "script":"print('x')"});
+        request[field] = json!("--unsafe");
+        assert!(
+            ToolCall::from_tool_name("run_script", request).is_err(),
+            "{field}"
+        );
+    }
+    assert!(ToolCall::from_tool_name(
+        "run_script",
+        json!({
+            "project":"demo", "language":"python", "script":"print('x')", "command":"print('x')"
+        })
+    )
+    .is_err());
+}
+
+#[test]
+fn bash_login_requires_explicit_bash_selection() {
+    let call = ToolCall::from_tool_name(
+        "run_shell",
+        json!({
+            "project":"demo", "shell":"bash", "login":true, "command":"printf ok"
+        }),
+    )
+    .unwrap();
+    assert!(matches!(call, ToolCall::RunShell { login: true, .. }));
+    for shell in [None, Some("sh")] {
+        let mut request = json!({"project":"demo", "login":true, "command":"printf ok"});
+        if let Some(shell) = shell {
+            request["shell"] = json!(shell);
+        }
+        assert_eq!(
+            ToolCall::from_tool_name("run_shell", request).unwrap_err(),
+            "run_shell login=true requires shell=bash"
+        );
+    }
+    let default = ToolCall::from_tool_name(
+        "run_shell",
+        json!({
+            "project":"demo", "shell":"bash", "command":"printf ok"
+        }),
+    )
+    .unwrap();
+    assert!(matches!(default, ToolCall::RunShell { login: false, .. }));
+}
+
+#[test]
 fn from_tool_name_rejects_retired_job_status_and_job_log() {
     for (name, args) in [
         ("job_status", json!({"job_id": "abc"})),
@@ -1022,6 +1201,23 @@ fn tool_call_project_accessor_covers_project_tool_specs() {
     )
     .unwrap();
     assert_eq!(handoff.project(), Some("agent:oe:private-drop"));
+
+    // Adapter-only handoff state keeps its exact business target but never
+    // exposes that Session through the generic recorder projection.
+    let handoff_state = ToolCall::from_tool_name(
+        "session_handoff_state",
+        json!({"session_id": "wc_sess_x", "project": "agent:oe:private-drop"}),
+    )
+    .unwrap();
+    assert_eq!(handoff_state.project(), Some("agent:oe:private-drop"));
+    assert_eq!(handoff_state.session_id(), None);
+    assert!(is_model_hidden_tool_name("session_handoff_state"));
+    assert!(runtime_tool_requires_explicit_business_session(
+        "session_handoff_state"
+    ));
+    let activity = runtime_tool_activity_semantics("session_handoff_state");
+    assert_eq!(activity.presentation.as_str(), "support");
+    assert!(!activity.interaction.is_meaningful());
 }
 
 #[test]
@@ -1945,11 +2141,11 @@ fn guidance_profile_defaults_and_schema_follow_compiled_availability() {
         .as_array()
         .unwrap()
         .contains(&json!("guidance_profile")));
-    let mut profiles = vec!["direct"];
+    let mut profiles = vec!["direct", "host_code_mode"];
     if cfg!(feature = "experimental-code-mode") {
         profiles.push("code_mode");
     }
-    assert_eq!(property["enum"], json!(profiles));
+    assert_eq!(property["enum"], json!(profiles), "{property}");
     let output_schema = output_schema_for_tool("work_on_project");
     let output_properties = output_schema["properties"]["output"]["properties"]
         .as_object()
@@ -1973,6 +2169,29 @@ fn guidance_profile_defaults_and_schema_follow_compiled_availability() {
         args["guidance_profile"] = invalid;
         assert!(ToolCall::from_tool_name("work_on_project", args).is_err());
     }
+}
+
+#[test]
+fn current_window_activity_has_no_model_supplied_window_selector() {
+    let input = crate::request_schema::input_schema_for_tool("current_window_activity");
+    let properties = input["properties"].as_object().unwrap();
+    assert!(properties.contains_key("limit"));
+    assert!(properties.contains_key("include_nonmeaningful"));
+    assert!(!properties.contains_key("client_window_key"));
+    assert!(!properties.contains_key("window"));
+    assert!(ToolCall::from_tool_name(
+        "current_window_activity",
+        json!({
+            "client_window_key": "foreign"
+        })
+    )
+    .is_err());
+    assert_eq!(
+        ToolCall::from_tool_name("current_window_activity", json!({"limit":20}))
+            .unwrap()
+            .tool_name(),
+        "current_window_activity"
+    );
 }
 
 #[cfg(not(feature = "experimental-code-mode"))]

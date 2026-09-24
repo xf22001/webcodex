@@ -744,6 +744,12 @@ impl RunnerRegistry {
         let validation_tool = metadata.validation_tool.clone();
         let assertion_name = metadata.assertion_name.clone();
         let explicit_shell = metadata.explicit_shell;
+        let login = body.login;
+        if login
+            && (metadata.ssh_resource.is_some() || explicit_shell != Some(ExecutionShell::Bash))
+        {
+            return Err("bash login mode requires local shell=bash".to_string());
+        }
         let structured_execution = metadata.structured_execution;
         let javascript_script_request = matches!(
             structured_execution.as_ref(),
@@ -754,6 +760,11 @@ impl RunnerRegistry {
             structured_execution.as_ref(),
             Some(StructuredJobExecution::Script(script))
                 if script.language == ShellScriptLanguage::Typescript
+        );
+        let python_script_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::Script(script))
+                if script.language == ShellScriptLanguage::Python
         );
         let skill_resource_request = matches!(
             structured_execution.as_ref(),
@@ -892,6 +903,7 @@ impl RunnerRegistry {
             }
             None => {
                 let run = ShellRunRequest {
+                    login: false,
                     client_id: client_id.clone(),
                     cwd: normalized_job_cwd.clone(),
                     command: command.clone(),
@@ -1019,6 +1031,7 @@ impl RunnerRegistry {
                     cwd: normalized_job_cwd.clone(),
                     command: command.clone(),
                     shell: explicit_shell,
+                    login,
                     timeout_secs,
                     context: job_context,
                 })
@@ -1066,6 +1079,15 @@ impl RunnerRegistry {
                 "capability_unavailable: runner {client_id} does not support explicit_shell_selection"
             ));
         }
+        if login
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::BashLoginShell)
+        {
+            return Err(format!(
+                "capability_unavailable: runner {client_id} does not support bash_login_shell"
+            ));
+        }
         if structured_metadata.is_some()
             && !runner
                 .runner_features
@@ -1091,6 +1113,15 @@ impl RunnerRegistry {
         {
             return Err(format!(
                 "capability_unavailable: runner {client_id} does not support structured_script_typescript"
+            ));
+        }
+        if python_script_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::StructuredScriptPython)
+        {
+            return Err(format!(
+                "capability_unavailable: runner {client_id} does not support structured_script_python"
             ));
         }
         if skill_resource_request
@@ -1170,6 +1201,18 @@ impl RunnerRegistry {
         {
             return Err(format!(
                 "structured_cargo_test_lib_unavailable: runner {} does not support Cargo test --lib validation argv",
+                client_id
+            ));
+        }
+        if validation_steps
+            .iter()
+            .any(|step| step.is_multi_package_cargo_check())
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::StructuredCargoCheckPackages)
+        {
+            return Err(format!(
+                "capability_unavailable: structured_cargo_check_packages_unavailable: runner {} does not support repeated Cargo check package selectors",
                 client_id
             ));
         }
@@ -1733,6 +1776,35 @@ impl RunnerRegistry {
             .collect::<Vec<_>>();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
         jobs.into_iter().map(|job| job_view(&job)).collect()
+    }
+
+    /// Passive attention reads only the Server's current Job records. In particular,
+    /// it must not refresh lifecycle or contact a Runner on an unrelated tool call.
+    pub async fn snapshot_jobs_for_auth_filtered(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        project_id: &str,
+        session_id: &str,
+        limit: usize,
+    ) -> Vec<ShellJobInfo> {
+        let inner = self.inner.lock().await;
+        let mut jobs = inner
+            .jobs_by_id
+            .values()
+            .filter(|job| job.visibility == ShellJobVisibility::Public)
+            .filter(|job| shell_job_visible_to_auth(auth, &inner, job))
+            .filter(|job| job.project_id.as_deref() == Some(project_id))
+            .filter(|job| job.session_id.as_deref() == Some(session_id))
+            .collect::<Vec<_>>();
+        // Active work must not disappear behind a full page of newer terminal
+        // records. Keep the snapshot bounded while prioritizing active Jobs.
+        jobs.sort_by(|a, b| {
+            a.lifecycle
+                .is_terminal()
+                .cmp(&b.lifecycle.is_terminal())
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        jobs.into_iter().take(limit.min(32)).map(job_view).collect()
     }
 
     async fn visible_job_records_for_auth(

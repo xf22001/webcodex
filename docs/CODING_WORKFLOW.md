@@ -62,7 +62,7 @@ When bootstrap or discovery returns `project_ref`, reuse it as the `project` sel
 ## Tool strategy guidance
 
 `work_on_project` accepts `guidance_profile`, defaulting to `direct`. Workflow
-contract v17 returns shared `guidance`, `model_protocol` and review `roles`, plus
+contract v18 returns shared `guidance`, `model_protocol` and review `roles`, plus
 only the selected `tool_strategy: {profile, guidance}`, when explicitly requested
 through `context_request=["webcodex.workflow"]`. The selection is request-local:
 choose again on exact resume without changing Session identity or business state.
@@ -74,6 +74,11 @@ workflow sidecar uses that call's `guidance_profile`; unrelated tools that reque
 
 - `direct`: use the simplest sufficient primitive; batch predetermined independent
   observations and let the model inspect results before adaptive follow-up calls.
+- `host_code_mode`: use Host-native orchestration when the Host provides it. Keep one
+  simple observation direct, prefer canonical same-kind batches, keep dependent
+  search/read follow-ups in one Host cell when useful, and return compact evidence
+  rather than raw ToolResults. This profile grants no WebCodex capability or authority
+  and does not require nested WebCodex Code Mode.
 - `code_mode`: still use a direct primitive for one simple observation. Prefer
   read-only orchestration when related search/read work, cross-file investigation
   or synthesis saves outer model turns. Keep dependent follow-ups sequential inside
@@ -81,7 +86,7 @@ workflow sidecar uses that call's `guidance_profile`; unrelated tools that reque
   the cell, filter and synthesize them, then emit compact decision evidence through
   `text(...)`. Avoid `text(results)` dumps and project before reaching output limits.
 
-Both strategies retain bounded targeted reads, narrow discovery, first-class native
+All strategies retain bounded targeted reads, narrow discovery, first-class native
 commands/structured tools, and the same recovery, authority, review and closeout.
 Canonical edits and structured validators remain the default. Effectful composition
 is useful only when related validations save outer turns; guarded mutation composition
@@ -115,6 +120,8 @@ The exact matching metadata and transactional protocol are maintainer details; s
 Formatting is finalization, not per-edit validation. The normal loop is edit → focused validation → further edits if needed → source stabilizes → format once → final review/validation. For Rust, run formatting after relevant source stabilizes and before final diff/closeout; rerun only after later Rust edits that can change formatting. Use `cargo_fmt(check=false)` for intentional final formatting and `check=true` when read-only final formatting proof is needed. CI and release formatting gates remain unchanged.
 
 Prefer structured validation such as `cargo_test`, `cargo_check`, or `go_test` when available. Use the smallest check that can detect the regression, and broaden only when the affected boundary requires it.
+
+For one Cargo workspace package, `cargo_check` accepts `package`. For several packages, pass `packages`; WebCodex sorts and deduplicates that set, then runs one Cargo process with repeated `-p` selectors. The two selectors are mutually exclusive, and an explicit empty list is invalid.
 
 When a required validation is likely to outlast its synchronous grace and independent read-only inspection remains, set a short `sync_wait_secs` (often `1`) so that already-started validation hands off as the **same execution** Job. Continue only independent reads, search, diff/architecture inspection, or review, then observe that Job. Do not start extra CPU-heavy validations merely for parallelism. If source covered by the running validation changes afterward, its result is stale/cache-warmup evidence rather than proof of the final workspace; run task-appropriate validation again on the final source.
 

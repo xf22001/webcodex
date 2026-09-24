@@ -1,10 +1,13 @@
 mod coding_agents;
 mod connections;
+mod diagnostics;
 mod mcp_providers;
 #[cfg(test)]
 mod reconfiguration_tests;
 mod runner_capability_grant;
+mod runtime_shell;
 mod ssh_resources;
+mod updates;
 mod workspace;
 mod workspace_settings;
 use crate::activity::{ActivityEventKind, ActivityLevel, ActivityLog};
@@ -73,6 +76,7 @@ pub struct AppState {
     shutdown_signal: CancellationSignal,
     shutdown_started: AtomicBool,
     connections: ConnectionRuntimes,
+    update_check: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -92,6 +96,7 @@ impl AppState {
             activity,
             shutdown_signal: CancellationSignal::new(),
             shutdown_started: AtomicBool::new(false),
+            update_check: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -375,6 +380,15 @@ impl AppState {
         if self.shutdown_signal.is_cancelled() {
             return Err(cancelled_error());
         }
+        if kind != DesktopOperationKind::ConfigurationRestore
+            && self.get_state().configuration_issue.is_some()
+        {
+            return Err(DesktopError::new(
+                "configuration_migration_failed",
+                "Configuration could not be migrated",
+                "Open Diagnostics or explicitly restore the previous known-good configuration.",
+            ));
+        }
         let operation = self.operations.admit(kind, cancellable)?;
         let cancellation =
             CancellationContext::new(operation.cancellation.clone(), self.shutdown_signal.clone());
@@ -576,6 +590,11 @@ pub struct DesktopCore {
     data_dir: PathBuf,
     config_path: PathBuf,
     config: StoredDesktopConfig,
+    configuration_issue: Option<String>,
+    runtime_candidate: Option<crate::runtime_selection::RuntimeCandidate>,
+    runtime_candidate_context: Option<String>,
+    runtime_selected_probe: Option<crate::runtime_selection::RuntimeCandidate>,
+    runtime_last_switch: Option<crate::runtime_selection::RuntimeSwitchResult>,
     tunnel_config: TunnelConfig,
     mcp_providers: crate::mcp_providers::McpProviderStore,
     mcp_applied_revision: Option<u64>,
@@ -593,12 +612,18 @@ impl DesktopCore {
     fn new(data_dir: PathBuf, resource_dir: PathBuf) -> DesktopResult<Self> {
         let activity = ActivityLog::default();
         let config_path = data_dir.join("desktop-state.json");
-        let config = load_config(&config_path, &activity)?;
+        // Keep Diagnostics usable if migration fails; admission below prevents
+        // replacing the operator's files with a default configuration.
+        let (config, configuration_issue) = match load_config(&config_path, &activity) {
+            Ok(config) => (config, None),
+            Err(error) => (StoredDesktopConfig::default(), Some(error.code)),
+        };
         let tunnel_config = TunnelConfig::load(
             &data_dir.join("secrets").join("tunnel-config.json"),
             config.preferred_connection == Some(RegularConnectionPreference::OpenAiTunnel),
         );
         let mut snapshot = DesktopStateSnapshot::default();
+        snapshot.configuration_issue = configuration_issue.clone();
         snapshot.topology = config.topology.clone();
         snapshot.project = project_snapshot(&config);
         if config.topology.is_some() && config.runtime_autostart == Some(false) {
@@ -635,10 +660,18 @@ impl DesktopCore {
         snapshot.coding_agents = coding_agents.snapshot(None);
         let published = Arc::new(RwLock::new(snapshot.clone()));
         let supervisor = Arc::new(Mutex::new(ProcessSupervisor::new(activity.clone())));
+        let mut adapter = WebCodexAdapter::new(Some(resource_dir.join("webcodex-runtime")));
+        adapter.set_runtime_source(config.runtime_binary_source.clone());
+        adapter.set_runtime_approval(config.runtime_binary_fingerprint.clone());
         Ok(Self {
             data_dir,
             config_path,
             config,
+            configuration_issue,
+            runtime_candidate: None,
+            runtime_candidate_context: None,
+            runtime_selected_probe: None,
+            runtime_last_switch: None,
             tunnel_config,
             mcp_providers,
             mcp_applied_revision: None,
@@ -646,7 +679,7 @@ impl DesktopCore {
             coding_agents_applied_revision: None,
             connections: ConnectionRuntimes::default(),
             snapshot,
-            adapter: WebCodexAdapter::new(Some(resource_dir.join("webcodex-runtime"))),
+            adapter,
             supervisor,
             activity,
             published,
@@ -1093,6 +1126,7 @@ impl DesktopCore {
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
+        crate::runtime_selection::verify_resolved_files(&binaries).await?;
         self.activity.push(
             ActivityEventKind::LocalSetupPreparing,
             "desktop",
@@ -1511,6 +1545,7 @@ impl DesktopCore {
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
+        crate::runtime_selection::verify_resolved_files(&binaries).await?;
         let exposure = if server_url.starts_with("https://") {
             Exposure::ExistingHttps {
                 url: server_url.clone(),
@@ -1756,6 +1791,7 @@ impl DesktopCore {
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
+        crate::runtime_selection::verify_resolved_files(&binaries).await?;
         if self
             .process_snapshot(ProcessKey::QuickShare)
             .await
@@ -2464,11 +2500,17 @@ enum StoredConfigFile {
         bytes: Vec<u8>,
     },
     Corrupt,
+    Unsupported,
 }
 
 fn load_config(path: &Path, activity: &ActivityLog) -> DesktopResult<StoredDesktopConfig> {
     let backup_path = desktop_state_backup_path(path);
     match read_stored_config(path)? {
+        StoredConfigFile::Unsupported => Err(DesktopError::new(
+            "configuration_migration_failed",
+            "The saved configuration requires a newer Desktop schema",
+            "Update Desktop or explicitly restore the previous configuration from Diagnostics.",
+        )),
         StoredConfigFile::Valid { config, .. } => Ok(config),
         StoredConfigFile::Missing => match read_stored_config(&backup_path)? {
             StoredConfigFile::Missing => Ok(StoredDesktopConfig::default()),
@@ -2476,14 +2518,18 @@ fn load_config(path: &Path, activity: &ActivityLog) -> DesktopResult<StoredDeskt
                 recover_config_from_backup(path, &bytes, activity)?;
                 Ok(config)
             }
-            StoredConfigFile::Corrupt => Err(desktop_state_corrupt()),
+            StoredConfigFile::Corrupt | StoredConfigFile::Unsupported => {
+                Err(desktop_state_corrupt())
+            }
         },
         StoredConfigFile::Corrupt => match read_stored_config(&backup_path)? {
             StoredConfigFile::Valid { config, bytes } => {
                 recover_config_from_backup(path, &bytes, activity)?;
                 Ok(config)
             }
-            StoredConfigFile::Missing | StoredConfigFile::Corrupt => Err(desktop_state_corrupt()),
+            StoredConfigFile::Missing
+            | StoredConfigFile::Corrupt
+            | StoredConfigFile::Unsupported => Err(desktop_state_corrupt()),
         },
     }
 }
@@ -2527,7 +2573,8 @@ fn read_stored_config(path: &Path) -> DesktopResult<StoredConfigFile> {
             .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
     })?;
     match serde_json::from_slice::<StoredDesktopConfig>(&bytes) {
-        Ok(config) => Ok(StoredConfigFile::Valid { config, bytes }),
+        Ok(config) if config.schema_version == 1 => Ok(StoredConfigFile::Valid { config, bytes }),
+        Ok(_) => Ok(StoredConfigFile::Unsupported),
         Err(_) => Ok(StoredConfigFile::Corrupt),
     }
 }
@@ -2931,7 +2978,7 @@ fn exposure_readiness(topology: Option<&RuntimeTopology>) -> ExposureReadiness {
 struct EffectiveTunnelProxy {
     url: Option<String>,
     source: &'static str,
-    detected_url: Option<String>,
+    system_proxy_detected: bool,
 }
 
 fn validate_tunnel_proxy_url(value: &str) -> DesktopResult<String> {
@@ -2955,46 +3002,51 @@ fn environment_tunnel_proxy() -> Option<String> {
 }
 
 fn effective_tunnel_proxy(config: &TunnelProxyConfig) -> DesktopResult<EffectiveTunnelProxy> {
-    let system = crate::platform::system_http_proxy_candidate();
-    let detected_url = system.as_ref().map(|candidate| candidate.url.clone());
+    resolve_tunnel_proxy(
+        config,
+        environment_tunnel_proxy(),
+        crate::platform::system_http_proxy_candidate(),
+    )
+}
+
+fn resolve_tunnel_proxy(
+    config: &TunnelProxyConfig,
+    environment: Option<String>,
+    system: Option<crate::platform::SystemProxyCandidate>,
+) -> DesktopResult<EffectiveTunnelProxy> {
+    let system_proxy_detected = system.is_some();
     match config.mode {
         TunnelProxyMode::Direct => Ok(EffectiveTunnelProxy {
             url: None,
             source: "direct",
-            detected_url,
+            system_proxy_detected,
         }),
         TunnelProxyMode::Custom => Ok(EffectiveTunnelProxy {
             url: Some(validate_tunnel_proxy_url(
                 config.custom_url.as_deref().unwrap_or(""),
             )?),
             source: "custom",
-            detected_url,
+            system_proxy_detected,
         }),
         TunnelProxyMode::Auto => {
-            if let Some(url) = environment_tunnel_proxy() {
+            if let Some(url) = environment {
                 return Ok(EffectiveTunnelProxy {
                     url: Some(url),
                     source: "environment",
-                    detected_url,
+                    system_proxy_detected,
                 });
             }
             if let Some(candidate) = system {
-                if candidate.enabled || crate::platform::proxy_is_loopback(&candidate.url) {
-                    return Ok(EffectiveTunnelProxy {
-                        url: Some(candidate.url),
-                        source: if candidate.enabled {
-                            "windows_system"
-                        } else {
-                            "windows_loopback_candidate"
-                        },
-                        detected_url,
-                    });
-                }
+                return Ok(EffectiveTunnelProxy {
+                    url: Some(candidate.url),
+                    source: "system",
+                    system_proxy_detected,
+                });
             }
             Ok(EffectiveTunnelProxy {
                 url: None,
                 source: "direct",
-                detected_url,
+                system_proxy_detected,
             })
         }
     }
@@ -3034,17 +3086,19 @@ fn apply_config_projection(snapshot: &mut DesktopStateSnapshot, config: &StoredD
             mode: config.tunnel_proxy.mode,
             custom_url: config.tunnel_proxy.custom_url.clone(),
             effective_source: proxy.source.to_string(),
-            effective_url: proxy.url,
-            detected_url: proxy.detected_url,
+            effective_proxy_present: proxy.url.is_some(),
+            system_proxy_detected: proxy.system_proxy_detected,
         },
-        Err(_) => TunnelProxySnapshot {
-            mode: config.tunnel_proxy.mode,
-            custom_url: config.tunnel_proxy.custom_url.clone(),
-            effective_source: "invalid_custom".to_string(),
-            effective_url: None,
-            detected_url: crate::platform::system_http_proxy_candidate()
-                .map(|candidate| candidate.url),
-        },
+        Err(_) => {
+            let system = crate::platform::system_http_proxy_candidate();
+            TunnelProxySnapshot {
+                mode: config.tunnel_proxy.mode,
+                custom_url: config.tunnel_proxy.custom_url.clone(),
+                effective_source: "invalid_custom".to_string(),
+                effective_proxy_present: false,
+                system_proxy_detected: system.is_some(),
+            }
+        }
     };
 }
 
@@ -3237,6 +3291,7 @@ mod tests {
             preferred_connection: None,
             tunnel_proxy: TunnelProxyConfig::default(),
             runtime: None,
+            ..StoredDesktopConfig::default()
         }
     }
 
@@ -3599,6 +3654,52 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_proxy_resolution_has_explicit_precedence() {
+        let auto = TunnelProxyConfig::default();
+        let system = crate::platform::SystemProxyCandidate {
+            url: "http://127.0.0.1:7890".to_string(),
+        };
+        let environment = "http://environment.example.test:8080".to_string();
+
+        let resolved =
+            resolve_tunnel_proxy(&auto, Some(environment.clone()), Some(system.clone())).unwrap();
+        assert_eq!(resolved.source, "environment");
+        assert_eq!(resolved.url.as_deref(), Some(environment.as_str()));
+        assert!(resolved.system_proxy_detected);
+
+        let resolved = resolve_tunnel_proxy(&auto, None, Some(system.clone())).unwrap();
+        assert_eq!(resolved.source, "system");
+        assert_eq!(resolved.url.as_deref(), Some(system.url.as_str()));
+        assert!(resolved.system_proxy_detected);
+
+        let resolved = resolve_tunnel_proxy(&auto, None, None).unwrap();
+        assert_eq!(resolved.source, "direct");
+        assert_eq!(resolved.url, None);
+        assert!(!resolved.system_proxy_detected);
+
+        let custom = TunnelProxyConfig {
+            mode: TunnelProxyMode::Custom,
+            custom_url: Some("http://custom.example.test:9000".to_string()),
+        };
+        let resolved =
+            resolve_tunnel_proxy(&custom, Some(environment.clone()), Some(system.clone())).unwrap();
+        assert_eq!(resolved.source, "custom");
+        assert_eq!(
+            resolved.url.as_deref(),
+            Some("http://custom.example.test:9000")
+        );
+
+        let direct = TunnelProxyConfig {
+            mode: TunnelProxyMode::Direct,
+            custom_url: Some("http://ignored.example.test:9000".to_string()),
+        };
+        let resolved = resolve_tunnel_proxy(&direct, Some(environment), Some(system)).unwrap();
+        assert_eq!(resolved.source, "direct");
+        assert_eq!(resolved.url, None);
+        assert!(resolved.system_proxy_detected);
+    }
+
+    #[test]
     fn failed_runtime_resume_restores_the_last_published_state() {
         let data_dir = unique_state_dir("resume-failure-reconcile");
         let mut core = DesktopCore::new(data_dir.clone(), data_dir.join("resources"))
@@ -3677,6 +3778,7 @@ mod tests {
                 project_id: Some("repo".to_string()),
                 runtime_project_id: Some("agent:desktop:repo".to_string()),
             }),
+            ..StoredDesktopConfig::default()
         };
         assert_eq!(
             project_snapshot(&config).and_then(|project| project.runtime_project_id),

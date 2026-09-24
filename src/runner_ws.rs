@@ -390,6 +390,7 @@ mod tests {
                     RunnerCapabilities {
                         shell: true,
                         explicit_shell_selection: false,
+                        bash_login_shell: false,
                         file_read: true,
                         file_write: true,
                         artifact_export_chunk_read: false,
@@ -397,6 +398,7 @@ mod tests {
                         structured_file_delete: true,
                         apply_text_edit_occurrence: false,
                         apply_text_edit_line_scope: false,
+                        apply_text_edit_expected_match_count: false,
                         apply_text_edit_local_guard_without_sha: false,
                         apply_patch: false,
                         apply_patch_match_metadata: false,
@@ -412,6 +414,7 @@ mod tests {
                         structured_cargo_test_count_assertion: true,
                         structured_cargo_test_execution_policy: true,
                         structured_cargo_test_lib: true,
+                        structured_cargo_check_packages: true,
                         structured_go_test_json: true,
                         structured_go_test_tool: true,
                         structured_go_test_packages: true,
@@ -419,6 +422,7 @@ mod tests {
                         structured_script_payload: false,
                         structured_script_javascript: false,
                         structured_script_typescript: false,
+                        structured_script_python: false,
                         internal_posix_script: false,
                         structured_execution_jobs: false,
                         detached_process_jobs: false,
@@ -660,6 +664,7 @@ mod tests {
         let (request_id, mut result_rx) = registry
             .enqueue_run(
                 ShellRunRequest {
+                    login: false,
                     client_id: "shared-a".to_string(),
                     cwd: None,
                     command: "echo shared-a".to_string(),
@@ -826,6 +831,7 @@ mod tests {
         let (request_id, rx) = registry
             .enqueue_run(
                 ShellRunRequest {
+                    login: false,
                     client_id: "ws-roundtrip".to_string(),
                     cwd: None,
                     command: "echo hi".to_string(),
@@ -1188,6 +1194,7 @@ mod tests {
                 let (request_id, rx) = registry
                     .enqueue_run(
                         ShellRunRequest {
+                            login: false,
                             client_id: "ws-slow".to_string(),
                             cwd: None,
                             command: "echo hi".to_string(),
@@ -1265,6 +1272,7 @@ mod tests {
         let job = registry
             .start_job(
                 ShellJobOpRequest {
+                    login: false,
                     op: "start".to_string(),
                     client_id: Some("ws-lost".to_string()),
                     cwd: None,
@@ -1496,6 +1504,7 @@ mod tests {
         let job = registry
             .start_job(
                 ShellJobOpRequest {
+                    login: false,
                     op: "start".to_string(),
                     client_id: Some("ws-stale-disc".to_string()),
                     cwd: None,
@@ -1674,6 +1683,7 @@ mod tests {
         let (request_id, _rx) = registry
             .enqueue_run(
                 ShellRunRequest {
+                    login: false,
                     client_id: "ws-steal".to_string(),
                     cwd: None,
                     command: "echo hi".to_string(),

@@ -27,7 +27,9 @@ use webcodex_core::plugin::{
     validate_provider_id as validate_plugin_provider_id,
     validate_tool_name as validate_plugin_tool_name, PLUGIN_MAX_ARGUMENT_BYTES,
 };
-use webcodex_core::runner_protocol::ShellScriptLanguage;
+use webcodex_core::runner_protocol::{
+    normalize_cargo_packages, ShellScriptLanguage, CARGO_PACKAGE_MAX_ITEMS, CARGO_VALUE_MAX_BYTES,
+};
 use webcodex_core::runtime_contract::{
     validate_project_op_path, DEFAULT_OBSERVE_JOBS_TAIL_LINES,
     GIT_DIFF_HUNKS_CONTINUATION_MAX_BYTES,
@@ -1419,9 +1421,10 @@ pub enum ToolCall {
         /// title.
         #[schemars(length(min = 1, max = 4000))]
         instruction: String,
-        /// Model guidance only: direct (default) or code_mode for read-only orchestration strategy.
-        /// No tool admission, authority, effects, or Session state changes; explicit resume may choose
-        /// again. code_mode is invalid when Experimental Code Mode is not compiled. Request
+        /// Model guidance only: direct (default), host_code_mode for Host-native orchestration,
+        /// or feature-gated code_mode for WebCodex nested orchestration. No tool admission,
+        /// authority, effects, or Session state changes; explicit resume may choose again.
+        /// Request
         /// `context_request=["webcodex.workflow"]` when the current model context needs that guidance.
         #[serde(default)]
         guidance_profile: CodingGuidanceProfile,
@@ -1807,6 +1810,15 @@ pub enum ToolCall {
         limit: Option<usize>,
     },
 
+    /// Adapter/API-only exact recovery read. Uses the canonical handoff projection
+    /// without exposing the business Session through generic recorder semantics.
+    SessionHandoffState {
+        /// Required exact runtime Project; must match the authorized Session Project.
+        project: String,
+        /// Required exact business Workflow Session id.
+        session_id: String,
+    },
+
     /// Create a bounded last-known-good workspace checkpoint outside the
     /// project worktree.
     #[cfg(feature = "workspace-checkpoints")]
@@ -2057,8 +2069,9 @@ pub enum ToolCall {
         /// telemetry bodies.
         #[schemars(length(min = 1, max = 65536))]
         instruction: String,
-        /// Optional explicit run-level ACP config overrides. Omission or {} sends zero set_config_option
-        /// calls. Every key/value must be live-advertised and operator-allowed before prompt dispatch.
+        /// Optional explicit run-level ACP config overrides. Omission or {} sends no caller-requested
+        /// set_config_option calls; Runner-owned forced_config policy may still apply its own values.
+        /// Every caller key/value must be live-advertised and operator-allowed before prompt dispatch.
         #[serde(default)]
         config: Option<BTreeMap<String, webcodex_core::coding_agent::CodingAgentConfigValue>>,
         #[schemars(extend("default" = 300))]
@@ -2102,7 +2115,8 @@ pub enum ToolCall {
     RunScript {
         /// Configured project id.
         project: String,
-        /// Required semantic script language. JavaScript uses Runner-resolved Node.js with fixed .mjs ESM
+        /// Required semantic script language: sh, bash, PowerShell, Python, JavaScript, or TypeScript.
+        /// Python uses a Runner-resolved interpreter and a temporary .py file. JavaScript uses Runner-resolved Node.js with fixed .mjs ESM
         /// semantics. TypeScript uses Runner-resolved Node.js native erasable type stripping from a fixed
         /// .mts ESM file and requires Node.js 22.6.0 or newer. The Runner owns any runtime compatibility
         /// flags; callers cannot provide a runtime path or runtime flags. Session default_shell never
@@ -2195,6 +2209,10 @@ pub enum ToolCall {
         /// uses the remote login shell. The response always records the actual selection.
         #[serde(default)]
         shell: Option<ExecutionShell>,
+        /// Bash login mode. `true` requires `shell="bash"` and executes exactly
+        /// `bash -lc <command>` using the Runner-resolved Bash program.
+        #[serde(default)]
+        login: bool,
     },
 
     /// Open one explicit command-oriented persistent shell for this Workflow
@@ -2542,9 +2560,17 @@ pub enum ToolCall {
         /// Feature list passed to --features.
         #[serde(default)]
         features: Option<String>,
-        /// Package passed to -p.
+        /// Legacy single workspace package passed to `-p`. Mutually exclusive
+        /// with `packages`; internally canonicalized to the same package set.
         #[serde(default)]
         package: Option<String>,
+        /// Workspace packages passed as repeated `-p` selectors in one Cargo
+        /// invocation. Mutually exclusive with `package`; order and duplicates
+        /// are canonicalized because package selection is set-like.
+        #[schemars(length(min = 1, max = CARGO_PACKAGE_MAX_ITEMS))]
+        #[schemars(inner(length(min = 1, max = CARGO_VALUE_MAX_BYTES)))]
+        #[serde(default)]
+        packages: Option<Vec<String>>,
         #[schemars(extend("default" = 600))]
         /// Total validation runtime budget in seconds (minimum 1). Values above 3600 are accepted and
         /// clamped to 3600. Short validation returns immediately; longer validation keeps the same
@@ -4244,6 +4270,17 @@ pub enum ToolCall {
         session_id: Option<String>,
     },
 
+    /// Read bounded, sanitized persisted activity for the current Host Window.
+    /// Window identity is accepted only from the adapter's ToolCallContext.
+    CurrentWindowActivity {
+        /// Maximum returned events, clamped to 1..50 (default 20).
+        #[serde(default)]
+        limit: Option<usize>,
+        /// Include support/diagnostic events in the event list (default false).
+        #[serde(default)]
+        include_nonmeaningful: bool,
+    },
+
     /// Return bounded stdout/stderr tails for a job. Defaults to a bounded tail
     /// so the console never reads full logs by default. When `after_observation_token`
     /// and `wait_secs` are both supplied, this is a single bounded wait (up to
@@ -5167,8 +5204,87 @@ fn validate_structured_validation_sync_wait(name: &str, arguments: &Value) -> Re
     Ok(())
 }
 
+fn canonicalize_cargo_check_packages(name: &str, arguments: &mut Value) -> Result<(), String> {
+    if name != "cargo_check" {
+        return Ok(());
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        return Ok(());
+    };
+    let package_present = object.get("package").is_some_and(|value| !value.is_null());
+    let packages_present = object.get("packages").is_some_and(|value| !value.is_null());
+    if package_present && packages_present {
+        return Err(
+            "invalid arguments for tool 'cargo_check': package and packages are mutually exclusive"
+                .to_string(),
+        );
+    }
+
+    let package = object.get("package").and_then(Value::as_str);
+    let packages = match object.get("packages") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.into_iter().map(str::to_string).collect::<Vec<_>>()),
+        Some(Value::Null) | None => None,
+        Some(_) => return Ok(()), // serde reports the canonical type error.
+    };
+    if package_present && package.is_none() || packages_present && packages.is_none() {
+        return Ok(()); // serde reports the canonical item/type error.
+    }
+    let normalized = normalize_cargo_packages(package, packages.as_deref())
+        .map_err(|reason| format!("invalid arguments for tool 'cargo_check': {reason}"))?;
+    object.remove("package");
+    object.remove("packages");
+    if let Some(packages) = normalized {
+        object.insert("packages".to_string(), serde_json::json!(packages));
+    }
+    Ok(())
+}
+
+/// Only explicitly documented, lossless model-input spellings belong here.
+/// Business ToolCall variants and Runner payloads retain `args` alone.
+fn canonicalize_process_argv_alias(name: &str, arguments: &mut Value) -> Result<bool, String> {
+    if !matches!(name, "run_process" | "run_detached_process") {
+        return Ok(false);
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(alias) = object.remove("argv") else {
+        return Ok(false);
+    };
+    if let Some(canonical) = object.get("args") {
+        if canonical != &alias {
+            return Err("ambiguous compatibility alias: args and argv differ".to_string());
+        }
+    } else {
+        object.insert("args".to_string(), alias);
+    }
+    Ok(true)
+}
+
+fn validate_run_shell_login(name: &str, arguments: &Value) -> Result<(), String> {
+    if name == "run_shell"
+        && arguments.get("login").and_then(Value::as_bool) == Some(true)
+        && arguments.get("shell").and_then(Value::as_str) != Some("bash")
+    {
+        return Err("run_shell login=true requires shell=bash".to_string());
+    }
+    Ok(())
+}
+
 impl ToolCall {
     pub fn from_tool_name(name: &str, arguments: Value) -> Result<Self, String> {
+        Self::from_tool_name_with_normalization(name, arguments).map(|(call, _)| call)
+    }
+
+    /// Returns a stable code only when a documented compatibility alias was used.
+    pub fn from_tool_name_with_normalization(
+        name: &str,
+        arguments: Value,
+    ) -> Result<(Self, Option<&'static str>), String> {
         validate_model_facing_assertion_name(name, &arguments)?;
         validate_model_facing_result_expectation(name, &arguments)?;
         if name == "create_project"
@@ -5218,6 +5334,10 @@ impl ToolCall {
             );
         }
         let mut arguments = strip_tool_call_expectation_metadata(arguments);
+        validate_run_shell_login(name, &arguments)?;
+        let normalization =
+            canonicalize_process_argv_alias(name, &mut arguments)?.then_some("argv_to_args");
+        canonicalize_cargo_check_packages(name, &mut arguments)?;
         if name == "tool_manifest" {
             if let Some(object) = arguments.as_object_mut() {
                 if !object.contains_key("include_recommended_flows") {
@@ -5315,7 +5435,7 @@ impl ToolCall {
                 .validate()
                 .map_err(|error| format!("invalid arguments for tool '{}': {}", name, error))?;
         }
-        Ok(call)
+        Ok((call, normalization))
     }
 
     /// Raw command text for shell-like calls. Consumed only by the workspace
@@ -5354,6 +5474,7 @@ impl ToolCall {
             Self::CompleteSessionMessage { .. } => "complete_session_message",
             Self::SessionDiscussionSummary { .. } => "session_discussion_summary",
             Self::SessionHandoffSummary { .. } => "session_handoff_summary",
+            Self::SessionHandoffState { .. } => "session_handoff_state",
             #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointCreate { .. } => "workspace_checkpoint_create",
             #[cfg(feature = "workspace-checkpoints")]
@@ -5476,6 +5597,7 @@ impl ToolCall {
             Self::ShowChanges { .. } => "show_changes",
             Self::WorkspaceHygieneCheck { .. } => "workspace_hygiene_check",
             Self::ListJobs { .. } => "list_jobs",
+            Self::CurrentWindowActivity { .. } => "current_window_activity",
             Self::JobTail { .. } => "job_tail",
             Self::WriteProjectFile { .. } => "write_project_file",
             Self::SaveProjectArtifact { .. } => "save_project_artifact",
@@ -5597,7 +5719,9 @@ impl ToolCall {
             // App-only presentation reads intentionally do not expose their business
             // Session through this generic recorder projection: each re-authorizes
             // and reads the exact target inside its runtime method.
-            Self::WorkResultState { .. } | Self::ChangesFileDiff { .. } => None,
+            Self::WorkResultState { .. }
+            | Self::ChangesFileDiff { .. }
+            | Self::SessionHandoffState { .. } => None,
             Self::ImportConversationFilesToProject { session_id, .. } => session_id.as_deref(),
             Self::CallHierarchy { session_id, .. } => session_id.as_deref(),
             Self::WorkOnProject { session_id, .. } => session_id.as_deref(),
@@ -5750,6 +5874,7 @@ impl ToolCall {
             Self::UpdateSessionContext { project, .. }
             | Self::ValidationSummary { project, .. } => Some(project.as_str()),
             Self::SessionHandoffSummary { project, .. } => project.as_deref(),
+            Self::SessionHandoffState { project, .. } => Some(project.as_str()),
             _ => None,
         }
     }

@@ -27,13 +27,17 @@ Bootstrap 或 discovery 返回 `project_ref` 后，普通 Project-scoped tool ca
 
 ## 工具策略 guidance
 
-`work_on_project` 的 `guidance_profile` 默认是 `direct`。Workflow contract v17
+`work_on_project` 的 `guidance_profile` 默认是 `direct`。Workflow contract v18
 保持共享的 `guidance`、`model_protocol` 和 review `roles`，并在显式
 `context_request=["webcodex.workflow"]` 时通过
 `tool_strategy: {profile, guidance}` 返回本次请求选中的策略。
 
 - `direct`：简单 observation 直接调用最合适的 primitive；预先确定且独立的
   observations 可以批量执行，模型根据结果顺序决定 adaptive follow-up。
+- `host_code_mode`：Host 确实提供 native orchestration 时使用。简单单步 observation
+  仍直接调用；同类独立输入优先 canonical batch；有依赖的 search/read follow-up
+  适合时留在同一个 Host cell，并只返回下一步需要的紧凑证据而不是 raw ToolResult。
+  该 profile 不授予任何 WebCodex capability/authority，也不要求 nested WebCodex Code Mode。
 - `code_mode`：简单单步 observation 仍直接调用；相关 search/read、跨文件定位或
   综合调查能减少外层模型往返时，优先 read-only Code Mode。在同一个 cell 内顺序
   完成依赖结果的 follow-up，只并发独立 observations。Raw child results 留在 cell
@@ -47,7 +51,7 @@ Bootstrap 或 discovery 返回 `project_ref` 后，普通 Project-scoped tool ca
 `guidance_profile`；其他无 profile context 的普通工具显式请求该 material 时，
 继续使用 canonical default `direct`。
 
-两者共用 scope、recovery、validation truth、Job continuation、review 和 closeout。
+这些策略共用 scope、recovery、validation truth、Job continuation、review 和 closeout。
 默认仍走 canonical edit 和 structured validation；只有多个相关 validation 或
 adaptive read → one guarded edit 确实减少外层往返时，才考虑相应的 effectful/mutating
 Code Mode。Nested canonical authority、effects、evidence 和 retry certainty 不变。
@@ -96,6 +100,8 @@ Guard failure 是 **zero-write conflict**，不是削弱 guard 的理由。重�
 Formatting 属于收尾，不是每次编辑后的 validation。普通循环是：编辑 → focused validation → 必要时继续编辑 → 源码稳定 → format 一次 → 最终 review/validation。Rust 格式化应在相关源码稳定后、最终 diff/closeout 前执行；只有后续 Rust 编辑可能改变格式时才重跑。`cargo_fmt(check=false)` 用于有意执行最终格式化，`check=true` 用于需要最终只读格式证明的情况。CI/release 格式检查保持不变。
 
 能使用 `cargo_test`、`cargo_check`、`go_test` 等 structured validation 时优先使用它们。先运行能够发现当前回归的最小检查，只有实际受影响的边界需要时才扩大范围。
+
+检查一个 Cargo workspace package 时，`cargo_check` 接受 `package`；检查多个 package 时传入 `packages`。WebCodex 会对该集合排序并去重，然后在同一个 Cargo 进程中使用重复的 `-p` selector。两个 selector 互斥，显式空列表无效。
 
 如果一个确定需要执行的 validation 很可能明显超过 synchronous grace，同时还有真正独立的 read-only inspection，可以显式设置较短的 `sync_wait_secs`（通常可用 `1`），让已经启动的 validation 以**同一个 execution** 尽早 handoff 为 Job。随后只继续独立的源码读取、搜索、diff/architecture inspection 或 review，再观察该 Job；不要为了“并行”额外启动 CPU-heavy validation。如果运行中的 validation 所覆盖源码随后发生 mutation，那么其结果只能算 stale/cache-warmup evidence，不能证明 final workspace；最终源码仍需重新运行 task-appropriate validation。
 

@@ -111,8 +111,8 @@ const readyState: DesktopState = {
     mode: "auto",
     custom_url: null,
     effective_source: "direct",
-    effective_url: null,
-    detected_url: null,
+    effective_proxy_present: false,
+    system_proxy_detected: false,
   },
 };
 
@@ -144,8 +144,8 @@ const firstRunState: DesktopState = {
     mode: "auto",
     custom_url: null,
     effective_source: "direct",
-    effective_url: null,
-    detected_url: null,
+    effective_proxy_present: false,
+    system_proxy_detected: false,
   },
 };
 
@@ -207,7 +207,7 @@ function renderApp() {
 describe("semantic Desktop UI", () => {
   async function changeServerConnection() {
   fireEvent.click(screen.getByRole("button", { name: "设置" }));
-  fireEvent.click(screen.getByText("高级", { selector: "summary" }));
+  fireEvent.click(screen.getByRole("button", { name: "高级" }));
   fireEvent.click(screen.getByRole("button", { name: "Server 连接" }));
 }
 async function editTunnel() {
@@ -315,9 +315,9 @@ beforeEach(() => {
     ]);
     renderApp(); await screen.findByRole("heading", { name: /^(WebCodex|repo)/, level: 1 });
     fireEvent.click(screen.getByRole("button", { name: "活动" }));
-    expect(screen.getByRole("tab", { name: "窗口" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "ChatGPT 调用" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByText("已切换到 sample-project")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "系统" }));
+    fireEvent.click(screen.getByRole("tab", { name: "系统事件" }));
     await screen.findByText("已切换到 sample-project");
     expect(screen.getAllByRole("article")).toHaveLength(2);
     expect(screen.getAllByRole("article")[0]).toHaveTextContent("已切换到 sample-project");
@@ -339,10 +339,17 @@ beforeEach(() => {
   });
 
   it("keeps a failed owned profile stoppable without duplicating its process", async () => {
-    api.getState.mockResolvedValue({ ...readyState, connections: connectionSnapshot(connectionFixture({ lifecycle: "error", ready: false, last_error: "stop_failed" })) });
+    api.getState.mockResolvedValue({ ...readyState, connections: connectionSnapshot(connectionFixture({
+      lifecycle: "error", ready: false, last_error: "stop_failed",
+      process_started: true, process_ready: true, tunnel_ready: false, local_mcp_ready: true,
+      failure_stage: "tunnel_control_plane", reason_code: "tunnel_control_plane_probe_failed",
+    })) });
     api.tunnelProfileAction.mockRejectedValueOnce({ code: "tunnel_unavailable", message: "Stop failed" });
     renderApp(); fireEvent.click(await screen.findByRole("button", { name: "连接" }));
     expect(screen.queryByRole("button", { name: "启动 ChatGPT" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("高级 · ChatGPT"));
+    expect(screen.getByText("tunnel_control_plane")).toBeInTheDocument();
+    expect(screen.getByText("tunnel_control_plane_probe_failed")).toBeInTheDocument();
     const stop = screen.getByRole("button", { name: "停止 ChatGPT" });
     fireEvent.click(stop); expect(await screen.findByRole("alert")).toHaveTextContent("未能应用更改");
     await waitFor(() => expect(stop).toBeEnabled()); fireEvent.click(stop);
@@ -412,7 +419,7 @@ beforeEach(() => {
     const language = screen.getByRole("button", { name: "界面语言" });
     language.focus();
     fireEvent.keyDown(language, { key: "3", metaKey: true });
-    fireEvent.click(screen.getByRole("tab", { name: "系统" }));
+    fireEvent.click(screen.getByRole("tab", { name: "系统事件" }));
     const search = screen.getByRole("searchbox");
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(1));
     fireEvent.click(screen.getByRole("checkbox", { name: "显示进程详情" }));

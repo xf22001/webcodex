@@ -19,6 +19,32 @@ belongs so those boundaries do not leak into unrelated mechanical friction.
 
 ## 1. Spend turns on meaning, not syntax
 
+### Bounded bulk exact edits
+
+For repetitive mechanical changes in an explicit file, `apply_text_edits` accepts
+`replace_exact` with `expected_match_count=N` (1..=1024) and a current
+`expected_read_revision`. The Runner replaces every fully contained exact match
+only when the observed count equals N. `occurrence` selects one match and cannot
+be combined with this field; `line_scope` may narrow the counted matches. The
+Runner plans every source range against one original snapshot, checks overlaps
+across the whole file change, and applies the transaction only after every file
+has passed preflight. A count mismatch writes nothing.
+The additive Runner capability is `apply_text_edit_expected_match_count`.
+Servers reject bulk requests before dispatch to an older Runner that lacks it;
+requests without the field keep their existing admission and unique-match behavior.
+
+For nontrivial bulk changes, read the file and revision, optionally call
+`apply_text_edits(dry_run=true)`, inspect the bounded `match_count` and
+`match_ranges`, then send an independent actual request with the still-valid
+guard. The actual request resolves all matches and fences again. A simple,
+obvious bulk edit may be applied directly. Dry-run creates no future mutation
+authority. The compact success `change_summary` reports counts; use
+`show_changes`, `git_diff_hunks`, or `git_review_summary` for semantic review.
+
+Use this exact cardinality contract for known repeated fixtures or struct
+literals instead of an ad-hoc Python or sed global rewrite. It does not infer
+the count, choose an occurrence, use regex, or expand across a glob.
+
 A tool should reject an input when the model must make a new semantic decision.
 If WebCodex already knows the only safe interpretation, prefer deterministic
 normalization and continue the requested work.
@@ -82,11 +108,24 @@ bounded targeted reads and related-range batching. Broad discovery should prefer
 files/count/small low-context search projections followed by targeted reads.
 `run_process` remains the natural path for one native executable with literal
 argv; `run_shell` is first-class for shell grammar or a short tightly related
-chain, and a bounded deterministic Python heredoc is appropriate when one small
-program expresses one coherent transformation more reliably than many mechanical
-edits. None of these rules means “shell first” or weakens specialized semantics.
+chain, while `run_script(language=python)` carries a program-like Python body as
+typed data. A bounded Python heredoc remains possible for special shell
+composition. None of these rules means “shell first” or weakens specialized semantics.
 
 ## 2. Mechanical repair should be server-owned
+
+Current execution-input compatibility is deliberately narrow:
+
+| Model input | Canonical interpretation | Condition |
+|---|---|---|
+| `run_process.argv`, `run_detached_process.argv` | `args` | If `args` is also present, values must be identical. |
+| `run_process` with exact `sh -c` or `bash -c` argv | `run_shell` with explicit `shell` | Runtime proves the request is lossless and the canonical shell path passes authority, policy, and capability gates. |
+| `run_process` with exact `bash -lc` argv | `run_shell(shell=bash, login=true)` | Same proof and Bash-login capability gate. |
+
+`run_script(language=python)` is canonical; `python3` is not a language alias.
+Unknown spellings such as `timeout`, `workdir`, `command_args`, and
+`command` for `script` still fail closed. Successful normalization returns a
+short `input_normalization` code and hint without replaying the raw payload.
 
 Do not spend a model turn on a repair WebCodex can prove locally.
 

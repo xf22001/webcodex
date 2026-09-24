@@ -120,8 +120,8 @@ export interface TunnelProxySnapshot {
   mode: TunnelProxyMode;
   custom_url?: string | null;
   effective_source: string;
-  effective_url?: string | null;
-  detected_url?: string | null;
+  effective_proxy_present: boolean;
+  system_proxy_detected: boolean;
 }
 
 export type DesktopOperationKind =
@@ -138,7 +138,8 @@ export type DesktopOperationKind =
   | "tunnel_proxy_update"
   | "tunnel_config_update"
   | "runner_settings_update"
-  | "runner_restart";
+  | "runner_restart"
+  | "runtime_probe" | "runtime_switch" | "trace_update" | "configuration_restore";
 
 export type DesktopOperationPhase = "running" | "cancelling";
 
@@ -169,6 +170,7 @@ export interface ChatGptActivitySnapshot {
 }
 
 export interface DesktopState {
+  configuration_issue?: string | null;
   saved_projects?: ProjectSelection[];
   topology?: RuntimeTopology | null;
   readiness: ReadinessSnapshot;
