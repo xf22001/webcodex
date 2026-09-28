@@ -500,9 +500,27 @@ fn cloudflare_named_tunnel_is_provider_bound_and_uses_its_own_credentials() {
     assert!(store
         .update_profile(&path, cloudflare(Some(id), "", "quoted\"token"))
         .is_err());
-    // An empty secret is never a valid credential.
+    // An explicitly supplied secret must be valid on its own. Whitespace is not
+    // a retain signal: only an omitted key keeps the saved credential.
+    for blank in ["", "   ", "\t"] {
+        assert!(
+            store
+                .update_profile(&path, cloudflare(Some(id), "", blank))
+                .is_err(),
+            "{blank:?} must not be accepted as a new token"
+        );
+    }
+    // An omitted key retains the exact saved credential.
+    let mut retain = cloudflare(Some(id), "", "");
+    retain.api_key = None;
+    store.update_profile(&path, retain).unwrap();
+    assert_eq!(
+        command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN").as_deref(),
+        Some("cf-tunnel-token-fixture")
+    );
+    // A new profile cannot be created without a usable secret either.
     assert!(store
-        .update_profile(&path, cloudflare(Some(id), "", "   "))
+        .update_profile(&path, cloudflare(None, "", "   "))
         .is_err());
     // A new OpenAI profile still needs the issued tunnel_<hex> ID shape.
     assert!(store

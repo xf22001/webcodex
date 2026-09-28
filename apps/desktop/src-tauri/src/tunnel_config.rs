@@ -80,7 +80,8 @@ impl Default for TunnelConfig {
     }
 }
 
-// Write-only IPC input. A blank API key retains that exact profile's credential.
+// Write-only IPC input. An omitted API key retains that exact profile's
+// credential; an explicitly supplied key must itself be a valid secret.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelProfileRequest {
@@ -355,26 +356,26 @@ impl TunnelConfig {
             }
         }
         let tunnel_id = request.tunnel_id.trim().to_string();
-        let api_key = request
-            .api_key
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().to_string())
-            .or_else(|| {
-                previous
-                    .and_then(|p| p.credentials.as_ref())
-                    .map(|p| p.api_key.clone())
-            })
-            .or_else(|| {
-                // Only the legacy OpenAI default falls back to the environment.
-                previous
-                    .filter(|p| {
-                        provider == TunnelProvider::OpenAiSecure
-                            && p.id == TunnelProfileId::DEFAULT
-                            && p.credentials.is_none()
-                    })
-                    .and_then(|_| std::env::var("CONTROL_PLANE_API_KEY").ok())
-            })
-            .ok_or_else(invalid)?;
+        // Only an omitted key retains the saved secret. An explicitly supplied
+        // key is the operator's new secret and must pass credential validation
+        // on its own; whitespace must not silently fall back to the old value.
+        let api_key = match request.api_key {
+            Some(value) => value.trim().to_string(),
+            None => previous
+                .and_then(|p| p.credentials.as_ref())
+                .map(|p| p.api_key.clone())
+                .or_else(|| {
+                    // Only the legacy OpenAI default falls back to the environment.
+                    previous
+                        .filter(|p| {
+                            provider == TunnelProvider::OpenAiSecure
+                                && p.id == TunnelProfileId::DEFAULT
+                                && p.credentials.is_none()
+                        })
+                        .and_then(|_| std::env::var("CONTROL_PLANE_API_KEY").ok())
+                })
+                .ok_or_else(invalid)?,
+        };
         validate_credentials(provider, &tunnel_id, &api_key)?;
         if !tunnel_id.is_empty()
             && self.profiles().iter().any(|p| {
