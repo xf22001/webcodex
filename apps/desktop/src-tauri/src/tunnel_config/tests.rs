@@ -422,11 +422,7 @@ fn command_env(store: &TunnelConfig, id: TunnelProfileId, key: &str) -> Option<S
         .map(|value| value.to_string_lossy().into_owned())
 }
 
-fn cloudflare(
-    id: Option<TunnelProfileId>,
-    tunnel_id: &str,
-    token: &str,
-) -> TunnelProfileRequest {
+fn cloudflare(id: Option<TunnelProfileId>, tunnel_id: &str, token: &str) -> TunnelProfileRequest {
     TunnelProfileRequest {
         id,
         name: "Named".into(),
@@ -463,14 +459,20 @@ fn cloudflare_named_tunnel_is_provider_bound_and_uses_its_own_credentials() {
         command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN").as_deref(),
         Some("cf-tunnel-token-fixture")
     );
-    assert_eq!(command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_ID"), None);
+    assert_eq!(
+        command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_ID"),
+        None
+    );
     assert_eq!(command_env(&store, id, "CONTROL_PLANE_API_KEY"), None);
     assert_eq!(command_env(&store, id, "CONTROL_PLANE_TUNNEL_ID"), None);
     assert_eq!(
         command_env(&store, id, "WEBCODEX_TUNNEL_PROFILE_ID").as_deref(),
         Some(id.to_string().as_str())
     );
-    assert_eq!(store.provider_for(id).unwrap(), TunnelProvider::CloudflareNamed);
+    assert_eq!(
+        store.provider_for(id).unwrap(),
+        TunnelProvider::CloudflareNamed
+    );
 
     // The provider is part of a profile's identity, so it cannot be swapped in place.
     let error = store
@@ -489,7 +491,10 @@ fn cloudflare_named_tunnel_is_provider_bound_and_uses_its_own_credentials() {
         .unwrap_err();
     assert_eq!(error.code, "tunnel_profile_provider_fixed");
     // The refused switch left the saved profile untouched.
-    assert_eq!(store.provider_for(id).unwrap(), TunnelProvider::CloudflareNamed);
+    assert_eq!(
+        store.provider_for(id).unwrap(),
+        TunnelProvider::CloudflareNamed
+    );
 
     // A quote would corrupt the line-oriented profile file the token is written to.
     assert!(store
@@ -533,5 +538,8 @@ fn saved_profiles_without_a_provider_field_stay_openai_secure_tunnels() {
         .find(|profile| profile.name == "ChatGPT")
         .unwrap();
     assert_eq!(profile.provider, TunnelProvider::OpenAiSecure);
-    assert_eq!(store.provider_for(profile.id).unwrap(), TunnelProvider::OpenAiSecure);
+    assert_eq!(
+        store.provider_for(profile.id).unwrap(),
+        TunnelProvider::OpenAiSecure
+    );
 }

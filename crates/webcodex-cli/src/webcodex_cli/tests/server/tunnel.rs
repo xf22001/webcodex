@@ -104,14 +104,21 @@ fn cloudflare_tunnel_token_requires_a_non_blank_value_in_either_source() {
     // A profile that never mentions the key cannot supply a named Tunnel token.
     std::fs::write(&env_file, "WEBCODEX_TOKEN=server-bootstrap\n").unwrap();
     let error = crate::webcodex_cli::server::derive_cloudflare_tunnel_token(&env_file).unwrap_err();
-    assert!(error.contains("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"), "{error}");
+    assert!(
+        error.contains("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"),
+        "{error}"
+    );
 
     // Present but blank counts as absent, not as an empty token.
     std::fs::write(&env_file, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=   \n").unwrap();
     assert!(crate::webcodex_cli::server::derive_cloudflare_tunnel_token(&env_file).is_err());
 
     // Surrounding whitespace is never part of the token.
-    std::fs::write(&env_file, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=  spaced-token  \n").unwrap();
+    std::fs::write(
+        &env_file,
+        "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=  spaced-token  \n",
+    )
+    .unwrap();
     assert_eq!(
         crate::webcodex_cli::server::derive_cloudflare_tunnel_token(&env_file).unwrap(),
         "spaced-token"

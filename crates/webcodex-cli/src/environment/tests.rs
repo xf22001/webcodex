@@ -157,8 +157,7 @@ fn tunnel_credentials_require_owner_private_file_and_redact_parse_failure() {
 #[cfg(unix)]
 fn private_credential_file(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
-    let root =
-        std::env::temp_dir().join(format!("webcodex-cli-provider-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("webcodex-cli-provider-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.join("credential.json");
@@ -230,7 +229,10 @@ fn a_credential_file_rejects_a_provider_that_is_not_a_tunnel_transport() {
     // Tunnel profile; the error has to name the two that are accepted.
     let (root, path) = private_credential_file(r#"{"provider":"quick","token":"cf-token"}"#);
     let error = read_tunnel_credentials(&path).unwrap_err();
-    assert!(error.contains("openai") && error.contains("cloudflare"), "{error}");
+    assert!(
+        error.contains("openai") && error.contains("cloudflare"),
+        "{error}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -250,7 +252,10 @@ fn the_provider_flag_is_scoped_to_configure_tunnel() {
     assert!(named.credentials_file.is_some());
     // Naming no provider keeps the historical behaviour: the value is only
     // interpreted by the command that owns it.
-    assert!(input(&["configure-tunnel", "work"]).unwrap().provider.is_none());
+    assert!(input(&["configure-tunnel", "work"])
+        .unwrap()
+        .provider
+        .is_none());
     for command in ["tunnel-status", "remove-tunnel", "status"] {
         assert!(input(&[command, "--provider", "openai"]).is_err());
     }
