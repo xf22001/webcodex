@@ -15,7 +15,7 @@ use super::{
     CommandResult, HotRunnerConfig, PersistentShellManager, ReloadableRunnerConfig, RunnerSink,
     ShellCommandResult, SubmitResultError,
 };
-use crate::handle_file_operation;
+use crate::handle_file_operation_with_artifact_store;
 use crate::runner_protocol::{
     PersistentShellResult, RunnerConfigAction, RunnerConfigOperationRequest,
     RunnerJobUpdateRequest, RunnerRequest, EXTERNAL_SEARCH_REQUEST_PREFIX,
@@ -485,7 +485,11 @@ pub(crate) fn dispatch_request_with_outcome(
                 .map(|_| true)
         }
         RunnerOperation::Computer(operation) => {
-            let result = handle_computer_operation(&operation);
+            let result = if super::computer_session::configured() {
+                super::computer_session::dispatch(&operation)
+            } else {
+                handle_computer_operation(&operation)
+            };
             sink.submit_result_with_metadata(request_id, result, config, runtime)
                 .map(|_| true)
         }
@@ -668,7 +672,11 @@ pub(crate) fn dispatch_request_with_outcome(
             }
         }
         RunnerOperation::File(operation) => {
-            let result = handle_file_operation(policy, &operation);
+            let result = handle_file_operation_with_artifact_store(
+                policy,
+                &operation,
+                Some(project_registry_dir),
+            );
             sink.submit_result_with_metadata(request_id, result, config, runtime)
                 .map(|_| true)
         }

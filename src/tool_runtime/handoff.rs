@@ -344,6 +344,7 @@ impl ToolRuntime {
             warnings.extend(job_warnings.iter().cloned());
         }
 
+        let session_ref = self.session_reference_for_id(&summary.session_id, auth);
         let mut output = json!({
             "session_id": summary.session_id,
             "project": summary.project,
@@ -375,6 +376,10 @@ impl ToolRuntime {
             "jobs": jobs,
             "warnings": warnings,
         });
+
+        if let Some(session_ref) = session_ref.as_deref() {
+            output["session_ref"] = json!(session_ref);
+        }
 
         // --- optional workspace summary ---
         let has_project = project
@@ -488,6 +493,9 @@ impl ToolRuntime {
 
         // --- bounded suggested next actions ---
         output["suggested_next_actions"] = json!(handoff_suggested_next_actions(&output));
+        if let Some(goal_context) = self.recovery_goal_context_for_session(auth, &session_id) {
+            output["goal_context"] = goal_context;
+        }
         output["handoff_brief"] = build_handoff_brief(HandoffBriefInput {
             session_summary: &projection_closeout_session,
             continuation_feedback: output.get("continuation_feedback").unwrap_or(&Value::Null),
@@ -509,8 +517,14 @@ impl ToolRuntime {
                 "project": output["project"],
                 "handoff_brief": output["handoff_brief"],
             });
+            if let Some(session_ref) = output.get("session_ref") {
+                handoff["session_ref"] = session_ref.clone();
+            }
             if let Some(workspace_continuity) = output.get("workspace_continuity") {
                 handoff["workspace_continuity"] = workspace_continuity.clone();
+            }
+            if let Some(goal_context) = output.get("goal_context") {
+                handoff["goal_context"] = goal_context.clone();
             }
             return ToolResult::ok(handoff);
         }

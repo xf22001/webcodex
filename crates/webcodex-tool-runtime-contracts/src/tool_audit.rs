@@ -557,16 +557,17 @@ fn typed_agent_task_request_audit(kind: AgentTaskRequestAudit, arguments: &Value
             );
         }
         AgentTaskRequestAudit::StartEndpointContinuation => {
-            copy_keys(
-                obj,
-                &mut out,
-                &[
-                    "task_id",
-                    "attempt_id",
-                    "assignee_agent_id",
-                    "attempt_controller_generation",
-                ],
-            );
+            for key in [
+                "attempt_ref",
+                "task_id",
+                "attempt_id",
+                "assignee_agent_id",
+                "attempt_controller_generation",
+            ] {
+                if let Some(value) = obj.get(key).filter(|value| !value.is_null()) {
+                    out.insert((*key).to_string(), value.clone());
+                }
+            }
             out.insert(
                 "attempt_fence_present".to_string(),
                 Value::Bool(obj.get("attempt_fence").and_then(Value::as_str).is_some()),
@@ -604,16 +605,17 @@ fn typed_agent_task_request_audit(kind: AgentTaskRequestAudit, arguments: &Value
             copy_keys(obj, &mut out, &["task_id", "attempt_id"]);
         }
         AgentTaskRequestAudit::HeartbeatAttempt => {
-            copy_keys(
-                obj,
-                &mut out,
-                &[
-                    "task_id",
-                    "attempt_id",
-                    "assignee_agent_id",
-                    "attempt_controller_generation",
-                ],
-            );
+            for key in [
+                "attempt_ref",
+                "task_id",
+                "attempt_id",
+                "assignee_agent_id",
+                "attempt_controller_generation",
+            ] {
+                if let Some(value) = obj.get(key).filter(|value| !value.is_null()) {
+                    out.insert((*key).to_string(), value.clone());
+                }
+            }
             out.insert(
                 "attempt_fence_present".to_string(),
                 Value::Bool(obj.get("attempt_fence").and_then(Value::as_str).is_some()),
@@ -632,17 +634,18 @@ fn typed_agent_task_request_audit(kind: AgentTaskRequestAudit, arguments: &Value
             );
         }
         AgentTaskRequestAudit::CompleteAttempt => {
-            copy_keys(
-                obj,
-                &mut out,
-                &[
-                    "task_id",
-                    "attempt_id",
-                    "assignee_agent_id",
-                    "attempt_controller_generation",
-                    "outcome",
-                ],
-            );
+            for key in [
+                "attempt_ref",
+                "task_id",
+                "attempt_id",
+                "assignee_agent_id",
+                "attempt_controller_generation",
+                "outcome",
+            ] {
+                if let Some(value) = obj.get(key).filter(|value| !value.is_null()) {
+                    out.insert((*key).to_string(), value.clone());
+                }
+            }
             out.insert(
                 "attempt_fence_present".to_string(),
                 Value::Bool(obj.get("attempt_fence").and_then(Value::as_str).is_some()),
@@ -2489,6 +2492,79 @@ mod computer_privacy_tests {
     }
 
     #[test]
+    fn agent_task_attempt_ref_audit_keeps_canonical_ids_and_omits_fence() {
+        const PRIVATE_FENCE: &str = "wc_agent_task_fence_PRIVATE_FENCE_MUST_NOT_PERSIST";
+        let by_ref = session_log_arguments_for_tool_request(
+            "start_agent_task_endpoint_continuation",
+            &json!({
+                "attempt_ref": "~ta4",
+                "attempt_fence": PRIVATE_FENCE,
+            }),
+        );
+        assert_eq!(by_ref["attempt_ref"], "~ta4");
+        assert_eq!(by_ref["attempt_fence_present"], true);
+        assert!(by_ref.get("task_id").is_none());
+        assert!(!by_ref.to_string().contains(PRIVATE_FENCE));
+
+        let typed = ToolCall::StartAgentTaskEndpointContinuation {
+            attempt_ref: Some("~ta4".to_string()),
+            task_id: None,
+            attempt_id: None,
+            assignee_agent_id: None,
+            attempt_fence: Some(PRIVATE_FENCE.to_string()),
+            attempt_controller_generation: None,
+        }
+        .session_log_arguments();
+        assert_eq!(typed["attempt_ref"], "~ta4");
+        assert_eq!(typed["attempt_fence_present"], true);
+        assert!(typed.get("task_id").is_none());
+        assert!(!typed.to_string().contains(PRIVATE_FENCE));
+
+        let by_tuple = ToolCall::StartAgentTaskEndpointContinuation {
+            attempt_ref: None,
+            task_id: Some("wc_agent_task_iavN7wEjRWeJq83v".to_string()),
+            attempt_id: Some("wc_agent_task_attempt_iavN7wEjRWeJq83v".to_string()),
+            assignee_agent_id: Some("wc_dagent_iavN7wEjRWeJq83v".to_string()),
+            attempt_fence: Some(PRIVATE_FENCE.to_string()),
+            attempt_controller_generation: Some(2),
+        }
+        .session_log_arguments();
+        assert_eq!(by_tuple["task_id"], "wc_agent_task_iavN7wEjRWeJq83v");
+        assert_eq!(
+            by_tuple["attempt_id"],
+            "wc_agent_task_attempt_iavN7wEjRWeJq83v"
+        );
+        assert_eq!(by_tuple["attempt_controller_generation"], 2);
+        assert_eq!(by_tuple["attempt_fence_present"], true);
+        assert!(by_tuple.get("attempt_ref").is_none());
+        assert!(!by_tuple.to_string().contains(PRIVATE_FENCE));
+
+        let result = session_log_result_for_tool(
+            "start_agent_task_endpoint_continuation",
+            &json!({
+                "execution": {
+                    "task_id": "wc_agent_task_iavN7wEjRWeJq83v",
+                    "attempt_id": "wc_agent_task_attempt_iavN7wEjRWeJq83v",
+                    "wake_id": "wc_wake_iavN7wEjRWeJq83v",
+                    "wake_state": "pending",
+                    "endpoint_id": null,
+                    "endpoint_controller_generation": null
+                },
+                "attempt_fence": PRIVATE_FENCE,
+                "replayed": false,
+                "state_changed": true
+            }),
+        );
+        assert_eq!(result["task_id"], "wc_agent_task_iavN7wEjRWeJq83v");
+        assert_eq!(
+            result["attempt_id"],
+            "wc_agent_task_attempt_iavN7wEjRWeJq83v"
+        );
+        assert_eq!(result["wake_id"], "wc_wake_iavN7wEjRWeJq83v");
+        assert!(!result.to_string().contains(PRIVATE_FENCE));
+    }
+
+    #[test]
     fn agent_task_active_turn_heartbeat_audit_omits_raw_proof_and_attempt_fence() {
         const PRIVATE_FENCE: &str = "wc_agent_task_fence_PRIVATE_FENCE_MUST_NOT_PERSIST";
         const PRIVATE_WAKE: &str = "wc_wake_PRIVATE_WAKE_MUST_NOT_PERSIST";
@@ -2517,11 +2593,12 @@ mod computer_privacy_tests {
         }
 
         let typed = ToolCall::HeartbeatAgentTaskAttempt {
-            task_id: "wc_agent_task_iavN7wEjRWeJq83v".to_string(),
-            attempt_id: "wc_agent_task_attempt_iavN7wEjRWeJq83v".to_string(),
-            assignee_agent_id: "wc_dagent_iavN7wEjRWeJq83v".to_string(),
-            attempt_fence: PRIVATE_FENCE.to_string(),
-            attempt_controller_generation: 9,
+            attempt_ref: None,
+            task_id: Some("wc_agent_task_iavN7wEjRWeJq83v".to_string()),
+            attempt_id: Some("wc_agent_task_attempt_iavN7wEjRWeJq83v".to_string()),
+            assignee_agent_id: Some("wc_dagent_iavN7wEjRWeJq83v".to_string()),
+            attempt_fence: Some(PRIVATE_FENCE.to_string()),
+            attempt_controller_generation: Some(9),
             active_turn_wake_id: Some(PRIVATE_WAKE.to_string()),
             active_turn_consume_token: Some(PRIVATE_TOKEN.to_string()),
         }
@@ -4133,6 +4210,16 @@ impl ToolCallAuditProjection for ToolCall {
                 "wait_secs": wait_secs,
                 "wake_on": wake_on,
             }),
+            Self::WaitForJobReadiness {
+                job_ids,
+                mode,
+                wait_secs,
+            } => serde_json::json!({
+                "mode": mode,
+                "requested_jobs": job_ids.len(),
+                "unique_jobs": job_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+                "wait_secs": wait_secs,
+            }),
             Self::WaitForJobTerminal { job_id, .. } => serde_json::json!({
                 "job_id": job_id,
             }),
@@ -4202,6 +4289,24 @@ impl ToolCallAuditProjection for ToolCall {
                     "head_commit": head_commit,
                 })
             }
+            Self::ReviewChanges {
+                project,
+                scope,
+                paths,
+                max_hunks,
+                max_hunk_lines,
+                max_page_bytes,
+                continuation,
+                ..
+            } => serde_json::json!({
+                "project": project,
+                "scope": scope,
+                "paths": paths,
+                "max_hunks": max_hunks,
+                "max_hunk_lines": max_hunk_lines,
+                "max_page_bytes": max_page_bytes,
+                "continuation_present": continuation.is_some(),
+            }),
             Self::GitLog {
                 project,
                 head_commit,
@@ -4564,6 +4669,7 @@ impl ToolCallAuditProjection for ToolCall {
                 }),
             ),
             Self::StartAgentTaskEndpointContinuation {
+                attempt_ref,
                 task_id,
                 attempt_id,
                 assignee_agent_id,
@@ -4572,6 +4678,7 @@ impl ToolCallAuditProjection for ToolCall {
             } => typed_agent_task_request_audit(
                 AgentTaskRequestAudit::StartEndpointContinuation,
                 &serde_json::json!({
+                    "attempt_ref": attempt_ref,
                     "task_id": task_id,
                     "attempt_id": attempt_id,
                     "assignee_agent_id": assignee_agent_id,
@@ -4614,6 +4721,7 @@ impl ToolCallAuditProjection for ToolCall {
                 }),
             ),
             Self::HeartbeatAgentTaskAttempt {
+                attempt_ref,
                 task_id,
                 attempt_id,
                 assignee_agent_id,
@@ -4624,6 +4732,7 @@ impl ToolCallAuditProjection for ToolCall {
             } => typed_agent_task_request_audit(
                 AgentTaskRequestAudit::HeartbeatAttempt,
                 &serde_json::json!({
+                    "attempt_ref": attempt_ref,
                     "task_id": task_id,
                     "attempt_id": attempt_id,
                     "assignee_agent_id": assignee_agent_id,
@@ -4634,6 +4743,7 @@ impl ToolCallAuditProjection for ToolCall {
                 }),
             ),
             Self::CompleteAgentTaskAttempt {
+                attempt_ref,
                 task_id,
                 attempt_id,
                 assignee_agent_id,
@@ -4646,6 +4756,7 @@ impl ToolCallAuditProjection for ToolCall {
             } => typed_agent_task_request_audit(
                 AgentTaskRequestAudit::CompleteAttempt,
                 &serde_json::json!({
+                    "attempt_ref": attempt_ref,
                     "task_id": task_id,
                     "attempt_id": attempt_id,
                     "assignee_agent_id": assignee_agent_id,
@@ -4720,11 +4831,17 @@ impl ToolCallAuditProjection for ToolCall {
                 }),
             ),
             Self::PresentAgentContinuation {
+                agent_continuation_ref,
                 agent_id,
                 endpoint_id,
                 expected_controller_generation,
-            }
-            | Self::AgentContinuationBind {
+            } => serde_json::json!({
+                "agent_continuation_ref": agent_continuation_ref,
+                "agent_id": agent_id,
+                "endpoint_id": endpoint_id,
+                "expected_controller_generation": expected_controller_generation,
+            }),
+            Self::AgentContinuationBind {
                 agent_id,
                 endpoint_id,
                 expected_controller_generation,
@@ -5757,6 +5874,24 @@ impl ToolCallAuditProjection for ToolCall {
             } => serde_json::json!({
                 "project": project,
                 "session_id": session_id,
+            }),
+            Self::WorkResultActivityDetail {
+                project,
+                server_trace_id,
+            } => serde_json::json!({
+                "project": project,
+                "server_trace_id": server_trace_id,
+            }),
+            Self::WorkResultSendMessage {
+                project,
+                session_id,
+                message,
+                delivery_key,
+            } => serde_json::json!({
+                "project": project,
+                "session_id": session_id,
+                "message_chars": message.chars().count(),
+                "delivery_key_present": !delivery_key.is_empty(),
             }),
             Self::ChangesFileDiff {
                 project,

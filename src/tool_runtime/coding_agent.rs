@@ -1,4 +1,4 @@
-use super::{RecoveryKind, ToolResult, ToolRuntime};
+use super::{RecoveryKind, SuggestedToolCall, ToolResult, ToolRuntime};
 use crate::auth::{AuthContext, AuthKind};
 use crate::json_digest::update_sha256_with_json;
 use crate::runner_http::RunnerFeature;
@@ -179,6 +179,17 @@ impl Default for CodingAgentServerState {
 }
 
 impl CodingAgentServerState {
+    pub(crate) async fn active_runs_for_maintenance(&self, client_id: Option<&str>) -> usize {
+        self.runs
+            .lock()
+            .await
+            .values()
+            .filter(|binding| {
+                client_id.is_none_or(|id| binding.client_id == id)
+                    && !binding.snapshot.state.terminal()
+            })
+            .count()
+    }
     fn with_observation_mac_key(observation_mac_key: [u8; OBSERVATION_MAC_KEY_BYTES]) -> Self {
         Self {
             epoch: webcodex_core::compact::random_bytes(),
@@ -440,10 +451,11 @@ impl ToolRuntime {
                     json!(webcodex_core::coding_agent::safe_provider_inventory(
                         client.coding_agent_providers.as_deref()
                     ));
-                error.output["suggested_call"] = json!({
-                    "tool": "runtime_status",
-                    "arguments": {"client_id": client.client_id, "compact": true},
-                });
+                error.output["suggested_call"] = SuggestedToolCall::fallback_recovery(
+                    "runtime_status",
+                    json!({"client_id": client.client_id, "compact": true}),
+                )
+                .to_value();
                 return Err(error);
             }
         };
@@ -1825,6 +1837,7 @@ mod tests {
 
     fn test_shell_client() -> crate::runner_protocol::RunnerView {
         crate::runner_protocol::RunnerView {
+            computer_session_availability: None,
             client_id: "client".to_string(),
             runner_instance_id: "instance".to_string(),
             display_name: None,

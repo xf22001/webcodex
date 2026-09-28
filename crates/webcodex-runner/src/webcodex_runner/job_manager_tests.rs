@@ -36,6 +36,215 @@ fn retained_terminal_job(job_id: &str, ended_at: i64) -> RunningJob {
 }
 
 #[test]
+fn delivery_queue_orders_semantic_truth_and_drops_stale_output_only_updates() {
+    let mut queue = JobUpdateDeliveryQueue::default();
+    let base = RunnerJobUpdateRequest {
+        client_id: "test-agent".into(),
+        runner_instance_id: "test-instance".into(),
+        job_id: "ordered-delivery".into(),
+        request_id: Some("request-ordered-delivery".into()),
+        update_seq: Some(0),
+        status: "running".into(),
+        stdout_chunk: None,
+        stderr_chunk: None,
+        log_snapshot: None,
+        exit_code: None,
+        duration_ms: None,
+        error: None,
+        command_execution_state: None,
+        validation_progress: None,
+        test_count_evidence: None,
+        activity: None,
+        finished: false,
+    };
+    let mut semantic = base.clone();
+    semantic.update_seq = Some(3);
+    semantic.status = "stop_requested".into();
+    semantic.error = Some("stop requested".into());
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&semantic), true));
+
+    // A: a stale output-only (seq2) that arrives behind newer semantic truth
+    // (seq3) is dropped rather than retained to regress the drained state.
+    let mut stale_heartbeat = semantic.clone();
+    stale_heartbeat.update_seq = Some(2);
+    stale_heartbeat.status = "running".into();
+    stale_heartbeat.error = None;
+    assert!(queue.enqueue(
+        PendingJobUpdateDelivery::from_update(&stale_heartbeat),
+        false
+    ));
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert!(queue.output_only.is_none());
+
+    // B: out-of-order semantic seq5 then seq4 both land, kept ascending.
+    semantic.update_seq = Some(5);
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&semantic), true));
+    semantic.update_seq = Some(4);
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&semantic), true));
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+
+    // C: a duplicate semantic seq4 replaces the existing seq4 in place. The
+    // distinct status/error sentinel proves replacement, not a new item.
+    let mut duplicate = semantic.clone();
+    duplicate.status = "stopped_replaced".into();
+    duplicate.error = Some("replaced sentinel".into());
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&duplicate), true));
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+    let replaced = queue
+        .required
+        .iter()
+        .find(|pending| pending.update_seq == 4)
+        .unwrap();
+    assert_eq!(replaced.status, "stopped_replaced");
+    assert_eq!(replaced.error.as_deref(), Some("replaced sentinel"));
+
+    // D: a genuinely newer output-only (seq6) is coalesced and retained.
+    semantic.update_seq = Some(6);
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&semantic), false));
+    assert_eq!(queue.output_only.as_ref().unwrap().update_seq, 6);
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+
+    // E: newer semantic truth (seq7) clears the older output-only (seq6).
+    semantic.update_seq = Some(7);
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&semantic), true));
+    assert!(queue.output_only.is_none());
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 7]
+    );
+
+    // F: once required holds seq7, an output-only seq7 or seq6 must not
+    // resurrect an older/equal heartbeat behind the semantic truth.
+    let mut backdoor = semantic.clone();
+    backdoor.update_seq = Some(7);
+    backdoor.status = "running".into();
+    backdoor.error = None;
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&backdoor), false));
+    assert!(queue.output_only.is_none());
+    backdoor.update_seq = Some(6);
+    assert!(queue.enqueue(PendingJobUpdateDelivery::from_update(&backdoor), false));
+    assert!(queue.output_only.is_none());
+    assert_eq!(
+        queue
+            .required
+            .iter()
+            .map(|pending| pending.update_seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 7]
+    );
+}
+
+#[test]
+fn delivery_worker_waits_for_sequence_barrier_before_selecting_candidate() {
+    let manager = JobManager::new(1);
+    let job_id = "delivery-sequence-barrier";
+    let mut snapshot = test_job_snapshot(job_id);
+    snapshot.update_seq = 5;
+    lock_unpoison(&manager.jobs).insert(
+        job_id.to_string(),
+        RunningJob {
+            client_id: "test-agent".into(),
+            runner_instance_id: "test-instance".into(),
+            snapshot,
+            child: None,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            slot_reserved: true,
+        },
+    );
+
+    // Model the exact producer gap this queue exists to tolerate: seq5 is
+    // already pending while an older generated seq4 still owns the sequencing
+    // barrier and has not reached the queue yet. The delivery worker must not
+    // let seq5 escape during that window.
+    let delivery_order = lock_unpoison(&manager.job_update_delivery_order);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    manager.install_sink(RunnerSink::WebSocket {
+        tx,
+        client_id: "test-agent".into(),
+        runner_instance_id: "test-instance".into(),
+    });
+
+    let pending = |update_seq, status: &str| PendingJobUpdateDelivery {
+        update_seq,
+        status: status.to_string(),
+        exit_code: None,
+        duration_ms: None,
+        error: None,
+        command_execution_state: None,
+        validation_progress: None,
+        test_count_evidence: None,
+        activity: None,
+        finished: false,
+    };
+    {
+        let mut pending_map = lock_unpoison(&manager.pending_job_updates);
+        assert!(pending_map
+            .entry(job_id.to_string())
+            .or_default()
+            .enqueue(pending(5, "stop_requested"), true));
+    }
+    manager.delivery_signal.notify();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    {
+        let mut pending_map = lock_unpoison(&manager.pending_job_updates);
+        assert!(pending_map
+            .get_mut(job_id)
+            .unwrap()
+            .enqueue(pending(4, "running"), true));
+    }
+    drop(delivery_order);
+    manager.delivery_signal.notify();
+
+    let updates = collect_job_updates(&mut rx, Duration::from_secs(5));
+    assert_eq!(
+        updates
+            .iter()
+            .map(|update| update.update_seq)
+            .collect::<Vec<_>>(),
+        vec![Some(4), Some(5)]
+    );
+    assert_eq!(updates[0].status, "running");
+    assert_eq!(updates[1].status, "stop_requested");
+}
+
+#[test]
 fn job_reconciliation_inventory_prioritizes_active_and_bounds_terminal_history() {
     let manager = JobManager::new(1);
     let now = chrono::Utc::now().timestamp();
@@ -1055,7 +1264,7 @@ fn structured_process_helper() -> Arc<StructuredProcessHelper> {
         .get_or_init(|| {
             let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/fixtures/process_argv_helper.rs");
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::tests::executable_tempdir();
             let output = temp.path().join(format!(
                 "structured-process-helper{}",
                 std::env::consts::EXE_SUFFIX
@@ -3030,6 +3239,14 @@ fn structured_script_job_keeps_its_temporary_file_until_terminal_then_removes_it
         "the Runner-owned script file was removed while its one execution was still running"
     );
     assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            manager.inventory().jobs.iter().any(|snapshot| {
+                snapshot.job_id == "structured-script" && snapshot.status == "running"
+            })
+        }),
+        "structured script never published its running lifecycle after the child started"
+    );
     let active = manager
         .inventory()
         .jobs
@@ -4357,7 +4574,7 @@ fn job_tree_helper() -> Arc<JobTreeHelper> {
         .get_or_init(|| {
             let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../webcodex-process/src/bin/process_tree_helper.rs");
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::tests::executable_tempdir();
             let output = temp.path().join(format!(
                 "process-tree-helper{}",
                 std::env::consts::EXE_SUFFIX
@@ -5099,6 +5316,60 @@ fn runner_recovery_context_accepts_javascript_script_job() {
 }
 
 #[test]
+fn runner_recovery_context_accepts_python_script_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = runner_protocol::ShellScriptPayload {
+        language: runner_protocol::ShellScriptLanguage::Python,
+        script: "print('recovered')\n".to_string(),
+        args: vec!["literal arg".to_string()],
+    };
+    let mut request = shell_job_request(temp.path(), "");
+    request.kind = "start_script_job".to_string();
+    request.timeout_secs = 60;
+    request.script = Some(script.clone());
+    let context = request.job_context.as_mut().unwrap();
+    context.shell = Some("python".to_string());
+    context.command_preview = format!(
+        "python script ({} bytes, {} args)",
+        script.script.len(),
+        script.args.len()
+    );
+    context.structured_execution = Some(runner_protocol::ShellJobStructuredExecutionMetadata {
+        execution_source: "run_script".to_string(),
+        language: Some(runner_protocol::ShellScriptLanguage::Python),
+        script_bytes: Some(script.script.len()),
+        arg_count: script.args.len(),
+        stdin_present: false,
+        validation_identity: None,
+        validation_tool: None,
+        assertion_name: None,
+    });
+    let context = context.clone();
+
+    validate_runner_job_context(&context, &request, "ws-client").unwrap();
+    assert_eq!(context.shell.as_deref(), Some("python"));
+    assert_eq!(
+        context.structured_execution.as_ref().unwrap().language,
+        Some(runner_protocol::ShellScriptLanguage::Python)
+    );
+    assert_eq!(
+        context
+            .structured_execution
+            .as_ref()
+            .unwrap()
+            .execution_source,
+        "run_script"
+    );
+
+    for concrete_runtime in ["python3", "python.exe"] {
+        let mut invalid = context.clone();
+        invalid.shell = Some(concrete_runtime.to_string());
+        let error = validate_runner_job_context(&invalid, &request, "ws-client").unwrap_err();
+        assert!(error.contains("shell is invalid"), "{error}");
+    }
+}
+
+#[test]
 fn runner_recovery_context_accepts_typescript_semantic_identity_only() {
     let temp = tempfile::tempdir().unwrap();
     let script = runner_protocol::ShellScriptPayload {
@@ -5410,7 +5681,11 @@ fn assert_local_job_stdin_isolated(test_name: &str, validation: bool) {
     const FIXTURE_ENV: &str = "WEBCODEX_TEST_JOB_STDIN_FIXTURE";
     const PARENT_INPUT: &str = "parent-liveness-input-must-not-reach-jobs\n";
     if std::env::var(FIXTURE_ENV).as_deref() == Ok(test_name) {
-        let root = tempfile::tempdir().unwrap();
+        let root = if validation {
+            crate::tests::executable_tempdir()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
         let mut shell = ShellConfig::default();
         #[cfg(windows)]
         let probe =

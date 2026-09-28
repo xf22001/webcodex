@@ -421,7 +421,7 @@ ANY/ALL Wait precedence and Host delivery uncertainty remain independent.
 See [Goal workflow continuity dogfood](../agent/goal-workflow-continuity-dogfood.md)
 for deterministic coverage and the distinct manual production-Host boundary.
 
-**G3 — production Host continuation adapter.** G3 is now implemented for explicit Durable Agent Endpoints, independently of Goal. The public `present_agent_continuation` entry requires exact `agent_id`, `endpoint_id`, and `expected_controller_generation`; it does not infer a target from Goal, Workflow Session, Project, ClientWindow, credential, recent Agent, recent Task, or any other ambient state. The associated App bridge is available only on an App-enabled Stateless MCP 2026 request, where its hidden tools are projected with `ui.visibility = ["app"]`; they remain absent from the ordinary model universe, legacy MCP, REST/generic runtime, and Adaptive gateway targets, with a kernel protocol-capability gate as the final backstop.
+**G3 — production Host continuation adapter.** G3 is now implemented for explicit Durable Agent Endpoints, independently of Goal. The public `present_agent_continuation` entry requires either a server-issued `agent_continuation_ref` for one exact generation or the explicit `agent_id`, `endpoint_id`, and `expected_controller_generation` tuple; it does not infer a target from Goal, Workflow Session, Project, ClientWindow, credential, recent Agent, recent Task, or any other ambient state. The ref grants no authority and never retargets after Endpoint replacement. The associated App bridge is available only on an App-enabled Stateless MCP 2026 request, where its hidden tools are projected with `ui.visibility = ["app"]`; they remain absent from the ordinary model universe, legacy MCP, REST/generic runtime, and Adaptive gateway targets, with a kernel protocol-capability gate as the final backstop.
 
 The durable lifecycle remains exactly the pre-existing Agent Endpoint / Wake / Wake Delivery Attempt lifecycle. The App View is only a live Host controller/carrier: `bind` establishes one current process-local View fence, `state` heartbeats and renews the exact Endpoint, `wake_acquire` delegates to the existing claim path, `wake_prepare` crosses the existing durable dispatch fence and revalidates exact binding, and `wake_finish` records only accepted/unknown Host dispatch outcome. Claim fence and binding secret are not durable/model-visible truth; the automatic message carries the exact consume token only through App-private MCP result metadata, not ordinary structured model content or audit/trace payloads. `dispatch_prepared`, `dispatch_accepted`, and `dispatch_unknown` are bounded Host observations, not new authoritative Wake states. Only exact durable `consume_agent_wake` establishes `continuation_consumed`.
 
@@ -780,8 +780,14 @@ backend-response uncertainty.
 ### A4b — TaskAttempt -> Agent Endpoint continuation (implemented)
 
 A4b is implemented through `start_agent_task_endpoint_continuation`. The model supplies
-only the exact `task_id`, `attempt_id`, `assignee_agent_id`, `attempt_fence`, and
-`attempt_controller_generation`; startup never selects an Endpoint. The Store records
+either a server-issued `attempt_ref` or the exact `task_id`, `attempt_id`,
+`assignee_agent_id`, `attempt_fence`, and `attempt_controller_generation`. The ref is a
+communication-principal index pinned to that tuple, including the fence and controller
+generation. It is not a credential. Lookup runs only for the caller, then the existing
+owner, lease, fence, and generation checks run again. A later takeover, expiry,
+replacement, or controller generation change leaves the old ref pinned to the old tuple.
+Heartbeat, completion, and CodingAgent dispatch still take the explicit tuple. Startup
+never selects an Endpoint. The Store records
 one concrete `wc_agent_task_endpoint_executions` row plus one durable
 `agent_task_attempt` Wake. Its Endpoint id/generation are nullable until an existing
 wake-capable carrier later claims the Wake. Attempt controller generation remains

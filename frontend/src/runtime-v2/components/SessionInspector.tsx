@@ -1,6 +1,8 @@
+import { CopyIdentity } from "./ui/CopyIdentity.js";
+import { displayProjectPath } from "../../ui/projectPresentation.js";
 import { AlertTriangle, CircleDot, GitBranch, Monitor } from "lucide-react";
 import { useState } from "react";
-import { absoluteTime, projectDisplayName, relativeTime, shortId } from "../model/format.js";
+import { absoluteTime, projectDisplayName, relativeTime } from "../model/format.js";
 import type { ProjectRow, SessionDetail } from "../model/types.js";
 import type { WorkItem } from "../model/work.js";
 import { activitySignals } from "../model/work.js";
@@ -68,11 +70,12 @@ export function SessionInspector({
 
           <section className="inspector-section">
             <h3>{t("Current work")}</h3>
+            <CopyIdentity key={location.sessionId} value={location.sessionId} label={t("Session")} language={language} />
             <div className="fact-list">
-              <div><span>{t("Project")}</span><strong>{projectDisplayName(project?.name, location.projectId)}</strong></div>
+              <div><span>{t("Project")}</span><strong>{projectDisplayName(project?.name, location.projectId, project?.path)}</strong></div>
               <div><span>{t("Runner")}</span><strong>{location.runner}</strong></div>
               <div><span>{t("Branch")}</span><strong><GitBranch size={13} /> {branch || t("Not checked")}</strong></div>
-              <div className="fact-path"><span>{t("Path")}</span><strong><code title={project?.path}>{project?.path || "—"}</code></strong></div>
+              <div className="fact-path"><span>{t("Path")}</span><strong><code title={displayProjectPath(project?.path)}>{displayProjectPath(project?.path) || "—"}</code></strong></div>
               {signals.map((signal) => (
                 <div className={"fact-activity " + signal.tone} data-testid={"inspector-activity-" + signal.source} key={signal.source}>
                   <span>{t(signal.label)}</span>
@@ -128,7 +131,7 @@ export function SessionInspector({
           <section className="inspector-section">
             <h3>{t("Session identity")}</h3>
             <dl>
-              <div><dt>{t("Session")}</dt><dd><code title={location.sessionId}>{location.sessionId}</code></dd></div>
+              <div><dt>{t("Session")}</dt><dd><CopyIdentity key={location.sessionId} value={location.sessionId} label={t("Session")} language={language} /></dd></div>
               <div><dt>{t("Lifecycle")}</dt><dd>{detail?.lifecycle || item.lifecycle}</dd></div>
               <div><dt>{t("Mode")}</dt><dd>{detail?.mode || item.mode}</dd></div>
               <div><dt>{t("Created")}</dt><dd>{absoluteTime(detail?.created_at)}</dd></div>
@@ -140,7 +143,7 @@ export function SessionInspector({
             <h3>{t("Workspace")}</h3>
             <dl>
               <div><dt>{t("Project")}</dt><dd><code title={location.projectId}>{project?.project_ref || location.projectId}</code></dd></div>
-              <div><dt>{t("Path")}</dt><dd><code title={project?.path}>{project?.path || "—"}</code></dd></div>
+              <div><dt>{t("Path")}</dt><dd><code title={displayProjectPath(project?.path)}>{displayProjectPath(project?.path) || "—"}</code></dd></div>
             </dl>
           </section>
 
@@ -150,7 +153,7 @@ export function SessionInspector({
               <div className="evidence-row static" key={window.client_window_key}>
                 <span><Monitor size={15} /></span>
                 <span>
-                  <strong>Window {shortId(window.client_window_key)}</strong>
+                  <CopyIdentity value={window.client_window_key} label={t("Window")} language={language} />
                   <small>{window.source} · {window.relations.join(", ")}</small>
                   <small>{t("Window last WebCodex activity")} · {absoluteTime(Math.floor((window.last_meaningful_activity_at_ms || window.last_seen_at_ms) / 1000))}</small>
                   <small>{t("Session relation last linked")} · {absoluteTime(Math.floor(window.last_linked_at_ms / 1000))}{window.active_count ? ` · ${window.active_count} ${t("active requests")}` : ""}</small>

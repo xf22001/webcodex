@@ -23,12 +23,13 @@ use crate::tool_runtime::{ToolCall, ToolRuntime};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
 
 mod communication;
 mod goals;
+mod window_collaboration;
 mod workspace;
 
 use communication::{
@@ -64,7 +65,10 @@ const DEFAULT_WINDOW_ACTIVITY_LIMIT: usize = 2_000;
 const MAX_WINDOW_ACTIVITY_LIMIT: usize = 2_000;
 const DEFAULT_WINDOW_SESSION_LIMIT: usize = DEFAULT_MAX_SESSIONS;
 const MAX_WINDOW_SESSION_LIMIT: usize = DEFAULT_MAX_SESSIONS;
+const MAX_WINDOW_JOB_LIMIT: usize = 32;
 const MAX_WINDOW_KEY_CHARS: usize = 128;
+const PRIMARY_WINDOW_ACTIVITY_SCAN_MULTIPLIER: usize = 4;
+const PRIMARY_WINDOW_ACTIVITY_SCAN_FLOOR: usize = 64;
 
 pub(crate) fn routes() -> Router {
     use crate::route_metadata::{api_path, RouteId};
@@ -73,6 +77,14 @@ pub(crate) fn routes() -> Router {
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleRunner)).post(runner))
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleWindows)).post(windows))
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleWindow)).post(window))
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleWindowCollaboration))
+                .post(window_collaboration::list),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleWindowCollaborationPost))
+                .post(window_collaboration::post),
+        )
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleProjects)).post(projects))
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleGoals)).post(goals_handler))
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleGoal)).post(goal_handler))
@@ -235,6 +247,14 @@ struct WindowsInput {
     project: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WindowDetailLevel {
+    Primary,
+    #[default]
+    Full,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WindowInput {
@@ -243,6 +263,8 @@ struct WindowInput {
     activity_limit: Option<usize>,
     #[serde(default)]
     session_limit: Option<usize>,
+    #[serde(default)]
+    detail_level: WindowDetailLevel,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +323,8 @@ struct WorkflowSessionReplaceMessageInput {
 
 #[derive(Debug, Serialize)]
 struct RuntimeConsoleOverview {
+    authenticated_user: Option<String>,
+    effective_config: Value,
     service: Option<String>,
     version: Option<String>,
     build_git_commit: Option<String>,
@@ -312,6 +336,7 @@ struct RuntimeConsoleOverview {
     source_mismatched_runners: usize,
     mixed_builds_present: bool,
     active_jobs: usize,
+    active_windows: usize,
     projects_available: bool,
     visible_projects: usize,
     projects_truncated: bool,
@@ -350,9 +375,17 @@ struct RuntimeConsoleWindowSummary {
     source: String,
     last_seen_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    first_seen_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_tool_call_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_meaningful_activity_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_meaningful: Option<bool>,
     active_count: usize,
     linked_session_count: usize,
     recorder_gap_count: usize,
@@ -361,8 +394,11 @@ struct RuntimeConsoleWindowSummary {
 #[derive(Debug, Serialize)]
 struct RuntimeConsoleWindowDetail {
     client_window_key: String,
+    detail_level: WindowDetailLevel,
     source: String,
     last_seen_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_seen_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_tool_call_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,6 +411,8 @@ struct RuntimeConsoleWindowDetail {
     activity: Vec<RuntimeConsoleWindowActivity>,
     activity_returned: usize,
     activity_truncated: bool,
+    jobs: Vec<RuntimeConsoleWindowJob>,
+    jobs_truncated: bool,
     visibility: RuntimeConsoleWindowVisibility,
 }
 
@@ -388,6 +426,22 @@ struct RuntimeConsoleActiveWindowRequest {
     project: Option<String>,
     started_at_ms: i64,
     elapsed_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeConsoleWindowJob {
+    job_id: String,
+    status: String,
+    active: bool,
+    terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,11 +562,12 @@ struct RuntimeConsoleLocatedSession {
 
 #[derive(Debug, Serialize)]
 struct RuntimeConsoleRunnerSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    computer_session_availability: Option<bool>,
     client_id: String,
     connected: bool,
     status: Option<String>,
     transport: Option<String>,
-    #[serde(rename = "agent_protocol_generation")]
     runner_protocol_generation: Option<u64>,
     last_seen_age_secs: Option<i64>,
     version: Option<String>,
@@ -535,8 +590,10 @@ struct RuntimeConsoleRunnerSummary {
 struct RuntimeConsoleRunner {
     server: Value,
     tool_request_trace_mode: Option<String>,
-    agent_protocol_generation: Option<u64>,
+    runner_protocol_generation: Option<u64>,
     capabilities: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    computer_session_availability: Option<bool>,
     client_id: String,
     connected: bool,
     coding_agent_providers: Vec<webcodex_core::coding_agent::CodingAgentProviderSummary>,
@@ -649,11 +706,24 @@ struct RuntimeConsoleProject {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lineage: Option<RuntimeConsoleProjectLineage>,
     connected: bool,
     #[serde(rename = "agent_status", skip_serializing_if = "Option::is_none")]
     runner_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sessions: Option<WorkflowSessionConsoleAggregate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RuntimeConsoleProjectLineage {
+    ManagedWorktreeSource {
+        source_project_id: String,
+        base_sha: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1089,9 +1159,18 @@ fn scan_runtime_home(
         visible.truncated || visible.projects.len().min(HOME_PROJECT_SCAN_LIMIT) < visible.total;
     let mut session_scan_truncated = running_jobs.truncated;
 
+    let project_ids = visible
+        .projects
+        .iter()
+        .take(HOME_PROJECT_SCAN_LIMIT)
+        .map(|project| project.id.as_str())
+        .collect::<Vec<_>>();
+    let mut lists = runtime
+        .workflow_sessions_console_lists(&project_ids, Some(HOME_SESSIONS_PER_PROJECT_LIMIT));
     for project in visible.projects.iter().take(HOME_PROJECT_SCAN_LIMIT) {
-        let mut list = runtime
-            .workflow_sessions_console_list(&project.id, Some(HOME_SESSIONS_PER_PROJECT_LIMIT));
+        let mut list = lists
+            .remove(&project.id)
+            .expect("visible project has a console list");
         apply_running_jobs_to_list(&mut list, &project.id, running_jobs);
         let aggregate = aggregate_console_list(&list);
         add_console_aggregate(&mut workflow, &aggregate);
@@ -1144,7 +1223,7 @@ fn runner_fleet_rows(
     scan: &RuntimeConsoleHomeScan,
 ) -> Vec<RuntimeConsoleRunnerSummary> {
     let mut rows = runners
-        .get("agents")
+        .get("runners")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1167,6 +1246,9 @@ fn runner_fleet_rows(
                 .unwrap_or_else(empty_console_aggregate);
             sessions.sessions_truncated |= scan.project_scan_truncated;
             Some(RuntimeConsoleRunnerSummary {
+                computer_session_availability: runner_value
+                    .get("computer_session_availability")
+                    .and_then(Value::as_bool),
                 protocol_compatibility: status
                     .and_then(|value| value.get("protocol_compatibility"))
                     .and_then(Value::as_str)
@@ -1179,7 +1261,7 @@ fn runner_fleet_rows(
                 status: safe_string(runner_value.get("status"), MAX_STATUS_CHARS),
                 transport: safe_string(runner_value.get("transport"), MAX_STATUS_CHARS),
                 runner_protocol_generation: runner_value
-                    .get("agent_protocol_generation")
+                    .get("runner_protocol_generation")
                     .and_then(Value::as_u64),
                 last_seen_age_secs: runner_value
                     .get("last_seen_age_secs")
@@ -1273,6 +1355,19 @@ async fn exact_console_project_for_auth(
         .ok_or(RuntimeConsoleError::NotFound)
 }
 
+fn project_lineage(value: &Value) -> Option<RuntimeConsoleProjectLineage> {
+    let lineage = value.get("lineage")?;
+    if lineage.get("kind")?.as_str()? != "managed_worktree_source" {
+        return None;
+    }
+    let source_project_id = bounded_text(lineage.get("source_project_id")?, MAX_PROJECT_ID_CHARS)?;
+    let base_sha = bounded_text(lineage.get("base_sha")?, 64)?;
+    Some(RuntimeConsoleProjectLineage::ManagedWorktreeSource {
+        source_project_id,
+        base_sha,
+    })
+}
+
 fn project_selector_row(value: &Value) -> Option<RuntimeConsoleProject> {
     let id = bounded_text(value.get("id")?, MAX_PROJECT_ID_CHARS)?;
     if !valid_project_id(&id) {
@@ -1289,6 +1384,10 @@ fn project_selector_row(value: &Value) -> Option<RuntimeConsoleProject> {
             .get("name")
             .and_then(|value| bounded_text(value, MAX_PROJECT_NAME_CHARS)),
         path: value.get("path").and_then(bounded_project_path),
+        registration_source: value
+            .get("registration_source")
+            .and_then(|value| bounded_text(value, MAX_STATUS_CHARS)),
+        lineage: project_lineage(value),
         connected: value
             .get("connected")
             .and_then(Value::as_bool)
@@ -1738,13 +1837,27 @@ async fn window_project_visible_cached(
     .await
 }
 
-async fn visible_window_summary_for_auth(
+fn window_summary_internal_tool(tool: Option<&str>) -> bool {
+    matches!(
+        tool,
+        Some(
+            "present_work_result"
+                | "work_result_state"
+                | "work_result_send_message"
+                | "changes_file_diff"
+        )
+    )
+}
+
+async fn visible_window_summary_for_auth_bounded(
     runtime: &ToolRuntime,
     auth: &AuthContext,
     principal: Option<(&str, &str)>,
     window_key: &str,
     visibility_cache: &mut HashMap<String, bool>,
     project_filter: Option<&str>,
+    activity_scan_limit: usize,
+    include_relation_count: bool,
 ) -> Result<Option<RuntimeConsoleWindowSummary>, RuntimeConsoleError> {
     let db = runtime
         .window_activity_db
@@ -1754,10 +1867,10 @@ async fn visible_window_summary_for_auth(
     let events = db.list_window_activity_events_with_code_mode_composition(
         window_key,
         principal,
-        MAX_WINDOW_ACTIVITY_LIMIT,
+        activity_scan_limit,
     );
     #[cfg(not(feature = "experimental-code-mode"))]
-    let events = db.list_window_activity_events(window_key, principal, MAX_WINDOW_ACTIVITY_LIMIT);
+    let events = db.list_window_activity_events(window_key, principal, activity_scan_limit);
     let events = events.map_err(|_| RuntimeConsoleError::Internal)?;
     let caller_principal = if principal.is_none() && !auth.is_admin_caller() {
         crate::tool_runtime::runtime_observation_principal(Some(auth)).ok()
@@ -1767,11 +1880,17 @@ async fn visible_window_summary_for_auth(
     let caller_principal_ref = window_principal_ref(&caller_principal);
     let mut source = None;
     let mut last_seen_at_ms = None;
+    let mut first_seen_at_ms = None;
     let mut last_tool_call_at_ms = None;
     let mut last_meaningful_activity_at_ms = None;
     let mut recorder_gap_count = 0usize;
     let mut last_project = None;
     let mut project_observed_at = i64::MIN;
+    let mut last_activity_name = None;
+    let mut last_activity_status = None;
+    let mut last_activity_meaningful = None;
+    let mut last_activity_observed_at = i64::MIN;
+    let mut latest_active_started_at = i64::MIN;
     for event in events {
         if !console_window_event_visible_cached(
             runtime,
@@ -1786,8 +1905,12 @@ async fn visible_window_summary_for_auth(
         {
             continue;
         }
+        if window_summary_internal_tool(event.operation.as_deref()) {
+            continue;
+        }
         source = Some(event.client_window_source.clone());
         last_seen_at_ms = Some(last_seen_at_ms.unwrap_or(i64::MIN).max(event.ended_at_ms));
+        first_seen_at_ms = Some(first_seen_at_ms.unwrap_or(i64::MAX).min(event.ended_at_ms));
         if event.action_name == "toolsCall" {
             last_tool_call_at_ms = Some(
                 last_tool_call_at_ms
@@ -1795,9 +1918,18 @@ async fn visible_window_summary_for_auth(
                     .max(event.ended_at_ms),
             );
         }
-        if event.meaningful && event.project.is_some() && event.ended_at_ms > project_observed_at {
+        if event.project.is_some() && event.ended_at_ms > project_observed_at {
             last_project = event.project.clone();
             project_observed_at = event.ended_at_ms;
+        }
+        if event.ended_at_ms > last_activity_observed_at {
+            last_activity_name = event
+                .operation
+                .clone()
+                .or_else(|| Some(event.action_name.clone()));
+            last_activity_status = Some(event.status.clone());
+            last_activity_meaningful = Some(event.meaningful);
+            last_activity_observed_at = event.ended_at_ms;
         }
         if event.meaningful {
             last_meaningful_activity_at_ms = Some(
@@ -1815,24 +1947,26 @@ async fn visible_window_summary_for_auth(
     // the cardinality only from the latest activity-page events: a busy Window
     // may have >500 later calls while an older authoritative Session relation
     // remains part of its many-to-many history.
-    let relation_rows = db
-        .list_window_workflow_sessions(window_key, principal, MAX_WINDOW_SESSION_LIMIT)
-        .map_err(|_| RuntimeConsoleError::Internal)?;
     let mut linked_session_count = 0usize;
-    for link in relation_rows {
-        if project_filter.is_some_and(|project| link.project.as_deref() != Some(project)) {
-            continue;
-        }
-        if console_window_project_visible_cached(
-            runtime,
-            auth,
-            principal,
-            visibility_cache,
-            link.project.as_deref(),
-        )
-        .await
-        {
-            linked_session_count = linked_session_count.saturating_add(1);
+    if include_relation_count {
+        let relation_rows = db
+            .list_window_workflow_sessions(window_key, principal, MAX_WINDOW_SESSION_LIMIT)
+            .map_err(|_| RuntimeConsoleError::Internal)?;
+        for link in relation_rows {
+            if project_filter.is_some_and(|project| link.project.as_deref() != Some(project)) {
+                continue;
+            }
+            if console_window_project_visible_cached(
+                runtime,
+                auth,
+                principal,
+                visibility_cache,
+                link.project.as_deref(),
+            )
+            .await
+            {
+                linked_session_count = linked_session_count.saturating_add(1);
+            }
         }
     }
 
@@ -1854,15 +1988,31 @@ async fn visible_window_summary_for_auth(
         {
             continue;
         }
+        if window_summary_internal_tool(request.tool_name.as_deref()) {
+            continue;
+        }
         source = Some(request.client_window_source.clone());
         last_seen_at_ms = Some(
             last_seen_at_ms
                 .unwrap_or(i64::MIN)
                 .max(request.started_at_ms),
         );
-        if request.project.is_some() && request.started_at_ms > project_observed_at {
-            last_project = request.project.clone();
-            project_observed_at = request.started_at_ms;
+        first_seen_at_ms = Some(
+            first_seen_at_ms
+                .unwrap_or(i64::MAX)
+                .min(request.started_at_ms),
+        );
+        if request.started_at_ms >= latest_active_started_at {
+            if request.project.is_some() {
+                last_project = request.project.clone();
+            }
+            last_activity_name = request
+                .tool_name
+                .clone()
+                .or_else(|| Some(request.method.clone()));
+            last_activity_status = Some("running".to_string());
+            last_activity_meaningful = Some(request.is_meaningful());
+            latest_active_started_at = request.started_at_ms;
         }
         active_count = active_count.saturating_add(1);
     }
@@ -1875,12 +2025,48 @@ async fn visible_window_summary_for_auth(
         last_project,
         source: source.unwrap_or_default(),
         last_seen_at_ms,
+        first_seen_at_ms: if include_relation_count {
+            first_seen_at_ms
+        } else {
+            None
+        },
         last_tool_call_at_ms,
         last_meaningful_activity_at_ms,
+        last_activity_name,
+        last_activity_status,
+        last_activity_meaningful,
         active_count,
         linked_session_count,
         recorder_gap_count,
     }))
+}
+
+async fn visible_window_summary_for_auth(
+    runtime: &ToolRuntime,
+    auth: &AuthContext,
+    principal: Option<(&str, &str)>,
+    window_key: &str,
+    visibility_cache: &mut HashMap<String, bool>,
+    project_filter: Option<&str>,
+) -> Result<Option<RuntimeConsoleWindowSummary>, RuntimeConsoleError> {
+    visible_window_summary_for_auth_bounded(
+        runtime,
+        auth,
+        principal,
+        window_key,
+        visibility_cache,
+        project_filter,
+        MAX_WINDOW_ACTIVITY_LIMIT,
+        true,
+    )
+    .await
+}
+
+fn primary_window_activity_scan_limit(activity_limit: usize) -> usize {
+    activity_limit
+        .saturating_mul(PRIMARY_WINDOW_ACTIVITY_SCAN_MULTIPLIER)
+        .max(PRIMARY_WINDOW_ACTIVITY_SCAN_FLOOR)
+        .min(MAX_WINDOW_ACTIVITY_LIMIT)
 }
 
 async fn windows_for_auth(
@@ -1921,8 +2107,12 @@ async fn windows_for_auth(
                     last_project: None,
                     source: summary.client_window_source,
                     last_seen_at_ms: summary.last_seen_at_ms,
+                    first_seen_at_ms: Some(summary.first_seen_at_ms),
                     last_tool_call_at_ms: summary.last_tool_call_at_ms,
                     last_meaningful_activity_at_ms: summary.last_meaningful_activity_at_ms,
+                    last_activity_name: None,
+                    last_activity_status: None,
+                    last_activity_meaningful: None,
                     active_count: 0,
                     linked_session_count: summary.linked_session_count,
                     recorder_gap_count: summary.recorder_gap_count,
@@ -1947,8 +2137,12 @@ async fn windows_for_auth(
                         last_project: None,
                         source: live.client_window_source,
                         last_seen_at_ms: summary.last_seen_at_ms.max(live.last_started_at_ms),
+                        first_seen_at_ms: Some(summary.first_seen_at_ms),
                         last_tool_call_at_ms: summary.last_tool_call_at_ms,
                         last_meaningful_activity_at_ms: summary.last_meaningful_activity_at_ms,
+                        last_activity_name: None,
+                        last_activity_status: None,
+                        last_activity_meaningful: None,
                         active_count: live.active_count,
                         linked_session_count: summary.linked_session_count,
                         recorder_gap_count: summary.recorder_gap_count,
@@ -1963,8 +2157,12 @@ async fn windows_for_auth(
                         last_project: None,
                         source: live.client_window_source,
                         last_seen_at_ms: live.last_started_at_ms,
+                        first_seen_at_ms: Some(live.last_started_at_ms),
                         last_tool_call_at_ms: None,
                         last_meaningful_activity_at_ms: None,
+                        last_activity_name: None,
+                        last_activity_status: Some("running".to_string()),
+                        last_activity_meaningful: None,
                         active_count: live.active_count,
                         linked_session_count: 0,
                         recorder_gap_count: 0,
@@ -2034,6 +2232,11 @@ async fn windows_for_auth(
             .await?
             {
                 row.last_project = observed.last_project;
+                row.last_activity_name = observed.last_activity_name;
+                row.last_activity_status = observed.last_activity_status;
+                row.last_activity_meaningful = observed.last_activity_meaningful;
+                row.active_count = observed.active_count;
+                row.last_seen_at_ms = observed.last_seen_at_ms;
             }
         }
     }
@@ -2053,6 +2256,95 @@ async fn windows_for_auth(
     })
 }
 
+async fn active_window_count_for_auth(
+    runtime: &ToolRuntime,
+    auth: &AuthContext,
+) -> Result<usize, RuntimeConsoleError> {
+    let principal = window_principal_filter(auth)?;
+    let principal_ref = window_principal_ref(&principal);
+    let caller_principal = if principal.is_none() && !auth.is_admin_caller() {
+        crate::tool_runtime::runtime_observation_principal(Some(auth)).ok()
+    } else {
+        None
+    };
+    let caller_principal_ref = window_principal_ref(&caller_principal);
+    let mut visibility_cache = HashMap::new();
+    let mut visible_windows = 0usize;
+
+    for active_window in runtime.window_activity.active_windows(principal_ref) {
+        let mut visible = false;
+        for request in runtime
+            .window_activity
+            .list_for_window(&active_window.client_window_key, principal_ref)
+        {
+            if console_active_window_request_visible_cached(
+                runtime,
+                auth,
+                principal_ref,
+                caller_principal_ref,
+                &mut visibility_cache,
+                &request,
+            )
+            .await
+            {
+                visible = true;
+                break;
+            }
+        }
+        if visible {
+            visible_windows = visible_windows.saturating_add(1);
+        }
+    }
+    Ok(visible_windows)
+}
+
+async fn window_jobs_for_auth(
+    runtime: &ToolRuntime,
+    auth: &AuthContext,
+    activity: &[RuntimeConsoleWindowActivity],
+) -> (Vec<RuntimeConsoleWindowJob>, bool) {
+    let mut seen = HashSet::new();
+    let mut job_ids = Vec::new();
+    for event in activity {
+        for job_id in event
+            .async_job_id
+            .iter()
+            .chain(event.observed_job_ids.iter())
+        {
+            if seen.insert(job_id.clone()) {
+                job_ids.push(job_id.clone());
+            }
+        }
+    }
+    let truncated = job_ids.len() > MAX_WINDOW_JOB_LIMIT;
+    job_ids.truncate(MAX_WINDOW_JOB_LIMIT);
+
+    let access = crate::runner_http::runner_access_from_auth(Some(auth));
+    let mut jobs = Vec::new();
+    for job_id in job_ids {
+        let Ok(job) = runtime
+            .runner_registry
+            .get_job_for_auth(access.as_ref(), &job_id)
+            .await
+        else {
+            continue;
+        };
+        let terminal =
+            RunnerJobLifecycle::from_wire(&job.status).is_ok_and(RunnerJobLifecycle::is_terminal);
+        jobs.push(RuntimeConsoleWindowJob {
+            job_id: job.job_id,
+            status: job.status.clone(),
+            active: webcodex_runner_registry::job_status_is_active(&job.status),
+            terminal,
+            started_at: job.started_at,
+            ended_at: job.ended_at,
+            duration_ms: job.duration_ms,
+            elapsed_secs: job.elapsed_secs,
+        });
+    }
+    (jobs, truncated)
+}
+
 async fn window_for_auth(
     runtime: &ToolRuntime,
     auth: &AuthContext,
@@ -2070,12 +2362,21 @@ async fn window_for_auth(
         .ok_or(RuntimeConsoleError::Internal)?;
     let principal = window_principal_filter(auth)?;
     let principal_ref = window_principal_ref(&principal);
+    let durable_first_seen_at_ms = if auth.is_admin_caller() {
+        db.get_window_activity_summary(&input.client_window_key, principal_ref)
+            .map_err(|_| RuntimeConsoleError::Internal)?
+            .map(|summary| summary.first_seen_at_ms)
+    } else {
+        None
+    };
     let caller_principal = if principal.is_none() && !auth.is_admin_caller() {
         crate::tool_runtime::runtime_observation_principal(Some(auth)).ok()
     } else {
         None
     };
     let caller_principal_ref = window_principal_ref(&caller_principal);
+    let detail_level = input.detail_level;
+    let primary_detail = detail_level == WindowDetailLevel::Primary;
     let activity_limit = input
         .activity_limit
         .unwrap_or(DEFAULT_WINDOW_ACTIVITY_LIMIT)
@@ -2086,15 +2387,46 @@ async fn window_for_auth(
         .clamp(1, MAX_WINDOW_SESSION_LIMIT);
 
     let mut visibility_cache = HashMap::new();
-    let summary = visible_window_summary_for_auth(
-        runtime,
-        auth,
-        principal_ref,
-        &input.client_window_key,
-        &mut visibility_cache,
-        None,
-    )
-    .await?;
+    let summary = if primary_detail {
+        let primary_scan_limit = primary_window_activity_scan_limit(activity_limit);
+        let quick = visible_window_summary_for_auth_bounded(
+            runtime,
+            auth,
+            principal_ref,
+            &input.client_window_key,
+            &mut visibility_cache,
+            None,
+            primary_scan_limit,
+            false,
+        )
+        .await?;
+        if quick.is_some() {
+            quick
+        } else {
+            // A bounded primary scan can land entirely on currently-hidden Project
+            // history. Fall back to the canonical full authority scan rather than
+            // turning a performance optimization into a false 404/existence signal.
+            visible_window_summary_for_auth(
+                runtime,
+                auth,
+                principal_ref,
+                &input.client_window_key,
+                &mut visibility_cache,
+                None,
+            )
+            .await?
+        }
+    } else {
+        visible_window_summary_for_auth(
+            runtime,
+            auth,
+            principal_ref,
+            &input.client_window_key,
+            &mut visibility_cache,
+            None,
+        )
+        .await?
+    };
     let mut active_requests = Vec::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     for request in runtime
@@ -2126,7 +2458,9 @@ async fn window_for_auth(
     let active_count = active_requests.len();
     active_requests.truncate(crate::tool_runtime::MAX_ACTIVE_REQUESTS_PER_WINDOW);
 
-    let activity_scan_limit = if auth.is_admin_caller() {
+    let activity_scan_limit = if primary_detail {
+        primary_window_activity_scan_limit(activity_limit)
+    } else if auth.is_admin_caller() {
         activity_limit
             .saturating_add(1)
             .min(MAX_WINDOW_ACTIVITY_LIMIT)
@@ -2179,43 +2513,64 @@ async fn window_for_auth(
     let activity_truncated = activity.len() > activity_limit || raw_activity_at_cap;
     activity.truncate(activity_limit);
 
-    let session_scan_limit = if auth.is_admin_caller() {
-        session_limit
-            .saturating_add(1)
-            .min(MAX_WINDOW_SESSION_LIMIT)
+    let (jobs, jobs_truncated) = if primary_detail {
+        (Vec::new(), false)
     } else {
-        MAX_WINDOW_SESSION_LIMIT
+        window_jobs_for_auth(runtime, auth, &activity).await
     };
-    let raw_sessions = db
-        .list_window_workflow_sessions(&input.client_window_key, principal_ref, session_scan_limit)
-        .map_err(|_| RuntimeConsoleError::Internal)?;
-    let raw_sessions_at_cap = raw_sessions.len() == session_scan_limit;
-    let mut linked_sessions = Vec::new();
-    for link in raw_sessions {
-        let Some(project) = link.project.as_deref() else {
-            continue;
+
+    let (linked_sessions, sessions_truncated) = if primary_detail {
+        // Activity rows already carry exact Workflow Session links, which is
+        // sufficient for immediate Session chips/filtering. Titles/lifecycle and
+        // canonical relation history are hydrated by the full follow-up request.
+        (Vec::new(), false)
+    } else {
+        let session_scan_limit = if auth.is_admin_caller() {
+            session_limit
+                .saturating_add(1)
+                .min(MAX_WINDOW_SESSION_LIMIT)
+        } else {
+            MAX_WINDOW_SESSION_LIMIT
         };
-        if authorize_exact_project(runtime, auth, project)
-            .await
-            .is_err()
-        {
-            continue;
+        let raw_sessions = db
+            .list_window_workflow_sessions(
+                &input.client_window_key,
+                principal_ref,
+                session_scan_limit,
+            )
+            .map_err(|_| RuntimeConsoleError::Internal)?;
+        let raw_sessions_at_cap = raw_sessions.len() == session_scan_limit;
+        let mut linked_sessions = Vec::new();
+        for link in raw_sessions {
+            let Some(project) = link.project.as_deref() else {
+                continue;
+            };
+            if authorize_exact_project(runtime, auth, project)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let detail = runtime.workflow_session_console_detail(
+                project,
+                &link.workflow_session_id,
+                Some(1),
+            );
+            linked_sessions.push(RuntimeConsoleWindowSession {
+                workflow_session_id: link.workflow_session_id,
+                project: link.project,
+                first_linked_at_ms: link.first_linked_at_ms,
+                last_linked_at_ms: link.last_linked_at_ms,
+                relations: link.relations,
+                relation_count: link.relation_count,
+                title: detail.as_ref().map(|detail| detail.title.clone()),
+                lifecycle: detail.as_ref().map(|detail| detail.lifecycle.clone()),
+            });
         }
-        let detail =
-            runtime.workflow_session_console_detail(project, &link.workflow_session_id, Some(1));
-        linked_sessions.push(RuntimeConsoleWindowSession {
-            workflow_session_id: link.workflow_session_id,
-            project: link.project,
-            first_linked_at_ms: link.first_linked_at_ms,
-            last_linked_at_ms: link.last_linked_at_ms,
-            relations: link.relations,
-            relation_count: link.relation_count,
-            title: detail.as_ref().map(|detail| detail.title.clone()),
-            lifecycle: detail.as_ref().map(|detail| detail.lifecycle.clone()),
-        });
-    }
-    let sessions_truncated = linked_sessions.len() > session_limit || raw_sessions_at_cap;
-    linked_sessions.truncate(session_limit);
+        let sessions_truncated = linked_sessions.len() > session_limit || raw_sessions_at_cap;
+        linked_sessions.truncate(session_limit);
+        (linked_sessions, sessions_truncated)
+    };
 
     if summary.is_none()
         && active_requests.is_empty()
@@ -2242,8 +2597,14 @@ async fn window_for_auth(
         .unwrap_or_else(|| "openai-session".to_string());
     Ok(RuntimeConsoleWindowDetail {
         client_window_key: input.client_window_key,
+        detail_level,
         source,
         last_seen_at_ms,
+        first_seen_at_ms: durable_first_seen_at_ms.or_else(|| {
+            summary
+                .as_ref()
+                .and_then(|summary| summary.first_seen_at_ms)
+        }),
         last_tool_call_at_ms: summary
             .as_ref()
             .and_then(|summary| summary.last_tool_call_at_ms),
@@ -2257,6 +2618,8 @@ async fn window_for_auth(
         linked_sessions,
         activity_returned: activity.len(),
         activity_truncated,
+        jobs,
+        jobs_truncated,
         activity,
         visibility: RuntimeConsoleWindowVisibility {
             scope: if principal.is_none() {
@@ -2455,12 +2818,14 @@ async fn overview_for_auth(
     auth: &AuthContext,
 ) -> Result<RuntimeConsoleOverview, RuntimeConsoleError> {
     require_runtime_read(auth)?;
-    let status = runtime_status_value(runtime, auth, None).await?;
-    let runners_value = list_runners_value(runtime, auth, None).await?;
+    let (status, runners_value) = tokio::try_join!(
+        runtime_status_value(runtime, auth, None),
+        list_runners_value(runtime, auth, None),
+    )?;
     let summary = runners_value.get("summary").unwrap_or(&Value::Null);
     let build = status.get("build").unwrap_or(&Value::Null);
     let status_clients = status
-        .get("agents")
+        .get("runners")
         .and_then(|value| value.get("clients"))
         .and_then(Value::as_array)
         .cloned()
@@ -2513,7 +2878,10 @@ async fn overview_for_auth(
     let online = safe_usize(summary.get("online"));
     let stale = safe_usize(summary.get("stale"));
     let unavailable = runner_count.saturating_sub(online.saturating_add(stale));
+    let active_windows = active_window_count_for_auth(runtime, auth).await?;
     Ok(RuntimeConsoleOverview {
+        authenticated_user: auth.username.clone(),
+        effective_config: runtime.effective_config_status(),
         service: safe_string(status.get("service"), 80),
         version: safe_string(status.get("version"), 80),
         build_git_commit: safe_string(build.get("git_commit"), 80),
@@ -2529,6 +2897,7 @@ async fn overview_for_auth(
                 .get("jobs")
                 .and_then(|value| value.get("active_count")),
         ),
+        active_windows,
         projects_available: project_access,
         visible_projects: visible.as_ref().map_or(0, |value| value.total),
         projects_truncated: home.project_scan_truncated,
@@ -2554,7 +2923,7 @@ async fn runner_for_auth(
     }
     let runners = list_runners_value(runtime, auth, Some(client_id.to_string())).await?;
     let runner_value = runners
-        .get("agents")
+        .get("runners")
         .and_then(Value::as_array)
         .and_then(|values| values.first())
         .ok_or(RuntimeConsoleError::NotFound)?;
@@ -2625,13 +2994,16 @@ async fn runner_for_auth(
             status.pointer("/effective_config/tool_request_trace_mode"),
             16,
         ),
-        agent_protocol_generation: runner_value
-            .get("agent_protocol_generation")
+        runner_protocol_generation: runner_value
+            .get("runner_protocol_generation")
             .and_then(Value::as_u64),
         capabilities: runner_value
             .get("capabilities")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        computer_session_availability: runner_value
+            .get("computer_session_availability")
+            .and_then(Value::as_bool),
         protocol_compatibility: focus
             .get("protocol_compatibility")
             .and_then(Value::as_str)
@@ -3167,12 +3539,32 @@ mod tests {
         private_path: &str,
         auth: Option<&AuthContext>,
     ) {
+        register_project_with_computer_availability(
+            runtime,
+            client_id,
+            project_id,
+            private_path,
+            auth,
+            None,
+        )
+        .await;
+    }
+
+    async fn register_project_with_computer_availability(
+        runtime: &ToolRuntime,
+        client_id: &str,
+        project_id: &str,
+        private_path: &str,
+        auth: Option<&AuthContext>,
+        computer_session_availability: Option<bool>,
+    ) {
         let runner_instance_id = format!("inst-{client_id}");
         let access = auth.map(crate::test_support::runner_access);
         runtime
             .runner_registry
             .register_with_auth(
                 RunnerRegisterRequest {
+                    computer_session_availability,
                     process_started_at: None,
                     build: None,
                     job_concurrency_limit: None,
@@ -3660,6 +4052,8 @@ mod tests {
                     project_ref: None,
                     name: Some(format!("Project {index}")),
                     path: None,
+                    registration_source: None,
+                    lineage: None,
                     connected: true,
                     runner_status: Some("online".to_string()),
                     sessions: None,
@@ -3677,7 +4071,7 @@ mod tests {
         assert!(scan.recent_sessions.scan_truncated);
 
         let rows = runner_fleet_rows(
-            &serde_json::json!({"agents": [{"client_id": "runner", "connected": true}]}),
+            &serde_json::json!({"runners": [{"client_id": "runner", "connected": true}]}),
             &[],
             &scan,
         );
@@ -3706,6 +4100,8 @@ mod tests {
                 project_ref: None,
                 name: Some("Busy".to_string()),
                 path: Some("/root/git/busy".to_string()),
+                registration_source: None,
+                lineage: None,
                 connected: true,
                 runner_status: Some("online".to_string()),
                 sessions: None,
@@ -3726,7 +4122,7 @@ mod tests {
         assert!(!project_sessions.sessions_truncated);
 
         let rows = runner_fleet_rows(
-            &serde_json::json!({"agents": [{"client_id": "runner", "connected": true}]}),
+            &serde_json::json!({"runners": [{"client_id": "runner", "connected": true}]}),
             &[],
             &scan,
         );
@@ -3751,12 +4147,12 @@ mod tests {
             project_scan_truncated: false,
         };
         let runners = serde_json::json!({
-            "agents": [{
+            "runners": [{
                 "client_id": "runner-a",
                 "connected": true,
                 "status": "online",
                 "transport": "websocket",
-                "agent_protocol_generation": 2,
+                "runner_protocol_generation": 2,
                 "last_seen_age_secs": 2,
                 "active_jobs": 3,
                 "job_concurrency": {"limit": 8, "running": 2, "queued": 1},
@@ -3773,6 +4169,9 @@ mod tests {
         let rows = runner_fleet_rows(&runners, &status, &scan);
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
+        let serialized = serde_json::to_value(row).unwrap();
+        assert_eq!(serialized["runner_protocol_generation"], 2);
+        assert!(serialized.get("agent_protocol_generation").is_none());
         assert_eq!(row.client_id, "runner-a");
         assert_eq!(row.active_jobs, 3);
         assert_eq!(row.job_concurrency_limit, Some(8));
@@ -4264,11 +4663,26 @@ mod tests {
             "project_ref": "~p118",
             "name": "WebCodex",
             "path": "/root/git/webcodex",
+            "registration_source": "auto_registered",
+            "lineage": {
+                "kind": "managed_worktree_source",
+                "source_project_id": "webcodex-source",
+                "base_sha": "0123456789abcdef0123456789abcdef01234567"
+            },
             "connected": true,
             "agent_status": "online"
         }))
         .unwrap();
         assert_eq!(row.project_ref.as_deref(), Some("~p118"));
+        assert_eq!(row.registration_source.as_deref(), Some("auto_registered"));
+        assert!(matches!(
+            row.lineage,
+            Some(RuntimeConsoleProjectLineage::ManagedWorktreeSource {
+                ref source_project_id,
+                ref base_sha,
+            }) if source_project_id == "webcodex-source"
+                && base_sha == "0123456789abcdef0123456789abcdef01234567"
+        ));
         assert!(serde_json::to_string(&row)
             .unwrap()
             .contains("\"project_ref\":\"~p118\""));
@@ -4543,6 +4957,7 @@ mod tests {
                 client_window_key: client_window.key().to_string(),
                 activity_limit: None,
                 session_limit: None,
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -4615,6 +5030,7 @@ mod tests {
                 client_window_key: client_window.key().to_string(),
                 activity_limit: None,
                 session_limit: None,
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -4626,6 +5042,18 @@ mod tests {
         );
         let list = windows_for_auth(&runtime, &auth, None, None).await.unwrap();
         assert_eq!(list.windows[0].active_count, detail.active_count);
+        assert_eq!(
+            list.windows[0].last_activity_name.as_deref(),
+            Some("tools/list")
+        );
+        assert_eq!(
+            list.windows[0].last_activity_status.as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            active_window_count_for_auth(&runtime, &auth).await.unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -4658,6 +5086,149 @@ mod tests {
         assert_eq!(row.active_count, 1);
         assert_eq!(row.last_tool_call_at_ms, Some(1_001));
         assert_eq!(row.last_meaningful_activity_at_ms, Some(1_001));
+    }
+
+    #[tokio::test]
+    async fn window_summary_ignores_legacy_work_result_app_polling() {
+        let (_tmp, db, runtime) = test_runtime_with_window_db();
+        let auth = crate::auth::shared_key_context("window-summary-noise");
+        let project = "agent:window-summary-noise:project";
+        register_project(
+            &runtime,
+            "window-summary-noise",
+            "project",
+            "/private/window-summary-noise",
+            Some(&auth),
+        )
+        .await;
+        let window_key = "9".repeat(64);
+        record_window_event_with_activity(
+            &db,
+            &auth,
+            &window_key,
+            Some(project),
+            None,
+            1_000,
+            "read_files",
+            true,
+        );
+        record_window_event_with_activity(
+            &db,
+            &auth,
+            &window_key,
+            Some(project),
+            None,
+            2_000,
+            "work_result_state",
+            false,
+        );
+
+        let list = windows_for_auth(&runtime, &auth, Some(20), None)
+            .await
+            .unwrap();
+        let row = list
+            .windows
+            .iter()
+            .find(|row| row.client_window_key == window_key)
+            .unwrap();
+        assert_eq!(row.last_activity_name.as_deref(), Some("read_files"));
+        assert_eq!(row.last_seen_at_ms, 1_001);
+        assert_eq!(row.first_seen_at_ms, Some(1_001));
+        assert_eq!(row.last_tool_call_at_ms, Some(1_001));
+        assert_eq!(row.last_project.as_deref(), Some(project));
+    }
+
+    #[tokio::test]
+    async fn window_primary_detail_is_bounded_and_defers_secondary_hydration() {
+        let (_tmp, db, runtime) = test_runtime_with_window_db();
+        let auth = crate::auth::shared_key_context("window-primary-detail");
+        let project = "agent:window-primary-detail:webcodex";
+        register_project(
+            &runtime,
+            "window-primary-detail",
+            "webcodex",
+            "/private/window-primary-detail",
+            Some(&auth),
+        )
+        .await;
+        let session = runtime.sessions.start_session(
+            Some(project.to_string()),
+            Some("Primary detail hydration".to_string()),
+        );
+        let window_key = "8".repeat(64);
+
+        record_window_event_with_activity(
+            &db,
+            &auth,
+            &window_key,
+            Some(project),
+            Some((&session.session_id, project)),
+            1_000,
+            "work_on_project",
+            true,
+        );
+        for (index, tool) in [
+            "read_files",
+            "run_shell",
+            "search_project_texts",
+            "cargo_test",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            record_window_event_with_activity(
+                &db,
+                &auth,
+                &window_key,
+                Some(project),
+                None,
+                2_000 + index as i64 * 1_000,
+                tool,
+                true,
+            );
+        }
+
+        let primary = window_for_auth(
+            &runtime,
+            &auth,
+            WindowInput {
+                client_window_key: window_key.clone(),
+                activity_limit: Some(2),
+                session_limit: Some(20),
+                detail_level: WindowDetailLevel::Primary,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(primary.detail_level, WindowDetailLevel::Primary);
+        assert_eq!(primary.activity.len(), 2);
+        assert!(primary.activity_truncated);
+        assert!(primary.linked_sessions.is_empty());
+        assert_eq!(primary.sessions_returned, 0);
+        assert!(primary.jobs.is_empty());
+
+        let full = window_for_auth(
+            &runtime,
+            &auth,
+            WindowInput {
+                client_window_key: window_key,
+                activity_limit: Some(20),
+                session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(full.detail_level, WindowDetailLevel::Full);
+        assert_eq!(full.first_seen_at_ms, Some(1_001));
+        assert_eq!(full.activity.len(), 5);
+        assert!(!full.activity_truncated);
+        assert_eq!(full.linked_sessions.len(), 1);
+        assert_eq!(
+            full.linked_sessions[0].workflow_session_id,
+            session.session_id
+        );
+        assert_eq!(full.linked_sessions[0].project.as_deref(), Some(project));
     }
 
     #[tokio::test]
@@ -4744,6 +5315,7 @@ mod tests {
                 client_window_key: activity_window_key,
                 activity_limit: Some(20),
                 session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -4927,6 +5499,7 @@ mod tests {
                 client_window_key: window_a.clone(),
                 activity_limit: Some(20),
                 session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -4954,6 +5527,7 @@ mod tests {
                         client_window_key: hidden_key.clone(),
                         activity_limit: Some(20),
                         session_limit: Some(20),
+                        detail_level: WindowDetailLevel::Full,
                     },
                 )
                 .await
@@ -5072,6 +5646,7 @@ mod tests {
                 client_window_key: window_key,
                 activity_limit: Some(20),
                 session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -5126,6 +5701,7 @@ mod tests {
                 client_window_key: window_key,
                 activity_limit: Some(20),
                 session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -5247,6 +5823,7 @@ mod tests {
                 client_window_key: window_key,
                 activity_limit: Some(20),
                 session_limit: Some(20),
+                detail_level: WindowDetailLevel::Full,
             },
         )
         .await
@@ -5763,6 +6340,25 @@ mod tests {
         assert_eq!(overview_view.runner_count, 1);
         assert_eq!(overview_view.visible_projects, 1);
         assert!(!overview_view.projects_truncated);
+        assert_eq!(
+            overview_view.effective_config,
+            runtime.effective_config_status()
+        );
+        assert_eq!(
+            overview_view
+                .effective_config
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["auth", "mcp_host", "tool_request_trace_mode"]
+        );
+        assert!(overview_view.effective_config["auth"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(Value::is_boolean));
 
         let runner_view = runner_for_auth(&runtime, &auth_a, "client-a", Some(20))
             .await
@@ -5799,6 +6395,112 @@ mod tests {
             );
         }
         assert!(!serialized.contains("agent:client-b:proj-b"));
+    }
+
+    #[tokio::test]
+    async fn computer_session_availability_reaches_only_authorized_overview_and_runner_detail() {
+        let runtime = test_runtime();
+        let auth_a = crate::auth::shared_key_context("computer-availability-a");
+        let auth_b = crate::auth::shared_key_context("computer-availability-b");
+        for (client, availability, auth) in [
+            ("available", Some(true), &auth_a),
+            ("unavailable", Some(true), &auth_a),
+            ("legacy", None, &auth_a),
+            ("private", Some(true), &auth_b),
+        ] {
+            register_project_with_computer_availability(
+                &runtime,
+                client,
+                "project",
+                "/private/project",
+                Some(auth),
+                availability,
+            )
+            .await;
+        }
+        runtime
+            .runner_registry
+            .update_computer_session_availability(
+                "unavailable",
+                "inst-unavailable",
+                None,
+                Some(false),
+            )
+            .await
+            .unwrap();
+
+        let overview_view = overview_for_auth(&runtime, &auth_a).await.unwrap();
+        let rows = serde_json::to_value(&overview_view).unwrap()["runners"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(rows.len(), 3);
+        let full = runtime
+            .dispatch_with_auth(
+                ToolCall::ListRunners {
+                    client_id: None,
+                    client_ids: None,
+                    include_projects: Some(false),
+                    summary_only: false,
+                },
+                Some(&auth_a),
+            )
+            .await;
+        assert!(full.success);
+        let full_rows = full.output["runners"].as_array().unwrap();
+        assert_eq!(full_rows.len(), 3);
+        for (client, expected) in [
+            ("available", Some(true)),
+            ("unavailable", Some(false)),
+            ("legacy", None),
+        ] {
+            let row = rows.iter().find(|row| row["client_id"] == client).unwrap();
+            let full_row = full_rows
+                .iter()
+                .find(|row| row["client_id"] == client)
+                .unwrap();
+            assert_eq!(
+                row.get("computer_session_availability")
+                    .and_then(Value::as_bool),
+                expected,
+            );
+            assert_eq!(
+                row.get("computer_session_availability").is_some(),
+                expected.is_some()
+            );
+            assert_eq!(
+                full_row
+                    .get("computer_session_availability")
+                    .and_then(Value::as_bool),
+                expected,
+            );
+            assert_eq!(
+                full_row.get("computer_session_availability").is_some(),
+                expected.is_some(),
+            );
+            let detail = runner_for_auth(&runtime, &auth_a, client, Some(20))
+                .await
+                .unwrap();
+            let detail = serde_json::to_value(detail).unwrap();
+            assert_eq!(
+                detail
+                    .get("computer_session_availability")
+                    .and_then(Value::as_bool),
+                expected,
+            );
+            assert_eq!(
+                detail.get("computer_session_availability").is_some(),
+                expected.is_some(),
+            );
+        }
+        assert_eq!(
+            runner_for_auth(&runtime, &auth_a, "private", Some(20))
+                .await
+                .unwrap_err(),
+            RuntimeConsoleError::NotFound,
+        );
+        assert!(rows.iter().all(|row| row["client_id"] != "private"));
+        assert!(full_rows.iter().all(|row| row["client_id"] != "private"));
     }
 
     #[tokio::test]
@@ -6062,10 +6764,13 @@ mod tests {
             .unwrap_err(),
             RuntimeConsoleError::Invalid
         );
-        let openapi = crate::openapi::build_openapi_spec();
-        assert!(openapi["paths"]
-            .get("/api/runtime-console/workflow-session-post-message")
-            .is_none());
+        #[cfg(feature = "legacy-gpt-actions")]
+        {
+            let openapi = crate::openapi::build_openapi_spec();
+            assert!(openapi["paths"]
+                .get("/api/runtime-console/workflow-session-post-message")
+                .is_none());
+        }
     }
 
     #[tokio::test]
@@ -6396,16 +7101,19 @@ mod tests {
         assert!(body.contains("Outcome may have happened"));
         assert!(body.contains("refresh retained messages before retrying"));
 
-        let openapi = crate::openapi::build_openapi_spec();
-        for id in [
-            crate::route_metadata::RouteId::RuntimeConsoleWorkflowSessionWithdrawMessage,
-            crate::route_metadata::RouteId::RuntimeConsoleWorkflowSessionReplaceMessage,
-        ] {
-            let path = crate::route_metadata::path(id);
-            assert!(
-                openapi["paths"].get(path).is_none(),
-                "{path} leaked into OpenAPI"
-            );
+        #[cfg(feature = "legacy-gpt-actions")]
+        {
+            let openapi = crate::openapi::build_openapi_spec();
+            for id in [
+                crate::route_metadata::RouteId::RuntimeConsoleWorkflowSessionWithdrawMessage,
+                crate::route_metadata::RouteId::RuntimeConsoleWorkflowSessionReplaceMessage,
+            ] {
+                let path = crate::route_metadata::path(id);
+                assert!(
+                    openapi["paths"].get(path).is_none(),
+                    "{path} leaked into OpenAPI"
+                );
+            }
         }
     }
 
@@ -6649,5 +7357,163 @@ mod tests {
         assert!(observed.history_lost);
         assert!(observed.has_more);
         assert_eq!(observed.messages.len(), 100);
+    }
+    #[tokio::test]
+    async fn window_collaboration_requires_exact_principal_and_visible_target() {
+        let (_tmp, db, runtime) = test_runtime_with_goal_db();
+        let writer = scoped_oauth(&[
+            SCOPE_RUNTIME_READ,
+            SCOPE_PROJECT_READ,
+            SCOPE_SESSION_COLLABORATE,
+        ]);
+        let mut other = writer.clone();
+        other.api_key_id = Some("another-token".into());
+        let key = "a".repeat(64);
+        record_window_event(&db, &writer, &key, None, None, 5000);
+        assert!(window_collaboration::authorize(&runtime, &writer, &key)
+            .await
+            .is_ok());
+        assert!(window_collaboration::authorize(&runtime, &other, &key)
+            .await
+            .is_err());
+        assert!(
+            window_collaboration::authorize(&runtime, &writer, &"b".repeat(64))
+                .await
+                .is_err()
+        );
+        assert!(
+            window_collaboration::authorize(&runtime, &writer, "bad-window")
+                .await
+                .is_err()
+        );
+        let sent = runtime
+            .post_window_operator_message(
+                &key,
+                None,
+                None,
+                "hello".into(),
+                "console-1".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(sent.success, "{:?}", sent.error);
+        let transcript = runtime.window_collaboration(Some(&key), Some(&writer), 10);
+        assert_eq!(
+            transcript["messages"][0]["message_id"],
+            sent.output["message_id"]
+        );
+        assert!(transcript["messages"][0]["first_projected_at_ms"].is_null());
+        assert!(
+            runtime.window_collaboration(Some(&key), Some(&other), 10)["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let invalid = runtime
+            .post_window_operator_message(
+                &key,
+                Some("wc_sess_invalid"),
+                None,
+                "hello".into(),
+                "console-2".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(!invalid.success);
+        assert_eq!(
+            runtime.window_collaboration(Some(&key), Some(&writer), 10)["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let project = "agent:context-owner:demo";
+        register_project(
+            &runtime,
+            "context-owner",
+            "demo",
+            "/context-project",
+            Some(&writer),
+        )
+        .await;
+        let session = runtime
+            .sessions
+            .start_session(Some(project.into()), Some("context".into()));
+        let unlinked = runtime
+            .post_window_operator_message(
+                &key,
+                Some(&session.session_id),
+                None,
+                "context".into(),
+                "context-key".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(!unlinked.success);
+        record_window_event(
+            &db,
+            &writer,
+            &key,
+            Some(project),
+            Some((&session.session_id, project)),
+            6000,
+        );
+        let webui_style = runtime
+            .post_window_operator_message(
+                &key,
+                Some(&session.session_id),
+                None,
+                "context from WebUI".into(),
+                "context-key-webui".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(webui_style.success, "{:?}", webui_style.error);
+        let mcp_style = runtime
+            .post_window_operator_message(
+                &key,
+                Some(&session.session_id),
+                Some(project),
+                "context from MCP".into(),
+                "context-key-mcp".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(mcp_style.success, "{:?}", mcp_style.error);
+        let mismatch = runtime
+            .post_window_operator_message(
+                &key,
+                Some(&session.session_id),
+                Some("agent:other:project"),
+                "mismatched context".into(),
+                "context-key-mismatch".into(),
+                Some(&writer),
+            )
+            .await;
+        assert!(!mismatch.success);
+        assert_eq!(mismatch.output["failure_kind"], "invalid_context");
+        assert_eq!(mismatch.output["error_kind"], "session_project_mismatch");
+
+        let rows = runtime.window_collaboration(Some(&key), Some(&writer), 10);
+        let context_rows = rows["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["context_session_id"] == session.session_id)
+            .collect::<Vec<_>>();
+        assert_eq!(context_rows.len(), 2);
+        assert!(context_rows
+            .iter()
+            .all(|row| row["context_project"] == project));
+        assert!(context_rows
+            .iter()
+            .all(|row| row["first_projected_at_ms"].is_null()));
+        let rows_again = runtime.window_collaboration(Some(&key), Some(&writer), 10);
+        assert_eq!(rows["messages"], rows_again["messages"]);
+        assert!(runtime
+            .sessions
+            .list_messages(&session.session_id, Default::default())
+            .unwrap()
+            .is_empty());
     }
 }

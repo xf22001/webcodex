@@ -960,3 +960,134 @@ async fn peer_identity_is_principal_scoped_and_does_not_cross_subjects() {
     assert!(!denied.success);
     assert_eq!(denied.output["failure_kind"], "peer_not_found");
 }
+
+#[tokio::test]
+async fn operator_attention_only_model_activity_consumes_and_acknowledges() {
+    let (_temp, db, runtime) = runtime_with_peer_db();
+    let auth = shared_key_auth_context("operator-attention-owner");
+    let window = ClientWindow::for_test("operator-target");
+    let posted = runtime
+        .post_window_operator_message(
+            window.key(),
+            None,
+            None,
+            "Check the tests".into(),
+            "operator-key".into(),
+            Some(&auth),
+        )
+        .await;
+    assert!(posted.success, "{:?}", posted.error);
+    let id = posted.output["message_id"].as_str().unwrap().to_string();
+    for tool in [
+        "present_work_result",
+        "work_result_state",
+        "work_result_send_message",
+        "changes_file_diff",
+    ] {
+        let arguments = match tool {
+            "work_result_send_message" => {
+                json!({"project":"agent:missing:project","message":"another","delivery_key":"another-key"})
+            }
+            "changes_file_diff" => {
+                json!({"project":"agent:missing:project","session_id":format!("wc_sess_{}","a".repeat(32)),"snapshot_id":"invalid","path":"file"})
+            }
+            _ => json!({"project":"agent:missing:project"}),
+        };
+        let outcome = runtime
+            .call_tool_with_invocation_metadata(
+                ToolCallRequest {
+                    tool_name: tool.into(),
+                    arguments,
+                },
+                ToolCallContext {
+                    transport: ToolTransport::Mcp,
+                    session_id: None,
+                    auth: Some(&auth),
+                    window: Some(&window),
+                    record_oauth_scope_denials: false,
+                    host_file_import_trust: HostFileImportTrust::Untrusted,
+                },
+                ToolInvocationMetadata::default(),
+                ToolProtocolCapabilities {
+                    work_result_app: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        if let Some(result) = outcome.result {
+            assert!(result.output.get("operator_messages").is_none(), "{tool}");
+        }
+        let count: i64 = db
+            .conn_for_tests()
+            .query_row(
+                "SELECT projection_count FROM window_operator_messages",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{tool} must not consume attention");
+    }
+    let visible = call_in_window(
+        &runtime,
+        &auth,
+        &window,
+        "runtime_status",
+        json!({}),
+        ToolInvocationMetadata {
+            window_reply: Some(
+                crate::tool_runtime::window_collaboration::ToolCallWindowReply {
+                    reply_to_message_id: id.clone(),
+                    message: "Premature reply".to_string(),
+                },
+            ),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(visible.output["window_reply"]["success"], false);
+    assert_eq!(
+        visible.output["window_reply"]["error_kind"],
+        "operator_message_unavailable"
+    );
+    assert_eq!(
+        visible.output["operator_messages"]["messages"][0]["message_id"],
+        id
+    );
+    assert_eq!(
+        visible.output["operator_messages"]["messages"][0]["source"],
+        "operator"
+    );
+    let ack = call_in_window(
+        &runtime,
+        &auth,
+        &window,
+        "runtime_status",
+        json!({}),
+        ToolInvocationMetadata {
+            ack_session_message_ids: vec![id.clone()],
+            window_reply: Some(
+                crate::tool_runtime::window_collaboration::ToolCallWindowReply {
+                    reply_to_message_id: id.clone(),
+                    message: "Tests are clean.".to_string(),
+                },
+            ),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        ack.output["operator_messages"]["ack"]["accepted_ids"][0],
+        id
+    );
+    assert_eq!(ack.output["window_reply"]["success"], true);
+    assert_eq!(ack.output["window_reply"]["reply_to"], id);
+    assert!(ack.output["window_reply"]["message_id"].is_string());
+    let transcript = runtime.window_collaboration(Some(window.key()), Some(&auth), 10);
+    let messages = transcript["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["source"], "operator");
+    assert_eq!(messages[1]["source"], "window");
+    assert_eq!(messages[1]["message"], "Tests are clean.");
+    assert_eq!(messages[1]["reply_to_message_id"], id);
+    assert!(transcript["messages"][0]["first_ack_observed_at_ms"].is_number());
+}

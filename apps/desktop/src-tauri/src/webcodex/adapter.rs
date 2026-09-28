@@ -19,6 +19,19 @@ pub struct ProjectRuntimeIdentity {
     pub project_id: String,
     pub runtime_project_id: String,
     pub project_path: String,
+    pub runner: RunnerRuntimeIdentity,
+}
+
+impl std::ops::Deref for ProjectRuntimeIdentity {
+    type Target = RunnerRuntimeIdentity;
+    fn deref(&self) -> &Self::Target {
+        &self.runner
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerRuntimeIdentity {
+    pub client_id: String,
     pub runner_config: PathBuf,
     pub user_token_file: PathBuf,
     pub server_url: String,
@@ -422,6 +435,56 @@ impl WebCodexAdapter {
         Ok(output.pairing_code)
     }
 
+    pub async fn login_runner_with_pairing(
+        &mut self,
+        server_url: &str,
+        pairing_code: &str,
+        connections_dir: &Path,
+        cancellation: &CancellationContext,
+    ) -> DesktopResult<RunnerRuntimeIdentity> {
+        validate_server_url(server_url)?;
+        if pairing_code.trim().is_empty() {
+            return Err(DesktopError::new(
+                "pairing_code_invalid",
+                "One-time login code is empty",
+                "Retry local runtime setup.",
+            ));
+        }
+        let webcodex = self.ensure_binaries(cancellation).await?.webcodex.clone();
+        cancellation.check()?;
+        tokio::fs::create_dir_all(connections_dir)
+            .await
+            .map_err(|_| {
+                DesktopError::new(
+                    "desktop_state_unavailable",
+                    "Desktop could not prepare its protected connection directory",
+                    "Check local app-data permissions and retry.",
+                )
+            })?;
+        let mut args = vec![
+            "login".into(),
+            server_url.into(),
+            "--code-stdin".into(),
+            "--dir".into(),
+            connections_dir.to_string_lossy().to_string(),
+            "--overwrite".into(),
+            "--json".into(),
+        ];
+        if server_url_is_loopback(server_url) {
+            args.push("--no-system-proxy".into());
+        }
+        let output: LoginOutput = run_json(
+            &webcodex,
+            &args,
+            Some(pairing_code.as_bytes()),
+            true,
+            CliCommandContext::new("login", "login"),
+            cancellation,
+        )
+        .await?;
+        validate_runner_login_output(&output)
+    }
+
     pub async fn login_with_pairing(
         &mut self,
         server_url: &str,
@@ -484,7 +547,7 @@ impl WebCodexAdapter {
 
     pub async fn runner_ready(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         cancellation: &CancellationContext,
     ) -> DesktopResult<bool> {
         self.runner_ready_with_deadline(identity, cancellation, None)
@@ -493,7 +556,7 @@ impl WebCodexAdapter {
 
     pub async fn runner_ready_until(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         cancellation: &CancellationContext,
         deadline: Deadline,
     ) -> DesktopResult<bool> {
@@ -503,7 +566,7 @@ impl WebCodexAdapter {
 
     pub async fn observe_runner_connection(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         expected_client_id: Option<&str>,
         cancellation: &CancellationContext,
     ) -> DesktopResult<RunnerConnectionObservation> {
@@ -518,7 +581,7 @@ impl WebCodexAdapter {
 
     async fn observe_runner_connection_with_deadline(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         expected_client_id: Option<&str>,
         cancellation: &CancellationContext,
         deadline: Option<Deadline>,
@@ -578,6 +641,7 @@ impl WebCodexAdapter {
         }
         if !same_existing_file(Path::new(&output.config.path), &identity.runner_config)
             || !same_server(&output.config.server_url, &identity.server_url)
+            || output.config.client_id != identity.client_id
             || expected_client_id.is_some_and(|expected| expected != output.config.client_id)
         {
             return Err(DesktopError::new(
@@ -603,7 +667,7 @@ impl WebCodexAdapter {
 
     async fn runner_ready_with_deadline(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         cancellation: &CancellationContext,
         deadline: Option<Deadline>,
     ) -> DesktopResult<bool> {
@@ -614,7 +678,7 @@ impl WebCodexAdapter {
 
     pub async fn activate_project(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         expected_client_id: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,
@@ -643,15 +707,18 @@ impl WebCodexAdapter {
             project_id: output.project.id,
             runtime_project_id: output.project.runtime_project,
             project_path: output.project.path,
-            runner_config: identity.runner_config.clone(),
-            user_token_file: identity.user_token_file.clone(),
-            server_url: identity.server_url.clone(),
+            runner: RunnerRuntimeIdentity {
+                client_id: expected_client_id.to_string(),
+                runner_config: identity.runner_config.clone(),
+                user_token_file: identity.user_token_file.clone(),
+                server_url: identity.server_url.clone(),
+            },
         })
     }
 
     pub async fn legacy_register_project(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         client_id: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,
@@ -681,9 +748,12 @@ impl WebCodexAdapter {
             runtime_project_id: format!("agent:{client_id}:{}", output.project.id),
             project_id: output.project.id,
             project_path: output.project.path,
-            runner_config: identity.runner_config.clone(),
-            user_token_file: identity.user_token_file.clone(),
-            server_url: identity.server_url.clone(),
+            runner: RunnerRuntimeIdentity {
+                client_id: client_id.to_string(),
+                runner_config: identity.runner_config.clone(),
+                user_token_file: identity.user_token_file.clone(),
+                server_url: identity.server_url.clone(),
+            },
         })
     }
 
@@ -887,31 +957,43 @@ fn ops_project_is_ready(
         && candidate.agent_status.as_deref() == Some("online")
 }
 
+fn validate_runner_login_output(output: &LoginOutput) -> DesktopResult<RunnerRuntimeIdentity> {
+    if output.server_url.trim().is_empty()
+        || output.runner_config.trim().is_empty()
+        || output.user_token_file.trim().is_empty()
+        || output.device.trim().is_empty()
+    {
+        return Err(invalid_contract("login"));
+    }
+    Ok(RunnerRuntimeIdentity {
+        client_id: output.device.clone(),
+        runner_config: PathBuf::from(&output.runner_config),
+        user_token_file: PathBuf::from(&output.user_token_file),
+        server_url: output.server_url.clone(),
+    })
+}
+
 fn validate_login_output(
     output: &LoginOutput,
     project: &ProjectSelection,
 ) -> DesktopResult<ProjectRuntimeIdentity> {
-    if output.server_url.trim().is_empty()
-        || output.runner_config.trim().is_empty()
-        || output.user_token_file.trim().is_empty()
-    {
-        return Err(invalid_contract("login"));
-    }
+    let runner = validate_runner_login_output(output)?;
     let registered = output
         .registered_projects
         .iter()
         .find(|candidate| same_path(&candidate.path, &project.path))
         .ok_or_else(|| invalid_contract("login project registration"))?;
-    if registered.id.trim().is_empty() || registered.runtime_project.trim().is_empty() {
+    if registered.id.trim().is_empty()
+        || registered.runtime_project.trim().is_empty()
+        || registered.runtime_project != format!("agent:{}:{}", runner.client_id, registered.id)
+    {
         return Err(invalid_contract("login project identity"));
     }
     Ok(ProjectRuntimeIdentity {
         project_id: registered.id.clone(),
         runtime_project_id: registered.runtime_project.clone(),
         project_path: registered.path.clone(),
-        runner_config: PathBuf::from(&output.runner_config),
-        user_token_file: PathBuf::from(&output.user_token_file),
-        server_url: output.server_url.clone(),
+        runner,
     })
 }
 
@@ -1009,17 +1091,12 @@ fn same_server(left: &str, right: &str) -> bool {
 fn same_existing_file(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
-        _ if cfg!(windows) => display_path(left).eq_ignore_ascii_case(&display_path(right)),
-        _ => left == right,
+        _ => webcodex_runner_config::paths::paths_equal(left, right),
     }
 }
 
 fn same_path(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
-        display_path(Path::new(left)).eq_ignore_ascii_case(&display_path(Path::new(right)))
-    } else {
-        left == right
-    }
+    webcodex_runner_config::paths::paths_equal(Path::new(left), Path::new(right))
 }
 
 fn display_path(path: &Path) -> String {
@@ -1261,9 +1338,12 @@ mod tests {
             project_id: "repo".to_string(),
             runtime_project_id: "agent:desktop:repo".to_string(),
             project_path: r"C:\repo".to_string(),
-            runner_config: PathBuf::from("runner.toml"),
-            user_token_file: PathBuf::from("user-token"),
-            server_url: "https://example.test".to_string(),
+            runner: RunnerRuntimeIdentity {
+                client_id: "desktop".to_string(),
+                runner_config: PathBuf::from("runner.toml"),
+                user_token_file: PathBuf::from("user-token"),
+                server_url: "https://example.test".to_string(),
+            },
         };
         let ready = super::super::models::OpsProject {
             id: "agent:desktop:repo".to_string(),
@@ -1299,11 +1379,29 @@ mod tests {
     }
 
     #[test]
+    fn projectless_login_keeps_runner_identity_without_inventing_a_project() {
+        let output = LoginOutput {
+            server_url: "http://127.0.0.1:7891".to_string(),
+            runner_config: "runner.toml".to_string(),
+            user_token_file: "user-token".to_string(),
+            device: "desktop-mini".to_string(),
+            registered_projects: Vec::new(),
+        };
+        let identity = validate_runner_login_output(&output).unwrap();
+        assert_eq!(identity.client_id, "desktop-mini");
+        assert_eq!(identity.server_url, "http://127.0.0.1:7891");
+        assert_eq!(identity.runner_config, PathBuf::from("runner.toml"));
+        assert_eq!(identity.user_token_file, PathBuf::from("user-token"));
+        assert!(output.registered_projects.is_empty());
+    }
+
+    #[test]
     fn login_identity_fails_closed_when_registered_project_is_missing() {
         let output = LoginOutput {
             server_url: "https://example.com".to_string(),
             runner_config: "runner.toml".to_string(),
             user_token_file: "user-token".to_string(),
+            device: "desktop".to_string(),
             registered_projects: Vec::new(),
         };
         let project = ProjectSelection {
@@ -1345,10 +1443,16 @@ mod tests {
     #[test]
     fn windows_extended_and_display_paths_match_the_same_project() {
         if cfg!(windows) {
-            assert!(same_path(
-                r"\\?\C:\Users\example\repo",
-                r"C:\Users\example\repo"
-            ));
+            for (left, right) in [
+                (r"\\?\C:\Users\example\repo", r"c:/users/example/repo/"),
+                (r"C:\", r"\\?\C:\"),
+                (r"D:\", r"\\?\D:\"),
+                (r"\\SERVER\Share\Repo", r"\\?\UNC\server\share\repo\"),
+                (r"\\server\share", r"\\?\UNC\SERVER\Share\"),
+            ] {
+                assert!(same_path(left, right), "{left} != {right}");
+            }
+            assert!(!same_path(r"C:\repo", r"D:\repo"));
         }
     }
 

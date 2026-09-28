@@ -366,7 +366,8 @@ try {
   for (const width of [1440, 1280, 1024, 768, 390]) {
     const context = await prepare('/runtime/', width, width === 390 ? 844 : 900);
     await page.locator('.work-surface-control').waitFor();
-    assert.equal(await page.getByRole('radio', { name: /Goals/ }).isChecked(), true);
+    assert.equal(await page.getByRole('radio', { name: /Sessions/ }).isChecked(), true);
+    await page.locator('.work-surface-control label').filter({ hasText: 'Goals' }).click();
     await page.getByRole('progressbar', { name: 'Plan' }).waitFor();
     assert.equal(await page.locator('.goal-plan-stepper .mantine-Stepper-step').count(), 3, `Runtime ${width}: Goal plan must use three Mantine steps`);
     assert.equal(await page.locator('.goal-plan-stepper .mantine-Stepper-step[data-progress]').count(), 1, `Runtime ${width}: current Goal step must be distinct`);
@@ -448,10 +449,10 @@ try {
     if (width === 1440) await themeSurfaceAudit('Runtime Overview', 'light');
     await screenshot(`runtime-overview-${width}`);
     if (width === 1440) {
-      await page.getByRole('tab', { name: /Window Activity/ }).click();
-      await page.locator('.window-row').first().waitFor();
-      await page.locator('.window-row').first().click();
-      await page.locator('.window-detail-head').waitFor();
+      await page.getByRole('button', { name: /View activity/ }).click();
+      await page.locator('.window-work-row').first().waitFor();
+      await page.locator('.window-work-row').first().click();
+      await page.locator('.window-work-header').waitFor();
       await themeSurfaceAudit('Runtime Window', 'light');
       const windowCalls = fixture.requests.filter(request => request.route === 'window');
       assert(windowCalls.length > 0);
@@ -467,6 +468,7 @@ try {
     await screenshot(`runtime-dark-${width}`);
     await page.locator(nav).filter({ hasText: 'Work' }).click();
     await page.locator('.work-surface-control').waitFor();
+    await page.locator('.work-surface-control label').filter({ hasText: 'Goals' }).click();
     if (width === 1440 || width === 390) await inspectProjectPicker('.goal-list-filters', `Runtime dark ${width}`, true);
     if (width === 1440) {
       const identityBackground = await page.locator('.goal-inspector .fact-list > div').first().evaluate(el => getComputedStyle(el).backgroundColor);
@@ -515,6 +517,7 @@ try {
   }
   {
     const context = await prepare('/runtime/', 2560, 1229);
+    await page.locator('.work-surface-control label').filter({ hasText: 'Goals' }).click();
     await page.getByRole('progressbar', { name: 'Plan' }).waitFor();
     await screenshot('runtime-goals-2560');
     await page.locator('.work-surface-control label').filter({ hasText: 'Sessions' }).click();
@@ -552,11 +555,11 @@ try {
     assert(Math.max(...surface) < 90, `Runtime dark Activity signals must use a dark surface at 2560 px: ${surface}`);
     report.checks.push('Runtime dark Activity signals at 2560 px');
     await page.locator('.app-nav .nav-button').filter({ hasText: 'Runtime' }).click();
-    await page.getByRole('tab', { name: /Window Activity/ }).click();
-    await page.locator('.window-row').first().click();
+    await page.getByRole('button', { name: /View activity/ }).click();
+    await page.locator('.window-work-row').first().click();
     const windowLayout = await page.evaluate(() => {
-      const workbench = document.querySelector('.windows-workbench').getBoundingClientRect();
-      const selected = document.querySelector('.window-row.selected');
+      const workbench = document.querySelector('.window-primary-workbench').getBoundingClientRect();
+      const selected = document.querySelector('.window-work-row.selected');
       return {
         width: workbench.width,
         background: getComputedStyle(selected).backgroundColor.match(/\d+/g).slice(0, 3).map(Number),

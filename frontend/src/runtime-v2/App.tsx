@@ -37,7 +37,9 @@ import {
   persistAccentPreference,
 } from "../ui/accent.js";
 import { locateSession } from "./api/sessions.js";
+import { projectFamilyId } from "../ui/projectPresentation.js";
 import { RuntimeV2Client } from "./api/client.js";
+import { SessionWindowNavigation } from "./components/SessionWindowNavigation.js";
 import { AuthGate } from "./components/AuthGate.js";
 import { BrandMark } from "./components/ui/BrandMark.js";
 import { AccentPicker } from "./components/ui/AccentPicker.js";
@@ -52,7 +54,7 @@ import { RuntimeView } from "./views/RuntimeView.js";
 import { WorkView } from "./views/WorkView.js";
 
 type PrimaryView = "work" | "projects" | "runtime";
-type RuntimeTarget = { mode: "windows"; windowKey: string } | { mode: "agents"; agentId: string };
+type RuntimeTarget = { mode: "agents"; agentId: string };
 const VIEW_KEY = "webcodex.runtime.v2.view.v1";
 const BUCKET_PRIORITY: Record<WorkBucket, number> = { running: 0, attention: 1, active: 2, recent: 3 };
 
@@ -81,7 +83,10 @@ export function App() {
   const [token, setToken] = useState(initialToken);
   const [view, setViewState] = useState<PrimaryView>(initialView);
   const [selected, setSelected] = useState<SessionLocation | null>(null);
-  const [workSurface, setWorkSurface] = useState<WorkSurface>("goals");
+  const [workSurface, setWorkSurface] = useState<WorkSurface>("windows");
+  const [workWindowTarget, setWorkWindowTarget] = useState<{ windowKey: string; sessionId: string } | null>(null);
+  const [sessionNavigation, setSessionNavigation] = useState<SessionLocation | null>(null);
+  const closeSessionNavigation = useCallback(() => setSessionNavigation(null), []);
   const [runtimeTarget, setRuntimeTarget] = useState<RuntimeTarget | null>(null);
   const [language, setLanguage] = useState<RuntimeLanguage>(loadLanguagePreference);
   const [appearance, setAppearance] = useState<AppearancePreference>(loadAppearancePreference);
@@ -111,6 +116,8 @@ export function App() {
     client.clearToken();
     setToken("");
     setSelected(null);
+    setSessionNavigation(null);
+    setWorkWindowTarget(null);
     setNotice(message);
   }, [client]);
 
@@ -120,6 +127,10 @@ export function App() {
 
   const overviewState = useRuntimeOverview(client, Boolean(token), handleUnauthorized);
   const overview = overviewState.data;
+  const visibleProjectFamilyCount = useMemo(
+    () => new Set((overview?.projects || []).map(projectFamilyId)).size,
+    [overview?.projects],
+  );
 
   const workItems = useMemo(() => {
     const rows = overview?.recent_sessions.sessions || [];
@@ -137,14 +148,17 @@ export function App() {
     try { window.localStorage.setItem(VIEW_KEY, next); } catch { /* Preference remains in memory. */ }
   }, []);
 
-  const openSession = useCallback((location: SessionLocation) => {
+  const openSession = useCallback((location: SessionLocation) => setSessionNavigation(location), []);
+
+  const openSessionRecord = useCallback((location: SessionLocation) => {
+    setSessionNavigation(null);
     setSelected(location);
-    setWorkSurface("sessions");
+    setWorkSurface("session");
     setView("work");
   }, [setView]);
 
   const openWork = useCallback(() => {
-    setWorkSurface("goals");
+    setWorkSurface("windows");
     setView("work");
   }, [setView]);
 
@@ -153,21 +167,12 @@ export function App() {
     setView("runtime");
   }, [setView]);
 
-  const openWindow = useCallback((windowKey: string) => {
-    setRuntimeTarget({ mode: "windows", windowKey });
-    setView("runtime");
+  const openWindow = useCallback((windowKey: string, sessionId = "") => {
+    setSessionNavigation(null);
+    setWorkWindowTarget({ windowKey, sessionId });
+    setWorkSurface("windows");
+    setView("work");
   }, [setView]);
-
-  useEffect(() => {
-    if (selected || !workItems.length) return;
-    const first = workItems[0];
-    setSelected({
-      projectId: first.projectId,
-      projectName: first.projectName,
-      runner: first.runner,
-      sessionId: first.sessionId,
-    });
-  }, [selected, workItems]);
 
   useEffect(() => {
     document.documentElement.lang = language;
@@ -279,9 +284,6 @@ export function App() {
     );
   }
 
-  const runningCount = workItems.filter((item) => item.bucket === "running").length;
-  const attentionCount = workItems.filter((item) => item.bucket === "attention").length;
-
   return (
     <div className={"app-shell ui-canvas" + (sidebarCollapsed ? " sidebar-collapsed" : "")}>
       <aside className="app-nav ui-glass">
@@ -307,13 +309,13 @@ export function App() {
             {view === "work" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
             <span className="nav-icon"><BriefcaseBusiness size={18} /></span>
             <span className="nav-label">{translate("Work", language)}</span>
-            <small>{runningCount || attentionCount ? runningCount + attentionCount : ""}</small>
+            <small>{overview?.active_windows || ""}</small>
           </button>
           <button className={"nav-button " + (view === "projects" ? "active" : "")} type="button" onClick={() => setView("projects")} aria-current={view === "projects" ? "page" : undefined} title={translate("Projects", language)}>
             {view === "projects" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
             <span className="nav-icon"><FolderKanban size={18} /></span>
             <span className="nav-label">{translate("Projects", language)}</span>
-            <small>{overview?.visible_projects || ""}</small>
+            <small>{visibleProjectFamilyCount || ""}</small>
           </button>
           <button className={"nav-button " + (view === "runtime" ? "active" : "")} type="button" onClick={() => setView("runtime")} aria-current={view === "runtime" ? "page" : undefined} title={translate("Runtime", language)}>
             {view === "runtime" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
@@ -355,6 +357,10 @@ export function App() {
             onOpenWindow={openWindow}
             onOpenSession={openSession}
             onLocateSession={locateExactSession}
+            onOpenSessionRecord={openSessionRecord}
+            requestedWindowKey={workWindowTarget?.windowKey}
+            requestedSessionId={workWindowTarget?.sessionId}
+            onRequestedWindowConsumed={() => setWorkWindowTarget(null)}
             onUnauthorized={handleUnauthorized}
           />
         )}
@@ -364,6 +370,7 @@ export function App() {
             language={language}
             runners={overview?.runners || []}
             onOpenSession={openSession}
+            onOpenWindow={openWindow}
             onUnauthorized={handleUnauthorized}
           />
         )}
@@ -373,14 +380,23 @@ export function App() {
             language={language}
             overview={overview}
             overviewAvailability={overviewState.availability}
-            projects={overview?.projects || []}
-            onOpenSession={openSession}
+            onRefresh={overviewState.refresh}
+            updatedAt={overviewState.updatedAt}
+            refreshing={overviewState.refreshing}
+            onOpenWork={() => { setWorkSurface("windows"); setView("work"); }}
             onUnauthorized={handleUnauthorized}
             target={runtimeTarget}
             onTargetConsumed={() => setRuntimeTarget(null)}
           />
         )}
       </section>
+
+      {sessionNavigation && <SessionWindowNavigation
+        key={sessionNavigation.projectId + ":" + sessionNavigation.sessionId}
+        client={client} location={sessionNavigation} language={language}
+        onClose={closeSessionNavigation} onOpenWindow={openWindow}
+        onOpenRecord={openSessionRecord} onUnauthorized={handleUnauthorized}
+      />}
 
       <nav className="mobile-primary-nav ui-glass" aria-label={translate("Workspace views", language)}>
         <button className={view === "work" ? "active" : ""} type="button" onClick={openWork} aria-current={view === "work" ? "page" : undefined}><BriefcaseBusiness size={18} /><span>{translate("Work", language)}</span></button>

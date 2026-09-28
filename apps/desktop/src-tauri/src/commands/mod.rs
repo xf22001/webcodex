@@ -273,6 +273,36 @@ pub async fn configure_local_setup(
 }
 
 #[tauri::command]
+pub async fn repair_environment_user_credential(
+    request: crate::models::EnvironmentUserCredentialRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(
+        &app,
+        state.repair_environment_user_credential(request).await,
+    )
+}
+
+#[tauri::command]
+pub async fn environment_service_action(
+    request: crate::models::EnvironmentServiceRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.environment_service_action(request).await)
+}
+
+#[tauri::command]
+pub async fn configure_environment(
+    request: crate::models::EnvironmentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.configure_environment(request).await)
+}
+
+#[tauri::command]
 pub async fn activate_local_project(
     request: ProjectRequest,
     app: AppHandle,
@@ -374,6 +404,15 @@ pub async fn update_runner_settings(
 ) -> Result<DesktopStateSnapshot, DesktopError> {
     project_state_result(&app, state.update_runner_settings(request).await)
 }
+
+#[tauri::command]
+pub async fn update_runner_allowed_roots(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::webcodex::settings::AllowedRootsUpdate,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.update_runner_allowed_roots(request).await)
+}
 #[tauri::command]
 pub async fn restart_owned_runner(
     app: AppHandle,
@@ -386,9 +425,29 @@ pub async fn restart_owned_runner(
 #[tauri::command]
 pub fn get_computer_permissions(
     app: AppHandle,
+    state: State<'_, AppState>,
+) -> crate::platform::permissions::ComputerPermissions {
+    computer_permissions_snapshot(&app, &state)
+}
+
+#[tauri::command]
+pub fn request_computer_permission(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: crate::platform::permissions::PermissionAction,
+) -> Result<crate::platform::permissions::ComputerPermissions, DesktopError> {
+    let runner_path = runner_execution_path(&state);
+    crate::platform::permissions::request(action, runner_path.as_deref())?;
+    Ok(computer_permissions_snapshot(&app, &state))
+}
+
+fn computer_permissions_snapshot(
+    app: &AppHandle,
+    state: &AppState,
 ) -> crate::platform::permissions::ComputerPermissions {
     use tauri::Manager;
-    let mut permissions = crate::platform::permissions::probe();
+    let runner_path = runner_execution_path(state);
+    let mut permissions = crate::platform::permissions::probe_for_runner(runner_path.as_deref());
     permissions.foreground = app
         .get_webview_window(crate::desktop_shell::MAIN_WINDOW_LABEL)
         .is_some_and(|window| {
@@ -396,15 +455,15 @@ pub fn get_computer_permissions(
         });
     permissions
 }
-#[tauri::command]
-pub fn request_computer_permission(
-    app: AppHandle,
-    action: crate::platform::permissions::PermissionAction,
-) -> Result<crate::platform::permissions::ComputerPermissions, DesktopError> {
-    crate::platform::permissions::request(action)?;
-    Ok(get_computer_permissions(app))
-}
 
+fn runner_execution_path(state: &AppState) -> Option<std::path::PathBuf> {
+    let directory = state.get_state().binaries?.directory;
+    #[cfg(target_os = "windows")]
+    let binary = "webcodex-runner.exe";
+    #[cfg(not(target_os = "windows"))]
+    let binary = "webcodex-runner";
+    Some(std::path::PathBuf::from(directory).join(binary))
+}
 #[tauri::command]
 pub async fn add_runner_plugin(
     app: AppHandle,
@@ -524,6 +583,47 @@ pub async fn check_for_updates(
     state.check_for_updates(manual).await
 }
 #[tauri::command]
+pub fn get_update_download_state(state: State<'_, AppState>) -> crate::updates::DownloadStatus {
+    state.get_update_download_state()
+}
+
+#[tauri::command]
+pub async fn download_update(
+    version: String,
+    state: State<'_, AppState>,
+) -> DesktopResult<crate::updates::UpdateStatus> {
+    state.download_update(&version).await
+}
+
+#[tauri::command]
+pub fn cancel_update_download(state: State<'_, AppState>) -> crate::updates::DownloadStatus {
+    state.cancel_update_download()
+}
+
+#[tauri::command]
+pub async fn set_automatic_update_download(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> DesktopResult<crate::updates::UpdateStatus> {
+    state.set_automatic_update_download(enabled).await
+}
+
+#[tauri::command]
+pub async fn install_verified_update(
+    version: String,
+    confirmed: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> DesktopResult<()> {
+    if state.install_verified_update(&version, confirmed).await? {
+        // Only the explicit Install confirmation authorizes this exit. The
+        // normal exit path closes Desktop-owned processes, not persistent services.
+        app.exit(0);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn remind_update_later(
     state: State<'_, AppState>,
 ) -> DesktopResult<crate::updates::UpdateStatus> {
@@ -539,4 +639,21 @@ pub fn get_desktop_build_info() -> webcodex_core::desktop_runtime_contract::Mach
     let mut info = webcodex_core::build_info::machine_build_info("webcodex-desktop");
     info.version = env!("CARGO_PKG_VERSION").to_string();
     info
+}
+
+#[tauri::command]
+pub async fn prepare_project_unregister(
+    project: String,
+    state: State<'_, AppState>,
+) -> Result<crate::project_inventory::UnregisterObservation, DesktopError> {
+    state.prepare_project_unregister(&project).await
+}
+
+#[tauri::command]
+pub async fn unregister_project(
+    request: crate::project_inventory::UnregisterRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.unregister_project(request).await)
 }

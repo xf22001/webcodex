@@ -15,22 +15,21 @@ import { absoluteTime, relativeTime, shortId } from "../model/format.js";
 import { activitySignals, groupRecentProgress, type WorkItem } from "../model/work.js";
 import type { SessionLocation, SessionWorkspaceState } from "../state/useSessionWorkspace.js";
 import { ProgressCluster } from "./ProgressCluster.js";
-import { SessionComposer } from "./SessionComposer.js";
+import { SessionCollaboration } from "./SessionCollaboration.js";
 
-const MUTABLE_MESSAGE_KINDS = new Set(["note", "guidance", "question", "todo"]);
 
 type Props = {
   item: WorkItem;
   location: SessionLocation;
   session: SessionWorkspaceState;
   language: RuntimeLanguage;
+  onOpenWindow?: (windowKey: string) => void;
 };
 
-export function SessionExecution({ item, location, session, language }: Props) {
+export function SessionExecution({ item, location, session, language, onOpenWindow }: Props) {
   const t = (value: string) => translate(value, language);
   const progress = groupRecentProgress(session.detail);
   const signals = activitySignals(session.detail, item);
-  const messagesById = new Map((session.messages?.messages || []).map((message) => [message.message_id, message]));
   const [centerTab, setCenterTab] = useState<"workflow" | "collaboration">("workflow");
 
   useEffect(() => {
@@ -93,6 +92,14 @@ export function SessionExecution({ item, location, session, language }: Props) {
       >
         <div className="timeline-measure">
           <div className="task-run">
+            <div className="session-work-context">
+              <span title={location.projectId}>{t("Project")}: {location.projectName}</span>
+              <code title={location.sessionId}>{shortId(location.sessionId)}</code>
+              <span title={absoluteTime(item.updatedAt)}>{t("Updated")}: {absoluteTime(item.updatedAt)}</span>
+              {session.detail?.linked_windows.map((row) => <button className="text-button" type="button" key={row.client_window_key} disabled={!onOpenWindow} onClick={() => onOpenWindow?.(row.client_window_key)} title={row.client_window_key}>
+                <Monitor size={14} /> {t("Window")} {shortId(row.client_window_key)} · {relativeTime(row.last_seen_at_ms)}
+              </button>)}
+            </div>
             <section className="task-prompt">
               <div className="task-prompt-label"><MessageSquare size={14} /> {t("Task")}</div>
               <p>{item.title}</p>
@@ -202,86 +209,7 @@ export function SessionExecution({ item, location, session, language }: Props) {
         aria-labelledby="collaboration-tab"
         hidden={centerTab !== "collaboration"}
       >
-        <div className="collaboration-message-scroll" aria-label={t("Session communication")}>
-          <div className="message-list">
-            {session.messages?.messages.map((message) => (
-              <article className="retained-message" key={message.message_id}>
-                <div className="message-meta">
-                  <strong>{message.author_session_id ? t("Agent / Session") : t("Retained message")}</strong>
-                  <span className="message-kind">{t(message.kind)}</span>
-                  {message.requires_ack && (
-                    <span className={"message-state " + (message.first_ack_observed_at ? "good" : "warn")}>
-                      {t(message.first_ack_observed_at ? "ACK observed" : "Awaiting ACK")}
-                    </span>
-                  )}
-                  {message.status !== "open" && (
-                    <span className="message-state resolved">
-                      {t(message.closure_kind === "withdrawn" ? "Withdrawn" : message.closure_kind === "superseded" ? "Edited" : "Resolved")}
-                    </span>
-                  )}
-                  <time title={absoluteTime(message.created_at)}>{relativeTime(message.created_at)}</time>
-                </div>
-                {message.reply_to && (
-                  <div className="message-reply-context">
-                    <span>{t("Reply to")}</span>
-                    <span>{messagesById.get(message.reply_to)?.message.slice(0, 120) || shortId(message.reply_to)}</span>
-                  </div>
-                )}
-                <p>{message.message}</p>
-                {message.first_ack_observed_at && (
-                  <div className="message-observation-note">
-                    {t("ACK first observed")} · <time title={absoluteTime(message.first_ack_observed_at)}>{relativeTime(message.first_ack_observed_at)}</time>
-                  </div>
-                )}
-                {message.resolution && (
-                  <div className="message-resolution">
-                    <div>
-                      <strong>{t("Agent resolution")}</strong>
-                      {message.resolved_at && <time title={absoluteTime(message.resolved_at)}>{relativeTime(message.resolved_at)}</time>}
-                    </div>
-                    <p>{message.resolution}</p>
-                  </div>
-                )}
-                <div className="message-actions">
-                  <button
-                    type="button"
-                    onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-reply-message", {
-                      detail: { messageId: message.message_id, message: message.message },
-                    }))}
-                  >
-                    {t("Reply")}
-                  </button>
-                  {message.status === "open" && MUTABLE_MESSAGE_KINDS.has(message.kind) && session.mutationAllowed !== false && (
-                    <span className="message-mutable-hint">{t("Open · editable")}</span>
-                  )}
-                  {message.status === "open" && MUTABLE_MESSAGE_KINDS.has(message.kind) && session.mutationAllowed !== false && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-edit-message", {
-                          detail: { messageId: message.message_id, message: message.message },
-                        }))}
-                      >
-                        {t("Edit")}
-                      </button>
-                      <button type="button" onClick={() => void session.withdraw(message.message_id)}>{t("Withdraw")}</button>
-                    </>
-                  )}
-                </div>
-              </article>
-            ))}
-            {session.messagesAvailability === "loading" && !session.messages && (
-              <p className="muted-copy">{t("Loading Session messages…")}</p>
-            )}
-            {session.messagesAvailability === "denied" && (
-              <p className="muted-copy">{t("Session messages are not available with this access key.")}</p>
-            )}
-            {session.messages?.messages.length === 0 && (
-              <p className="muted-copy">{t("No retained Session messages.")}</p>
-            )}
-          </div>
-        </div>
-        <SessionComposer location={location} session={session} language={language} />
+        <SessionCollaboration location={location} session={session} language={language} />
       </section>
     </main>
   );

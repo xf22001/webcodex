@@ -152,7 +152,7 @@ impl AppState {
         let snapshot = self.get_state();
         let permissions = crate::platform::permissions::probe();
         let permissions = serde_json::json!({"supported":permissions.supported,"desktop_accessibility":permissions.desktop_accessibility,"desktop_screen_recording":permissions.desktop_screen_recording});
-        let report = diagnostics::report(
+        let mut report = diagnostics::report(
             &snapshot,
             &settings,
             runner.as_ref(),
@@ -161,6 +161,19 @@ impl AppState {
             &self.activity.snapshot(),
             permissions,
         );
+        if let Some(report) = report.as_object_mut() {
+            report.insert(
+                "desktop_data_dir".into(),
+                serde_json::json!({
+                    "source": self.desktop_data_dir.source.label(),
+                    "physical_resolution": if self.desktop_data_dir.physical_resolution_changed {
+                        "changed"
+                    } else {
+                        "unchanged"
+                    }
+                }),
+            );
+        }
         let markdown = diagnostics::report_markdown(&report);
         Ok(DiagnosticSnapshot {
             schema_version: 1,
@@ -303,6 +316,18 @@ impl AppState {
                     "https://github.com/yyjeqhc/webcodex/issues/new",
                 );
             }
+            ResourceKind::Contributing => {
+                drop(slot);
+                return crate::platform::opener::url(
+                    "https://github.com/yyjeqhc/webcodex/blob/main/CONTRIBUTING.md",
+                );
+            }
+            ResourceKind::DesktopDevelopment => {
+                drop(slot);
+                return crate::platform::opener::url(
+                    "https://github.com/yyjeqhc/webcodex/blob/main/docs/DESKTOP_DEVELOPMENT.md",
+                );
+            }
             ResourceKind::AppData => core.data_dir.clone(),
             ResourceKind::ServerConfiguration => core
                 .managed_server_environment()?
@@ -415,7 +440,7 @@ impl DesktopCore {
         &mut self,
         cancellation: &CancellationContext,
     ) -> DesktopResult<()> {
-        let identity = identity_from_config(&self.config)
+        let identity = runner_identity_from_config(&self.config)
             .ok_or_else(|| diagnostics::diagnostic_error("runtime_identity_unavailable"))?;
         self.adapter.ensure_binaries(cancellation).await?;
         runtime_selection::verify_resolved_files(self.adapter.binaries()?).await?;

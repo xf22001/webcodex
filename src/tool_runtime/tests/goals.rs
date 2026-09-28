@@ -73,6 +73,7 @@ async fn register_goal_activity_project(
     runtime
         .runner_registry
         .register(crate::runner_protocol::RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: Some(4),
@@ -562,7 +563,7 @@ fn goal_schemas_are_bounded_private_and_existing_coding_tools_do_not_accept_goal
     for existing in [
         "work_on_project",
         "read_files",
-        "apply_text_edits",
+        "edit_project_files",
         "run_process",
         "run_shell",
         "finish_coding_task",

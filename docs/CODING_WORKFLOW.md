@@ -59,26 +59,56 @@ that the current model retained either material.
 
 When bootstrap or discovery returns `project_ref`, reuse it as the `project` selector on ordinary Project-scoped calls. The canonical `agent:<client_id>:<project_id>` identity remains visible for diagnostics and explicit addressing, but the model does not need to mechanically repeat it. A short ref is Server-owned, durable and principal-scoped, carries no authority, and is reauthorized against its pinned canonical Project/root identity on every call.
 
+When a registered Project already exists and isolated work is needed, use `work_on_project(project=<canonical id or project_ref>, mode="worktree", ...)`. Do not reconstruct `client_id`, the source absolute path, or a managed destination. The Server reauthorizes the source Project on that call; the Runner derives and owns managed placement, persists source/base provenance, and returns a new canonical Project plus short ref. Creating that managed Project is a fresh-Session transition, so do not pass the source Project's Session. Continue with the returned managed `project_ref` and Session. The compatibility `client_id + path + mode="worktree"` form remains subject to ordinary path authority and is not the recommended flow when a Project identity is already available. Managed storage layout is an implementation detail and should not be inferred or guessed by the model.
+
+When `work_on_project`, `start_session`, `session_summary`, or an explicit handoff returns `session_ref`, prefer that short selector for later explicit Session selection. Business `session_id` and wrapper `recording_session_id` remain separate contracts, but either may explicitly carry the already-issued ref: Runtime canonicalizes it to the pinned `wc_sess_*` before the role-specific authorization and lifecycle/guard logic runs. The canonical identity remains valid and authoritative. The ref is principal-scoped convenience only; omission never infers a recorder and no sticky recorder context is created.
+
 ## Tool strategy guidance
 
-`work_on_project` accepts `guidance_profile`, defaulting to `direct`. Workflow
-contract v18 returns shared `guidance`, `model_protocol` and review `roles`, plus
-only the selected `tool_strategy: {profile, guidance}`, when explicitly requested
-through `context_request=["webcodex.workflow"]`. The selection is request-local:
-choose again on exact resume without changing Session identity or business state.
-It is never inferred from a Window, Session or past tool use, and grants no tools,
-admission, authority or execution semantics. Builds without Experimental Code Mode
-reject explicit `code_mode` as an invalid profile. On a `work_on_project` call the
-workflow sidecar uses that call's `guidance_profile`; unrelated tools that request
-`webcodex.workflow` use the canonical default `direct` profile.
+`work_on_project` accepts an optional `guidance_profile`. An explicit value always
+wins. When omitted on MCP, the configured `WEBCODEX_MCP_HOST_PROFILE` supplies the
+model-guidance default; omission on non-MCP/internal calls falls back to `direct`.
+Workflow contract v26 returns shared `guidance`, `model_protocol` and review `roles`,
+plus only the selected `tool_strategy`, when explicitly requested through
+`context_request=["webcodex.workflow"]`. The selection is request-local: choose again
+on exact resume without changing Session identity or business state. It is never
+remembered from a Window, Session or past tool use, and grants no tools, admission,
+authority or execution semantics. Builds without Experimental Code Mode reject
+explicit `code_mode` as an invalid profile. Startup and later `webcodex.workflow`
+context refreshes use the same effective-profile rule.
 
 - `direct`: use the simplest sufficient primitive; batch predetermined independent
   observations and let the model inspect results before adaptive follow-up calls.
-- `host_code_mode`: use Host-native orchestration when the Host provides it. Keep one
-  simple observation direct, prefer canonical same-kind batches, keep dependent
-  search/read follow-ups in one Host cell when useful, and return compact evidence
-  rather than raw ToolResults. This profile grants no WebCodex capability or authority
-  and does not require nested WebCodex Code Mode.
+- `host_code_mode`: use Host-native orchestration when the Host provides it. Prefer a
+  tool's native batch for predetermined same-kind inputs before Host concurrency.
+  Predetermined independent cross-tool read-only observations may run in parallel;
+  after native batches, prefer `Promise.allSettled` when partial evidence remains useful
+  and `Promise.all` only for true all-or-nothing fan-out. Result-dependent
+  search/read/branch chains may stay in one Host cell when the Server returns a parser-ready
+  `follow_up_kind=mechanically_followable`; copy those generated arguments unchanged after
+  current Host input-schema validation. `fallback_recovery` is recovery/detail/dependency
+  evidence and must not be auto-followed merely because it is present. A child ToolResult
+  arriving is not itself a model-turn boundary: return to the model for semantic choices,
+  ambiguity, new user decisions, authority/permission requirements, uncertain outcomes,
+  competing recovery choices, unresolved mutation intent, or any effectful replay after a stale
+  revision/fence. An exact stale-source reread may still be mechanically followable, but
+  `reread_required=true` or `direct_retry_safe=false` is a hard boundary for effectful replay:
+  recovery may identify the next observation; it does not authorize automatic mutation retry.
+  Keep full results in the Host cell and emit compact decision evidence. Run ready independent
+  work and explicit mechanical continuations to quiescence. Only when pending Job dependencies
+  remain, pass the entire blocked exact set to one `wait_for_job_readiness` request (`any`/`all`).
+  Never create per-Job long waits or use `Promise.race` for first-ready aggregation. Budget from
+  remaining cell time (initially prefer 10–15s and preserve the 5s return guard); continue newly
+  ready work in the same cell, yield on deadline/budget guard. Job terminal does not imply
+  mechanically_followable; fallback recovery, authority changes, ambiguity, outcome_unknown and
+  effect uncertainty still return to the model. Use `wait_for_job_terminal` for a future activation
+  when terminal is a hard dependency. Do not use `observe_jobs` heartbeat polling. The
+  startup `tool_strategy.host_orchestration` catalog and exact
+  `tool_manifest(tool_name=...)` hint are both derived from canonical
+  `ToolDefinition` metadata. They are guidance only and do not alter
+  `ToolCompositionPolicy`, authority, effects, permissions, retry, idempotency, or
+  runtime scheduling; broad/default ToolSpecs do not carry them. This profile grants
+  no WebCodex capability or authority and does not require nested WebCodex Code Mode.
 - `code_mode`: still use a direct primitive for one simple observation. Prefer
   read-only orchestration when related search/read work, cross-file investigation
   or synthesis saves outer model turns. Keep dependent follow-ups sequential inside
@@ -105,11 +135,15 @@ For branch/PR review, start with the bounded review/change-summary tools exposed
 
 ## Editing
 
-Use `apply_text_edits` as the canonical default model-generated editing path after `read_files`. `read_revision` is the model-facing snapshot handle: use it as `expected_read_revision` when a whole-file stale-context fence is required. Globally unique exact local edits may omit the revision; positional `line_scope`/`occurrence`, delete, and rename require it. ToolRuntime resolves the revision to the Runner's exact SHA guard internally, so the model does not copy digests. This remains the normal path even when many lines change; line count alone is not a reason to choose `apply_patch`. Use `apply_patch` only when contextual patching is materially more natural, a large/multi-hunk rewrite is awkward to express as guarded exact edits, or patch-style context itself expresses the change relationship more clearly. For repetitive code, each patch chunk needs stable, unique surrounding context such as the containing function, impl, type, test, or module; do not use a repeated single line or short fragment as the mutation anchor. Keep the requested matching guard; never weaken an explicit stale-context/concurrency fence. Use `apply_unified_diff` only when the input is already a standard unified diff.
+Use `read_files -> edit_project_files` as the canonical model-generated editing path. `read_revision` is the model-facing snapshot handle, and every edit/delete/rename change carries it as `expected_read_revision`; create needs only its new content. ToolRuntime resolves that revision to the Runner's exact SHA guard internally, so the model never copies digests. Use exact edits for unique source text and `replace_range` for deterministic 1-based inclusive whole-line replacement against the same original snapshot. All edits in one file are planned against that original snapshot and the batch is preflighted transactionally before mutation.
+
+Exact-match ambiguity is a zero-write conflict. The bounded recovery may report candidate line ranges. When the source revision is still current, the model can select the intended lines and retry the same change as `replace_range` with the same `expected_read_revision`; a stale revision instead returns a parser-ready `read_files` recovery and requires a fresh read. `outcome_unknown` is different: inspect the workspace before deciding whether any write should be retried.
+
+`write_project_file`, `apply_patch`, and `apply_unified_diff` are exact-name specialists, intentionally absent from ordinary coding discovery. Use them only when the input is already most naturally a whole-file replacement, Codex patch, or standard unified diff. They are not default recovery paths from `edit_project_files` failures.
 
 Guard failures are **zero-write conflicts**, not reasons to weaken the guard. Re-read the current source and regenerate the intended edit against that state.
 
-For `matching_mode_rejected`, keep the matching guard and do not switch to `first_match`. Re-read the current source. If the intended change is easy to express as exact edits, prefer `apply_text_edits` and use the current `read_revision` when a positional or stronger whole-file fence is needed. If patch form is still materially clearer, consume the bounded parser-ready `read_files` recovery call and preserve the requested patch guard. Never downgrade an explicit stale-context/concurrency fence.
+For specialist `apply_patch` `matching_mode_rejected`, keep the matching guard and do not switch to `first_match`. Re-read the current source or return to `edit_project_files` when the intended change is naturally exact/range based. If patch form is still materially clearer, consume the bounded parser-ready `read_files` recovery call and preserve the requested patch guard. Never downgrade an explicit stale-context/concurrency fence.
 
 For deterministic `context_mismatch`, consume the bounded `read_files` recovery and regenerate against current source; do not blindly repeat the same patch. If the result is `outcome_unknown`, inspect the workspace before deciding whether any write should be retried.
 
@@ -123,7 +157,7 @@ Prefer structured validation such as `cargo_test`, `cargo_check`, or `go_test` w
 
 For one Cargo workspace package, `cargo_check` accepts `package`. For several packages, pass `packages`; WebCodex sorts and deduplicates that set, then runs one Cargo process with repeated `-p` selectors. The two selectors are mutually exclusive, and an explicit empty list is invalid.
 
-When a required validation is likely to outlast its synchronous grace and independent read-only inspection remains, set a short `sync_wait_secs` (often `1`) so that already-started validation hands off as the **same execution** Job. Continue only independent reads, search, diff/architecture inspection, or review, then observe that Job. Do not start extra CPU-heavy validations merely for parallelism. If source covered by the running validation changes afterward, its result is stale/cache-warmup evidence rather than proof of the final workspace; run task-appropriate validation again on the final source.
+When a required validation outlasts its Server-managed synchronous grace, it hands off automatically as the **same execution** Job. The model should not tune handoff timing. Continue only independent reads, search, diff/architecture inspection, or review, then observe that Job. Do not start extra CPU-heavy validations merely for parallelism. If source covered by the running validation changes afterward, its result is stale/cache-warmup evidence rather than proof of the final workspace; run task-appropriate validation again on the final source.
 
 When a test invocation must prove that tests actually ran, use `require_tests: true` or `min_tests: N`. These are request-scoped evidence assertions, not persistent Workflow Session requirements. If validator execution succeeds but the requested count cannot be satisfied or proven, closeout retains that invocation as an evidence gap rather than a code/test correctness failure. Otherwise, an exit-zero command that legitimately runs zero tests remains an execution result rather than proof of test coverage.
 
@@ -139,7 +173,7 @@ Review the actual workspace/diff after editing and validation. Passing tests do 
 
 ## Long-running work
 
-A command or validation that outlives the synchronous grace period continues as the same WebCodex Job. Keep its exact Job identity and parser-ready continuation. If useful independent work remains, continue that work and observe the Job later; do not repeatedly poll a running Job merely to keep it visible. When the next useful action actually depends on the terminal result, use the provided host-safe `wait_secs=55, wake_on=terminal` continuation. The Runtime still accepts explicit observation waits up to 100 seconds, but longer model-facing waits can exceed an outer MCP Host deadline. For one Job or when any terminal result unblocks progress, use `terminal`; when every Job in a predetermined set is required before progress, use `all_terminal`. Recovery/continuation hints never authorize a retry of an uncertain effect.
+A command or validation that outlives the synchronous grace period continues as the same WebCodex Job. Keep its exact Job identity and parser-ready continuation. If useful independent work remains, continue that work and observe the Job later; do not repeatedly poll a running Job merely to keep it visible. When the next useful action actually depends on the terminal result, use the returned continuation; the Server bounds its observation wait for the configured MCP Host profile. The Runtime still supports its transport-neutral observation ceiling internally, while MCP waiting is adapted to the Host budget. For one Job or when any terminal result unblocks progress, use `terminal`; when every Job in a predetermined set is required before progress, use `all_terminal`. Recovery/continuation hints never authorize a retry of an uncertain effect.
 
 ## Manual multi-window collaboration
 

@@ -195,6 +195,7 @@ async fn runner_supports_reflects_registered_capabilities() {
     });
     registry
         .register(RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -279,6 +280,7 @@ async fn coding_agent_run_lookup_is_exact_when_bound_and_ambiguous_when_unbound(
         let provider_instance_id = format!("provider_{client_id}");
         registry
             .register(RunnerRegisterRequest {
+                computer_session_availability: None,
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -344,6 +346,7 @@ async fn coding_agent_registration_rejects_semantically_contradictory_snapshot()
     let registry = RunnerRegistry::default();
     let register =
         |run: webcodex_core::coding_agent::CodingAgentRunSnapshot| RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -429,6 +432,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
     let registry = RunnerRegistry::default();
     registry
         .register(RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -462,6 +466,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
                 structured_file_delete: true,
                 apply_text_edit_occurrence: true,
                 apply_text_edit_line_scope: true,
+                apply_text_edit_range: true,
                 apply_text_edit_expected_match_count: true,
                 apply_text_edit_local_guard_without_sha: true,
                 apply_patch: true,
@@ -500,6 +505,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
                 skill_management: true,
                 browser_observe: true,
                 browser_control: true,
+                browser_element_action_admission: true,
                 browser_launch: true,
                 computer_observe: true,
                 computer_application_discovery: true,

@@ -1,5 +1,6 @@
 //! Phase D bounded batch Job observation.
 
+mod readiness;
 mod summary;
 
 use super::super::kernel::{HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolTransport};
@@ -558,6 +559,7 @@ fn observe_jobs_compact_projection_single_running_unchanged_keeps_actionable_sta
         false,
     );
     observation["activity"] = serde_json::to_value(process_activity()).unwrap();
+    observation["project"] = json!("agent:special:observe-kernel-projection");
     let token = observation["observation_token"].clone();
     let canonical = canonical_batch(vec![canonical_success_item(0, observation)], "immediate", 0);
     assert_eq!(
@@ -584,6 +586,7 @@ fn observe_jobs_compact_projection_single_running_unchanged_keeps_actionable_sta
     assert!(projected.output["wait"].get("waited_ms").is_none());
     let item = &projected.output["items"][0];
     assert_eq!(item["job_id"], "job-unchanged");
+    assert_eq!(item["project"], "agent:special:observe-kernel-projection");
     assert_eq!(item["status"], "running");
     assert_eq!(item["terminal"], false);
     assert_eq!(item["changed"], false);
@@ -843,7 +846,7 @@ fn observe_jobs_compact_projection_preserves_mixed_failure_and_budget_recovery()
         "success": false,
         "output": null,
         "error_kind": "unknown_job",
-        "suggested_call": {"tool": "list_jobs", "arguments": {}},
+        "suggested_call": {"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}},
         "error": "unknown job: missing-job"
     });
     let mixed = canonical_batch(vec![success.clone(), failure], "item_error", 0);
@@ -853,7 +856,7 @@ fn observe_jobs_compact_projection_preserves_mixed_failure_and_budget_recovery()
     );
     assert_eq!(
         mixed.output["items"][1]["suggested_call"],
-        json!({"tool": "list_jobs", "arguments": {}})
+        json!({"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}})
     );
 
     let mut truncated = canonical_batch(vec![success], "immediate", 0);
@@ -986,7 +989,7 @@ fn observe_jobs_projection_reports_deterministic_byte_measurements() {
             json!({
                 "index": 1, "job_id": "missing-measure", "success": false,
                 "output": null, "error_kind": "unknown_job",
-                "suggested_call": {"tool": "list_jobs", "arguments": {}},
+                "suggested_call": {"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}},
                 "error": "unknown job: missing-measure"
             }),
         ],
@@ -1946,7 +1949,9 @@ fn observe_jobs_canonical_continuation_is_parser_ready_with_or_without_baseline(
         assert!(matches!(
             parsed,
             ToolCall::ObserveJobs {
-                wait_secs: Some(webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS),
+                wait_secs: Some(
+                    webcodex_core::runtime_contract::DEFAULT_JOB_CONTINUATION_WAIT_SECS
+                ),
                 wake_on: ObserveJobsWakeOn::Terminal,
 
                 summary_only: false,
@@ -2127,7 +2132,7 @@ async fn observe_jobs_generic_failed_test_identity_survives_small_model_tail() {
         let request = wait_for_patch_agent_request(&runtime, client).await;
         let handoff = task.await.unwrap();
         assert!(handoff.success, "{handoff:?}");
-        let job = handoff.output["job_id"].as_str().unwrap();
+        let job = assert_sparse_pending_job_handoff(&handoff.output);
         let stdout = "running 1 test\ntest cases::outside_tail ... FAILED\n".to_string()
             + &"retained diagnostic padding\n".repeat(400)
             + "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n";

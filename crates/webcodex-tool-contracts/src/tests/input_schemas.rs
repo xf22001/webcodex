@@ -298,7 +298,7 @@ fn list_project_files_paging_schema_keeps_cardinality_bounded() {
 }
 
 #[test]
-fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime() {
+fn execution_timeout_schemas_keep_runtime_bounds_and_hide_sync_wait_tuning() {
     let specs = registered_tool_specs();
     for (name, default) in [
         ("cargo_check", 600),
@@ -313,53 +313,36 @@ fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime()
         assert_eq!(timeout["default"], default, "{name}");
         let desc = timeout["description"].as_str().unwrap_or("");
         assert!(desc.contains("3600") && desc.to_ascii_lowercase().contains("job"));
-
-        let sync_wait = &spec.input_schema["properties"]["sync_wait_secs"];
-        assert_eq!(sync_wait["type"], "integer", "{name}");
-        assert_eq!(sync_wait["minimum"], 1, "{name}");
-        assert!(sync_wait.get("maximum").is_none(), "{name}");
-        assert!(sync_wait.get("default").is_none(), "{name}");
-        let desc = sync_wait["description"].as_str().unwrap_or("");
-        assert!(desc.contains("same execution"), "{name}: {desc}");
         assert!(
-            desc.contains("Runtime early-handoff default"),
-            "{name}: {desc}"
-        );
-        assert!(
-            desc.contains("never extends timeout_secs"),
-            "{name}: {desc}"
+            spec.input_schema["properties"]
+                .get("sync_wait_secs")
+                .is_none(),
+            "{name} must hide sync_wait_secs from model discovery"
         );
     }
+
     let cargo_fmt = spec_named(&specs, "cargo_fmt");
     let timeout = &cargo_fmt.input_schema["properties"]["timeout_secs"];
     assert_eq!(timeout["type"], "integer");
     assert_eq!(timeout["minimum"], 1);
     assert!(timeout.get("maximum").is_none());
     assert_eq!(timeout["default"], 120);
-    let sync_wait = &cargo_fmt.input_schema["properties"]["sync_wait_secs"];
-    assert_eq!(sync_wait["type"], "integer");
-    assert_eq!(sync_wait["minimum"], 1);
-    assert!(sync_wait.get("maximum").is_none());
-    assert!(sync_wait.get("default").is_none());
-    let sync_wait_desc = sync_wait["description"].as_str().unwrap_or("");
-    assert!(
-        sync_wait_desc.contains("Runtime early-handoff default"),
-        "cargo_fmt: {sync_wait_desc}"
-    );
-    for valid in [
-        serde_json::json!({"project": "agent:demo:repo", "check": false, "sync_wait_secs": 1}),
-        serde_json::json!({"project": "agent:demo:repo", "sync_wait_secs": 60}),
+    assert!(cargo_fmt.input_schema["properties"]
+        .get("sync_wait_secs")
+        .is_none());
+
+    for name in [
+        "run_process",
+        "run_script",
+        "run_shell",
+        "run_skill_resource",
     ] {
-        test_support::validate_schema_instance(&valid, &cargo_fmt.input_schema)
-            .unwrap_or_else(|error| panic!("valid ensure-format input rejected: {valid}: {error}"));
-    }
-    for invalid in [
-        serde_json::json!({"project": "agent:demo:repo", "check": false, "sync_wait_secs": 0}),
-        serde_json::json!({"project": "agent:demo:repo", "sync_wait_secs": 0}),
-    ] {
+        let spec = spec_named(&specs, name);
         assert!(
-            test_support::validate_schema_instance(&invalid, &cargo_fmt.input_schema).is_err(),
-            "invalid ensure-format sync_wait_secs passed schema: {invalid}"
+            spec.input_schema["properties"]
+                .get("sync_wait_secs")
+                .is_none(),
+            "{name} must hide sync_wait_secs from model discovery"
         );
     }
 
@@ -372,14 +355,6 @@ fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime()
     let timeout_desc = timeout["description"].as_str().unwrap_or_default();
     assert!(timeout_desc.contains("shared structured-execution ceiling"));
     assert!(!timeout_desc.contains("120 are accepted and clamped"));
-    let sync_wait = &run_shell.input_schema["properties"]["sync_wait_secs"];
-    assert_eq!(sync_wait["type"], "integer");
-    assert_eq!(sync_wait["minimum"], 1);
-    assert!(sync_wait.get("maximum").is_none());
-    assert!(sync_wait.get("default").is_none());
-    let sync_desc = sync_wait["description"].as_str().unwrap_or_default();
-    assert!(sync_desc.contains("same-execution durable Job handoff"));
-    assert!(sync_desc.contains("not when the command is killed"));
 
     let search = spec_named(&specs, "search_project_texts");
     assert!(
@@ -641,17 +616,8 @@ fn cargo_fmt_conditional_timeout_schema_matches_contract() {
     assert!(validates(
         &json!({"project": "demo", "check": true, "timeout_secs": 3600})
     ));
-    assert!(validates(
-        &json!({"project": "demo", "check": true, "timeout_secs": 3600, "sync_wait_secs": 1})
-    ));
-    assert!(validates(
-        &json!({"project": "demo", "check": true, "timeout_secs": 3600, "sync_wait_secs": 60})
-    ));
     assert!(!validates(
-        &json!({"project": "demo", "check": true, "timeout_secs": 3600, "sync_wait_secs": 0})
-    ));
-    assert!(validates(
-        &json!({"project": "demo", "check": true, "timeout_secs": 3600, "sync_wait_secs": 61})
+        &json!({"project": "demo", "check": true, "timeout_secs": 3600, "sync_wait_secs": 1})
     ));
     assert!(validates(
         &json!({"project": "demo", "check": true, "timeout_secs": 3601})
@@ -659,17 +625,11 @@ fn cargo_fmt_conditional_timeout_schema_matches_contract() {
     assert!(validates(
         &json!({"project": "demo", "check": false, "timeout_secs": 120})
     ));
-    assert!(validates(
+    assert!(!validates(
         &json!({"project": "demo", "check": false, "timeout_secs": 120, "sync_wait_secs": 1})
     ));
-    assert!(validates(
+    assert!(!validates(
         &json!({"project": "demo", "timeout_secs": 120, "sync_wait_secs": 1})
-    ));
-    assert!(!validates(
-        &json!({"project": "demo", "check": false, "timeout_secs": 120, "sync_wait_secs": 0})
-    ));
-    assert!(!validates(
-        &json!({"project": "demo", "timeout_secs": 120, "sync_wait_secs": 0})
     ));
     assert!(validates(
         &json!({"project": "demo", "check": false, "timeout_secs": 121})
@@ -816,15 +776,12 @@ fn tool_specs_covers_expected_tool_set() {
         "workspace_checkpoint_restore",
         #[cfg(feature = "workspace-checkpoints")]
         "workspace_checkpoint_delete",
-        "apply_patch",
-        "apply_unified_diff",
         "delete_project_files",
         "git_restore_paths",
         "discard_untracked",
         "project_overview",
         "list_project_tracked_files",
         "list_jobs",
-        "write_project_file",
         "save_project_artifact",
         "read_project_artifact_metadata",
         "read_project_artifact",
@@ -839,6 +796,15 @@ fn tool_specs_covers_expected_tool_set() {
             names.iter().any(|name| name == expected),
             "missing {expected}"
         );
+    }
+
+    let specialists = exact_manifest_specialist_tool_specs();
+    for hidden in EXACT_MANIFEST_SPECIALIST_TOOL_NAMES {
+        assert!(
+            specialists.iter().any(|spec| spec.name == *hidden),
+            "missing exact-manifest specialist {hidden}"
+        );
+        assert!(!names.iter().any(|name| name == hidden), "{hidden}");
     }
 }
 
@@ -886,7 +852,9 @@ fn heartbeat_agent_task_attempt_active_turn_proof_is_paired_and_server_timed() {
     let heartbeat = spec_named(&specs, "heartbeat_agent_task_attempt");
     assert_eq!(heartbeat.input_schema["additionalProperties"], false);
     let required = required_fields(heartbeat);
+    let properties = heartbeat.input_schema["properties"].as_object().unwrap();
     for field in [
+        "attempt_ref",
         "task_id",
         "attempt_id",
         "assignee_agent_id",
@@ -894,8 +862,12 @@ fn heartbeat_agent_task_attempt_active_turn_proof_is_paired_and_server_timed() {
         "attempt_controller_generation",
     ] {
         assert!(
-            required.contains(&field.to_string()),
-            "missing required {field}"
+            properties.contains_key(field),
+            "missing selector field {field}"
+        );
+        assert!(
+            !required.contains(&field.to_string()),
+            "{field} stays optional so attempt_ref and the explicit tuple are alternatives"
         );
     }
     for optional in ["active_turn_wake_id", "active_turn_consume_token"] {
@@ -909,7 +881,6 @@ fn heartbeat_agent_task_attempt_active_turn_proof_is_paired_and_server_timed() {
         heartbeat.input_schema["properties"]["active_turn_consume_token"]["pattern"],
         "^wc_wake_consume_[A-Za-z0-9_-]{21}[AQgw]$"
     );
-    let properties = heartbeat.input_schema["properties"].as_object().unwrap();
     for forbidden in [
         "lease_ms",
         "lease_duration_ms",
@@ -932,6 +903,11 @@ fn heartbeat_agent_task_attempt_active_turn_proof_is_paired_and_server_timed() {
         "attempt_controller_generation": 7,
     });
     assert!(test_support::validate_schema_instance(&base, &heartbeat.input_schema).is_ok());
+    assert!(test_support::validate_schema_instance(
+        &json!({"attempt_ref": "~ta1"}),
+        &heartbeat.input_schema
+    )
+    .is_ok());
 
     let mut wake_only = base.clone();
     wake_only["active_turn_wake_id"] = json!("wc_wake_VVVVVVVVVVVVVVVV".to_string());
@@ -969,6 +945,7 @@ fn code_mode_exec_schema_keeps_authority_outer_bound_and_source_bounded() {
             "recording_session_id",
             "ack_session_context_revision",
             "ack_session_message_ids",
+            "ack_ref",
             "context_request",
             "session_message_resolution",
         ]
@@ -1004,6 +981,7 @@ fn code_mode_effectful_schema_keeps_authority_outer_bound_and_deadline_explicit(
             "recording_session_id",
             "ack_session_context_revision",
             "ack_session_message_ids",
+            "ack_ref",
             "context_request",
             "session_message_resolution",
         ]
@@ -1033,6 +1011,7 @@ fn code_mode_mutating_schema_keeps_authority_outer_bound_and_mutation_scope_narr
             "recording_session_id",
             "ack_session_context_revision",
             "ack_session_message_ids",
+            "ack_ref",
             "context_request",
             "session_message_resolution",
             "state_changed",
@@ -1046,7 +1025,7 @@ fn code_mode_mutating_schema_keeps_authority_outer_bound_and_mutation_scope_narr
     let source_description = properties["source"]["description"]
         .as_str()
         .unwrap_or_default();
-    assert!(source_description.contains("at most one canonical apply_text_edits attempt"));
+    assert!(source_description.contains("at most one canonical edit_project_files attempt"));
     assert!(
         source_description.contains("cargo_check/cargo_test only after a successful known edit")
     );

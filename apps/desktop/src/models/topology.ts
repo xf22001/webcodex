@@ -4,7 +4,7 @@ export type ServerTopology =
   | { kind: "local" }
   | { kind: "remote"; url: string };
 
-export type RunnerTopology = { kind: "local" };
+export type RunnerTopology = { kind: "local" } | { kind: "none" };
 
 export type Exposure =
   | { kind: "none" }
@@ -15,7 +15,8 @@ export type Exposure =
 export type Enrollment =
   | { kind: "managed_pairing" }
   | { kind: "shared_key" }
-  | { kind: "existing_profile"; profile: string };
+  | { kind: "existing_profile"; profile: string }
+  | { kind: "user_credential" };
 
 export interface RuntimeTopology {
   experience: Experience;
@@ -125,8 +126,12 @@ export interface TunnelProxySnapshot {
 }
 
 export type DesktopOperationKind =
+  | "desktop_update"
+  | "environment_migration"
+  | "environment_service"
   | "local_setup"
   | "local_project_activate"
+  | "project_unregister"
   | "remote_setup"
   | "quick_share_start"
   | "quick_share_stop"
@@ -151,6 +156,26 @@ export interface DesktopOperation {
   cancellable: boolean;
 }
 
+export type SetupProgressStep =
+  | "preflight"
+  | "server_configuration"
+  | "server_service_install"
+  | "server_service_start"
+  | "server_reachability"
+  | "user_authentication"
+  | "runner_enrollment"
+  | "runner_configuration"
+  | "project_registration"
+  | "runner_service_install"
+  | "runner_service_start"
+  | "readiness";
+
+export interface SetupProgress {
+  operation_id: string;
+  step: SetupProgressStep;
+  state: "started" | "complete";
+}
+
 export interface OpenAiTunnelConfigSnapshot {
   tunnel_id_present: boolean;
   api_key_present: boolean;
@@ -170,6 +195,9 @@ export interface ChatGptActivitySnapshot {
 }
 
 export interface DesktopState {
+  persistent_environment?: string | null;
+  can_repair_runner_credential?: boolean;
+  workspace_runner?: SettingsTarget | null;
   configuration_issue?: string | null;
   saved_projects?: ProjectSelection[];
   topology?: RuntimeTopology | null;
@@ -183,6 +211,7 @@ export interface DesktopState {
   mcp_providers?: import("./connections-tools").McpProvidersSnapshot;
   coding_agents?: import("./runner-capabilities").CodingAgentsSnapshot;
   current_operation?: DesktopOperation | null;
+  setup_progress?: SetupProgress | null;
   activity_sequence: number;
   openai_tunnel_configured: boolean;
   openai_tunnel_config: OpenAiTunnelConfigSnapshot;
@@ -233,7 +262,9 @@ export interface ActivityEntry {
 
 
 export interface RunnerPaths { instruction_files: string[]; skill_roots: string[] }
+export interface RunnerFileAccess { configured_roots: string[]; effective_roots: string[]; using_default_roots: boolean; allow_cwd_anywhere: boolean }
 export interface SettingsTarget { config_path: string; client_id: string; server_url: string }
-export interface RunnerSettings { paths: RunnerPaths; plugin_ids: string[]; target: SettingsTarget; can_restart: boolean }
+export interface RunnerSettings { paths: RunnerPaths; file_access: RunnerFileAccess; plugin_ids: string[]; target: SettingsTarget; can_restart: boolean }
 export interface PluginRegistration { id: string; name: string; command: string; args: string[]; cwd: string | null }
-export interface ComputerPermissions { supported: boolean; foreground: boolean; desktop_accessibility: boolean; desktop_screen_recording: boolean }
+export type PermissionStatus = "granted" | "denied" | "unknown";
+export interface ComputerPermissions { supported: boolean; foreground: boolean; execution_process: string | null; execution_path: string | null; runner_accessibility: PermissionStatus; runner_screen_recording: PermissionStatus; desktop_accessibility: boolean; desktop_screen_recording: boolean }

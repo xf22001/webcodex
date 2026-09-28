@@ -25,6 +25,8 @@ mod external_observations_tests;
 pub use external_observations::{
     ExternalObservation, ExternalObservationError, MAX_EXTERNAL_OBSERVATIONS_PER_SESSION,
 };
+mod agent_continuation_reference;
+mod agent_task_attempt_reference;
 mod goal;
 mod goal_plan;
 #[cfg(test)]
@@ -35,15 +37,21 @@ mod job_terminal_wait;
 #[cfg(test)]
 mod job_terminal_wait_tests;
 mod memory;
+mod model_reference;
 pub mod models;
 mod oauth;
 mod peer_collaboration;
+mod window_collaboration;
+#[cfg(test)]
+mod window_collaboration_tests;
+pub use window_collaboration::*;
 mod project_reference;
 mod schema;
 mod server_instance;
 mod window_activity;
 
 pub use self::admin_project_lifecycle::{AdminProjectAudit, AdminProjectIdempotencyRecord};
+pub use self::agent_continuation_reference::AgentContinuationReferenceRecord;
 pub use self::agent_task::{
     AgentTaskAttemptCompletionMutation, AgentTaskAttemptHeartbeatMutation, AgentTaskAttemptRecord,
     AgentTaskAttemptStartMutation, AgentTaskAttemptState, AgentTaskCodingRunBindingIntent,
@@ -51,9 +59,10 @@ pub use self::agent_task::{
     AgentTaskCodingRunDispatchState, AgentTaskCodingRunObservation, AgentTaskCodingRunPrepared,
     AgentTaskCodingRunReconcileMutation, AgentTaskCodingRunStartContext, AgentTaskDetail,
     AgentTaskExecutionKind, AgentTaskExecutionRecoveryKind, AgentTaskExecutionStatus,
-    AgentTaskMutation, AgentTaskPage, AgentTaskState, AgentTaskSummary, NewAgentTask,
-    MAX_AGENT_TASK_LIST_LIMIT, MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
+    AgentTaskMutation, AgentTaskPage, AgentTaskState, AgentTaskSummary, LiveAgentTaskAttemptPin,
+    NewAgentTask, MAX_AGENT_TASK_LIST_LIMIT, MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
 };
+pub use self::agent_task_attempt_reference::AgentTaskAttemptReferenceRecord;
 pub use self::agent_wait::{
     AgentWaitDetail, AgentWaitEventSelector, AgentWaitMatchRecord, AgentWaitMode,
     AgentWaitMutation, AgentWaitSourceRecord, AgentWaitState, NewAgentWait,
@@ -111,6 +120,7 @@ pub use self::memory::{
     memory_definition_hash, memory_state_revision, validate_memory_body, validate_memory_key,
     validate_memory_summary, MAX_MEMORIES_PER_PROJECT, MEMORY_SCOPE_IDENTITY_ATTRIBUTED,
 };
+pub use self::model_reference::{ModelReferenceRecord, ModelReferenceStoreError};
 pub use self::oauth::RotateResult;
 pub use self::peer_collaboration::{
     NewPeerMessage, PeerAttentionBatch, PeerMessageDelivery, PeerMessageDeliveryOutcome,
@@ -166,6 +176,10 @@ impl Database {
 #[cfg(test)]
 mod agent_attention_tests;
 #[cfg(test)]
+mod agent_continuation_reference_tests;
+#[cfg(test)]
+mod agent_task_attempt_reference_tests;
+#[cfg(test)]
 mod agent_task_tests;
 #[cfg(test)]
 mod agent_wait_tests;
@@ -181,6 +195,8 @@ mod db_tests;
 mod goal_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod model_reference_tests;
 #[cfg(test)]
 mod project_reference_tests;
 

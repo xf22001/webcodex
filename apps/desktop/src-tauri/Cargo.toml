@@ -1,6 +1,6 @@
 [package]
 name = "webcodex-desktop"
-version = "0.4.1"
+version = "0.4.3"
 description = "WebCodex Desktop runtime and setup control surface"
 edition = "2021"
 publish = false
@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-m
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 webcodex-core = { path = "../../../crates/webcodex-core" }
+webcodex-environment = { path = "../../../crates/webcodex-environment" }
 webcodex-process = { path = "../../../crates/webcodex-process" }
 webcodex-runner-config = { path = "../../../crates/webcodex-runner-config" }
 
@@ -44,6 +45,9 @@ system-configuration = "0.7"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 winreg = "0.55"
 
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.dogfood]
 inherits = "dev"

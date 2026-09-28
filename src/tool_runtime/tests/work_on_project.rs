@@ -362,6 +362,25 @@ fn worktree_work_on_project_call(
     }
 }
 
+fn project_worktree_work_on_project_call(
+    project: &str,
+    instruction: &str,
+    base_ref: Option<&str>,
+    session_id: Option<&str>,
+) -> ToolCall {
+    ToolCall::WorkOnProject {
+        project: project.to_string(),
+        client_id: None,
+        path: None,
+        mode: Some("worktree".to_string()),
+        base_ref: base_ref.map(str::to_string),
+        instruction: instruction.to_string(),
+        guidance_profile: Default::default(),
+        include_extension_catalog: false,
+        session_id: session_id.map(str::to_string),
+    }
+}
+
 fn managed_fixture_git(root: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
@@ -1182,6 +1201,7 @@ fn work_on_project_schema_and_registration() {
         .unwrap();
     for field in [
         "session_id",
+        "session_ref",
         "project",
         "resolved_project",
         "project_ref",
@@ -1675,6 +1695,19 @@ fn work_on_project_projection_fails_closed_when_required_field_is_missing() {
     assert!(result.output["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("session_id")));
+}
+
+#[test]
+fn work_on_project_projection_preserves_session_ref() {
+    let mut output = valid_work_on_project_projection_input();
+    output["session"]["session_ref"] = json!("~s12");
+
+    let result = crate::tool_runtime::coding_task::project_work_on_project_output(
+        SAMPLE_PROJECT.to_string(),
+        output,
+    );
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["session_ref"], "~s12");
 }
 
 #[test]
@@ -2188,6 +2221,10 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
         unrecorded_result.output["session_attention"]["messages"][0]["message"],
         "same-window attention without recorder"
     );
+    let affinity_ack_ref = unrecorded_result.output["session_attention"]["ack_ref"]
+        .as_str()
+        .expect("Window-affinity Session attention should expose ack_ref")
+        .to_string();
     assert_eq!(
         runtime
             .sessions
@@ -2209,7 +2246,7 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
         window_id,
         ToolTransport::Mcp,
         ToolInvocationMetadata {
-            ack_session_message_ids: vec![guidance.message_id.clone()],
+            ack_ref: Some(affinity_ack_ref),
             ..Default::default()
         },
     )
@@ -2683,10 +2720,28 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
     let window_db = std::sync::Arc::new(
         crate::Database::open(&audit_root.path().join("workflow-resume.db")).unwrap(),
     );
-    let runtime = ToolRuntime::new_for_tests().with_window_activity_database(window_db.clone());
+    let runtime = ToolRuntime::new_for_tests()
+        .with_window_activity_database(window_db.clone())
+        .with_project_reference_database(window_db.clone());
     let project =
         register_runner_project_at_path(&runtime, "workflow-resume", "demo", root.path()).await;
     let auth = auth_context(None, true);
+    let owner_authority = crate::tool_runtime::workflow_session_authority_fingerprint(Some(&auth))
+        .expect("test auth has stable Workflow Session authority");
+    let start_owned_session = |project: Option<String>, title: Option<String>| {
+        runtime
+            .sessions
+            .start_session_with_options(
+                crate::tool_runtime::sessions::SessionCreateOptions::new(
+                    project,
+                    title,
+                    SessionMode::Normal,
+                    SessionGuards::default(),
+                )
+                .with_owner_authority_fingerprint(Some(owner_authority.clone())),
+            )
+            .unwrap()
+    };
     let window_id = "workflow-resume-window";
     let window = crate::client_window::ClientWindow::for_test(window_id);
 
@@ -2705,7 +2760,7 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
     assert_eq!(empty["count"], 0);
     assert!(empty.get("suggested_call").is_none());
 
-    let first = runtime.sessions.start_session(
+    let first = start_owned_session(
         Some(project.clone()),
         Some("implementation recovery candidate".to_string()),
     );
@@ -2729,10 +2784,22 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
         .unwrap();
     assert_eq!(single["count"], 1);
     assert_eq!(single["candidates"][0]["session_id"], first.session_id);
+    let first_ref = single["candidates"][0]["session_ref"]
+        .as_str()
+        .expect("authorized discovery candidate should expose a short Session selector");
+    assert!(first_ref.starts_with("~s"));
     assert_eq!(
         single["suggested_call"]["arguments"]["session_id"],
-        first.session_id
+        first_ref
     );
+    assert_eq!(
+        single["suggested_call"]["follow_up_kind"],
+        "fallback_recovery"
+    );
+    webcodex_tool_contracts::test_support::validate_generated_tool_call_against_registered_input_schema(
+        &single["suggested_call"],
+    )
+    .expect("workflow resume recovery must pass session_handoff_summary registered inputSchema");
 
     let other_window = crate::client_window::ClientWindow::for_test("workflow-resume-other");
     let hidden_by_window = runtime
@@ -2749,7 +2816,7 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
     assert_eq!(hidden_by_principal["count"], 0);
 
     let inaccessible_project = "agent:missing:workflow-resume";
-    let inaccessible = runtime.sessions.start_session(
+    let inaccessible = start_owned_session(
         Some(inaccessible_project.to_string()),
         Some("must-not-leak-secret-title".to_string()),
     );
@@ -2775,7 +2842,7 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
     assert!(!hidden_json.contains(&inaccessible.session_id));
     assert!(!hidden_json.contains("must-not-leak-secret-title"));
 
-    let second = runtime.sessions.start_session(
+    let second = start_owned_session(
         Some(project.clone()),
         Some("independent review recovery candidate".to_string()),
     );
@@ -2810,14 +2877,21 @@ async fn workflow_resume_context_is_window_principal_scoped_bounded_and_non_auth
         active_only["candidates"][0]["session_id"],
         second.session_id
     );
+    let second_ref = active_only["candidates"][0]["session_ref"]
+        .as_str()
+        .expect("remaining authorized candidate should keep its short selector");
     assert_eq!(
         active_only["suggested_call"]["arguments"]["session_id"],
-        second.session_id
+        second_ref
+    );
+    assert_eq!(
+        active_only["suggested_call"]["follow_up_kind"],
+        "fallback_recovery"
     );
 
     let mut newest_session_id = String::new();
     for index in 0..8 {
-        let extra = runtime.sessions.start_session(
+        let extra = start_owned_session(
             Some(project.clone()),
             Some(format!("bounded recovery candidate {index}")),
         );
@@ -2922,12 +2996,21 @@ async fn managed_worktree_bootstrap_recovers_same_operation_and_binds_session_to
     )
     .await;
 
+    let auth = auth_context(None, true);
+    let resolved_source = runtime
+        .resolve_project_input_for_auth("agent:wop-managed:source", Some(&auth))
+        .await
+        .expect("source Project resolves for short-ref bootstrap");
+    let source_project_ref = runtime
+        .project_reference_for_resolved(&resolved_source, Some(&auth))
+        .expect("source Project must have a short Project ref");
+    assert!(source_project_ref.starts_with("~p"));
+
     let (first, payloads) = dispatch_with_managed_worktree_runner(
         &runtime,
         client_id,
-        worktree_work_on_project_call(
-            client_id,
-            &source_path,
+        project_worktree_work_on_project_call(
+            &source_project_ref,
             "work in an isolated checkout",
             Some("HEAD"),
             None,
@@ -2952,6 +3035,19 @@ async fn managed_worktree_bootstrap_recovers_same_operation_and_binds_session_to
     assert_eq!(payloads[0]["operation_id"], payloads[1]["operation_id"]);
     assert!(payloads[0]["resume_project_id"].is_null());
     assert_eq!(payloads[0]["base_ref"], "HEAD");
+    assert_eq!(payloads[0]["expected_source_project_id"], "source");
+    assert_eq!(
+        payloads[0]["expected_source_root_fingerprint"],
+        managed_source_root_fingerprint()
+    );
+    assert_eq!(
+        payloads[1]["expected_source_project_id"],
+        payloads[0]["expected_source_project_id"]
+    );
+    assert_eq!(
+        payloads[1]["expected_source_root_fingerprint"],
+        payloads[0]["expected_source_root_fingerprint"]
+    );
     let project = "agent:wop-managed:managed-a1b2c3d4";
     assert_eq!(first.output["resolved_project"], project);
     assert_eq!(first.output["project"], project);
@@ -3068,6 +3164,89 @@ async fn managed_worktree_bootstrap_recovers_same_operation_and_binds_session_to
     let instance = json!({"success": true, "output": first.output});
     crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&instance, &schema)
         .unwrap_or_else(|error| panic!("managed worktree output must match schema: {error}"));
+}
+
+#[tokio::test]
+async fn managed_worktree_project_source_failure_scrubs_internal_identity_fence() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    init_git_repo(&source);
+    let source_path = source.canonicalize().unwrap().to_string_lossy().to_string();
+    let runtime = ToolRuntime::new_for_tests();
+    let client_id = "wop-managed-failure";
+    let mut source_project = registered_project("source", &source_path);
+    source_project.root_fingerprint = Some(managed_source_root_fingerprint());
+    register_agent_with_projects(
+        &runtime,
+        client_id,
+        None,
+        RunnerCapabilities {
+            shell: true,
+            git: true,
+            managed_worktree: true,
+            ..Default::default()
+        },
+        vec![source_project],
+    )
+    .await;
+
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        let call = project_worktree_work_on_project_call(
+            "agent:wop-managed-failure:source",
+            "surface a bounded identity failure",
+            None,
+            None,
+        );
+        async move {
+            runtime
+                .dispatch_with_auth(call, Some(&auth_context(None, true)))
+                .await
+        }
+    });
+    let deadline = std::time::Instant::now() + CODING_WORKFLOW_FIXTURE_TIMEOUT;
+    while !task.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "managed-worktree failure fixture did not finish"
+        );
+        let Some(request) = probe_patch_agent_request(&runtime, client_id).await else {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            continue;
+        };
+        assert_eq!(request.kind, "prepare_managed_worktree");
+        let response = json!({
+            "error_code": "managed_worktree_source_identity_changed",
+            "error_kind": "managed_worktree_source_identity_changed",
+            "failure_kind": "managed_worktree_source_identity_changed",
+            "state_changed": false,
+            "source_project_id": "source",
+            "source_root_fingerprint": managed_source_root_fingerprint(),
+        });
+        complete_patch_agent_request(
+            &runtime,
+            client_id,
+            &request.request_id,
+            1,
+            &response.to_string(),
+            "",
+        )
+        .await;
+    }
+
+    let result = task.await.unwrap();
+    assert!(!result.success);
+    assert_eq!(
+        result.output["error_kind"],
+        "managed_worktree_source_identity_changed"
+    );
+    assert_eq!(
+        result.output["source_project"],
+        "agent:wop-managed-failure:source"
+    );
+    assert!(result.output.get("source_project_id").is_none());
+    assert!(result.output.get("source_root_fingerprint").is_none());
 }
 
 #[tokio::test]
@@ -3201,51 +3380,25 @@ async fn source_project_session_cannot_resume_a_managed_worktree() {
     assert!(started.success, "{:?}", started.error);
     let session_id = started.output["session_id"].as_str().unwrap().to_string();
 
-    let task = tokio::spawn({
-        let runtime = runtime.clone();
-        let auth = auth.clone();
-        let source_path = source_path.clone();
-        let session_id = session_id.clone();
-        async move {
-            runtime
-                .dispatch_with_auth(
-                    worktree_work_on_project_call(
-                        client_id,
-                        &source_path,
-                        "must not switch workspace",
-                        None,
-                        Some(&session_id),
-                    ),
-                    Some(&auth),
-                )
-                .await
-        }
-    });
-    let request = wait_for_patch_agent_request(&runtime, client_id).await;
-    assert_eq!(request.kind, "prepare_managed_worktree");
-    let payload: Value = serde_json::from_str(request.stdin.as_deref().unwrap()).unwrap();
-    assert_eq!(payload["resume_project_id"], "source");
-    let error = json!({
-        "error_code": "managed_worktree_resume_mismatch",
-        "error_kind": "managed_worktree_resume_mismatch",
-        "failure_kind": "managed_worktree_resume_mismatch",
-        "state_changed": false,
-    });
-    complete_patch_agent_request(
-        &runtime,
-        client_id,
-        &request.request_id,
-        1,
-        &error.to_string(),
-        "",
-    )
-    .await;
-    let result = task.await.unwrap();
-    assert!(!result.success);
-    assert_eq!(
-        result.output["error_kind"],
-        "managed_worktree_resume_mismatch"
+    let result = runtime
+        .dispatch_with_auth(
+            project_worktree_work_on_project_call(
+                &source_project,
+                "must not switch workspace",
+                None,
+                Some(&session_id),
+            ),
+            Some(&auth),
+        )
+        .await;
+    assert!(
+        probe_patch_agent_request(&runtime, client_id)
+            .await
+            .is_none(),
+        "source Session mismatch must fail before prepare_managed_worktree"
     );
+    assert!(!result.success);
+    assert_eq!(result.output["error_kind"], "session_project_mismatch");
     assert_eq!(result.output["state_changed"], false);
     assert_eq!(instruction_events(&runtime, &session_id).len(), 1);
     assert_eq!(runtime.list_projects(Some(&auth)).await.output["count"], 1);

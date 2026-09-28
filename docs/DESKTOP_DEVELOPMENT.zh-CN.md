@@ -2,8 +2,7 @@
 
 [English](DESKTOP_DEVELOPMENT.md) | [简体中文](DESKTOP_DEVELOPMENT.zh-CN.md)
 
-本文面向希望修改 WebCodex Desktop、从源码运行，或者自己构建 Windows/macOS
-可安装包进行测试的贡献者。
+本文面向在 Linux、Windows、macOS 修改和从源码运行 WebCodex Desktop，以及构建本地测试包的贡献者。统一 NSIS、`.pkg`、`.deb` 的发布与验收状态见[统一安装指南](unified-installation.zh-CN.md)；下文 Windows NSIS / macOS DMG helper 保留为本地兼容打包流程。
 
 普通安装请看 [Desktop 安装与连接](desktop-install.zh-CN.md)，日常使用请看
 [Desktop 使用指南](desktop-guide.zh-CN.md)。正式公开发布是另一套 maintainer 流程，
@@ -113,6 +112,12 @@ Desktop 会验证三个 binary 报告的 version 与 Git commit 一致。
 同源 binary 的目录。这个 override 只属于 debug/development 路径；正式安装的
 non-debug Desktop 必须使用包内 runtime resources。
 
+### Desktop 数据目录
+
+Desktop 默认从 Tauri 提供的当前用户 app-local-data 目录开始。Windows 上，Desktop 会解析最终 Desktop-owned data-root 组件之前的 ancestor 到真实物理文件系统位置，再原样追加尚不存在的 tail。这样可以支持 `C:\\Users\\<user>` 通过 NTFS Junction 重定向到其他磁盘的 Windows profile，同时让 Desktop state、secrets、`runtime/local`、connection state、provider/coding-agent state、updates、diagnostics 与 reset/recovery 始终共享同一个 effective root。已经存在的最终 WebCodex data-root 组件不会通过 Junction/symlink 被 canonicalize 掉；如果它本身是 reparse point，Desktop 会直接拒绝，以保留 credential-path 安全边界。
+
+运维恢复或调试时可以设置 `WEBCODEX_DESKTOP_DATA_DIR` 覆盖 Tauri 路径；其值必须是绝对路径。Windows 会对 override 应用同样的物理路径解析规则；Linux/macOS 不会因此新增 symlink canonicalization 语义。这个 override **不会**放宽 CLI credential-path 安全检查：bundled CLI 仍会严格验证最终 effective path，并拒绝不安全的 credential directory 重定向。
+
 ## 从源码运行 Desktop
 
 dogfood runtime 构建好以后：
@@ -131,14 +136,73 @@ Tauri 会按配置自动启动 Vite。debug Desktop 的 runtime 解析顺序是�
 Desktop runtime。只要修改涉及 Tauri IPC、native command、process lifecycle、tray/menu、
 文件选择器、autostart 或 bundle runtime，就必须用完整 Tauri dev 验证。
 
+## Linux 源码预览与已有 Server
+
+原生源码预览使用真实 Desktop 后端和内嵌前端资源，不会安装 `.deb`、迁移服务所有权，也不代表已通过重启或安装器验收。Debian/Ubuntu 需要 `build-essential`、`pkg-config`、`libssl-dev`、`libgtk-3-dev`、`libwebkit2gtk-4.1-dev`、`libayatana-appindicator3-dev`，以及上文的 Rust/Node 环境。安装两套 npm 依赖后，在仓库根目录运行：
+
+```bash
+cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+npm run build --prefix apps/desktop
+cargo build --locked --profile dogfood \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml --features tauri/custom-protocol
+```
+
+直接使用 Cargo 构建时，需要 `tauri/custom-protocol` 来内嵌并加载构建后的界面；Tauri CLI 打包时通常会自动选择该功能。上述路径以默认 Cargo target 目录为准。部署前对四个可执行文件运行 `--build-info-json`，核对 source SHA、版本、架构和 dirty 状态符合候选构建；构建时间戳可以不同。源码 dogfood 不代表已通过发布来源验证。
+
+如果 Server、Runner 已由其他方式托管，可以让 Desktop 仅作为查看端连接。在尚未保存 Environment 的机器上，用 Server 的实际可达地址和受保护文件中的现有**用户 API 凭据**执行：
+
+```bash
+target/dogfood/webcodex environment configure \
+  --join http://127.0.0.1:8080 --no-project \
+  --token-file /private/path/webcodex-user-token --bin-dir "$PWD/target/dogfood"
+WEBCODEX_DESKTOP_BIN_DIR="$PWD/target/dogfood" \
+  apps/desktop/src-tauri/target/dogfood/webcodex-desktop
+```
+
+在已登录的图形会话中启动 Desktop。已有 Environment 时会检查冲突，以上步骤不要求覆盖旧配置。仅查看配置不创建 Runner 身份，也不安装、停止或接管现有服务。“本地 Runner · 未配置”指当前 Desktop 环境；项目页仍可显示独立运行的本机或远端 Runner 上获授权的项目。浏览器打开 `SERVER_URL/runtime` 可查看同一 Server 的网页控制台。
+
+升级独立托管的 Server/Runner 程序前，应先确认实际服务所有者和活动任务，保存旧程序、配置以及一致的 Server 数据快照，再通过原所有者的生命周期入口切换。升级后核对构建身份、Runner 身份和项目注册是否恢复。原 Tunnel 配置仍由原所有者管理。该手动源码部署与 Core 迁移、安装器升级不同，参见[已记录的 Linux dogfood 证据](unified-deployment-validation.md#linux-源码部署证据)。
+
 ## 在 Windows 本地构建 installer
 
 当前 Windows 分发格式是 current-user NSIS installer，项目正式构建目前也是 unsigned。
 
+普通本地 dogfood 建议直接在仓库根目录使用完整 helper：
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1
+```
+
+默认情况下它要求 clean 且已提交的 worktree。它会自动安装共享 frontend 与 Desktop
+两套 npm dependency、构建三个 dogfood runtime、stage 经过验证的 runtime，复用
+`target\desktop-local-tauri\` 作为 Tauri 编译缓存，生成 unsigned NSIS installer，并把
+installer 与 SHA-256 文件统一放到 `target\desktop-local-dist\`。
+
+如果只是希望把尚未提交的修改打成 installer 做本地验证，可以显式 opt-in：
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1 -AllowDirty
+```
+
+这不会伪装源码状态：包内 runtime 仍然报告 `dirty=true`，staging 会按这个精确状态
+验证，产物文件名也会包含 `dirty-<commit>`。这种 installer 只属于本地 dogfood
+evidence，不能作为正式 Release artifact 发布。
+
+helper 默认**不会**真正安装这个包，因此日常已经安装 WebCodex Desktop 的 dogfood
+机器也可以直接构建。如果还要执行会安装并随后卸载测试包的 native smoke，请在
+disposable VM / 测试用户或当前没有安装 WebCodex Desktop 的 Windows 用户下显式运行：
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1 -Smoke
+```
+
+下面继续保留等价手工步骤，主要用于定位某一个打包阶段的问题。
+
 ### 1. 使用干净、已提交的源码
 
-Desktop staging helper 会验证精确 build provenance，并要求三个 embedded runtime
-都报告 `dirty=false`。
+下面的手工流程描述 clean path。Desktop staging helper 会验证显式传入的 dirty 状态；
+普通 CI/release 与这条手工 clean path 都要求三个 embedded runtime 报告 `dirty=false`。
+如果要打包尚未提交的本地修改，应使用上面的一键 `-AllowDirty` 路径。
 
 ```powershell
 git status --short
@@ -175,12 +239,16 @@ helper 会验证三个 executable，把它们 byte-for-byte 复制到生成的
 ### 4. 构建 NSIS
 
 ```powershell
-$targetDir = Join-Path $PWD "target\desktop-local-tauri-$PID"
+$targetDir = Join-Path $PWD "target\desktop-local-tauri"
 $env:CARGO_TARGET_DIR = $targetDir
+$bundleDir = Join-Path $targetDir "release\bundle\nsis"
+if (Test-Path -LiteralPath $bundleDir) {
+  Remove-Item -LiteralPath $bundleDir -Recurse -Force
+}
 
 Push-Location apps\desktop
 try {
-  npm exec tauri -- build --bundles nsis --config $config --ci --no-sign -- --locked
+  node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $config --ci --no-sign -- --locked
   if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
 } finally {
   Pop-Location
@@ -190,7 +258,7 @@ try {
 installer 位于：
 
 ```text
-target\desktop-local-tauri-<pid>\release\bundle\nsis\
+target\desktop-local-tauri\release\bundle\nsis\
 ```
 
 native host 与 smoke/release platform 对应关系：
@@ -239,7 +307,7 @@ smoke 会真正走 native installer，并验证包内 runtime identity。Windows
 bash scripts/build_desktop_macos_local.sh
 ```
 
-它要求 clean worktree，会自动安装 Desktop npm dependency、构建 dogfood runtime、完成 staging、生成 native ad-hoc signed DMG、运行 macOS smoke，并把最终文件放到 `target/desktop-local-dist/`。下面继续保留等价手工流程，方便理解或排查某一个阶段。
+它要求 clean worktree，会自动安装共享 frontend 与 Desktop 两套 npm dependency、构建 dogfood runtime、完成 staging、生成 native ad-hoc signed DMG、运行 macOS smoke，并把最终文件放到 `target/desktop-local-dist/`。下面继续保留等价手工流程，方便理解或排查某一个阶段。
 
 ### 1. 使用干净、已提交的源码
 
@@ -404,6 +472,7 @@ lifecycle、tray/menu、autostart 或 bundled runtime resources。
 - [extended native validation](../.github/workflows/extended-native.yml)；
 - [release candidate build](../.github/workflows/release-build.yml)；
 - `scripts/prepare_desktop_bundle.ps1`；
+- `scripts/build_desktop_windows_local.ps1`；
 - `scripts/build_desktop_macos_local.sh`；
 - `scripts/prepare_desktop_bundle_macos.py`；
 - `scripts/desktop_install_windows_smoke.ps1`；

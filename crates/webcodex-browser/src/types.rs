@@ -101,6 +101,118 @@ pub struct PageSummary {
     pub url: String,
 }
 
+/// Admitted Browser effects for one resolved control.
+///
+/// `actions` on a snapshot node is this set in canonical order. AX role alone
+/// does not populate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ControlCapability {
+    pub(crate) pointer_click: bool,
+    pub(crate) text_input: bool,
+    pub(crate) select_option: bool,
+    pub(crate) exact_value: bool,
+    pub(crate) file_upload: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmittedBrowserAction {
+    Click,
+    InputText,
+    SelectOption,
+    SetValue,
+    UploadFile,
+}
+
+impl ControlCapability {
+    pub(crate) const fn click() -> Self {
+        Self {
+            pointer_click: true,
+            text_input: false,
+            select_option: false,
+            exact_value: false,
+            file_upload: false,
+        }
+    }
+
+    pub(crate) const fn text_input() -> Self {
+        Self {
+            pointer_click: true,
+            text_input: true,
+            select_option: false,
+            exact_value: false,
+            file_upload: false,
+        }
+    }
+
+    pub(crate) const fn select_option() -> Self {
+        Self {
+            pointer_click: false,
+            text_input: false,
+            select_option: true,
+            exact_value: false,
+            file_upload: false,
+        }
+    }
+
+    pub(crate) const fn exact_value() -> Self {
+        Self {
+            pointer_click: false,
+            text_input: false,
+            select_option: false,
+            exact_value: true,
+            file_upload: false,
+        }
+    }
+
+    pub(crate) const fn file_upload() -> Self {
+        Self {
+            pointer_click: false,
+            text_input: false,
+            select_option: false,
+            exact_value: false,
+            file_upload: true,
+        }
+    }
+
+    pub(crate) const fn admits_any(self) -> bool {
+        self.pointer_click
+            || self.text_input
+            || self.select_option
+            || self.exact_value
+            || self.file_upload
+    }
+
+    pub(crate) const fn admits(self, action: AdmittedBrowserAction) -> bool {
+        match action {
+            AdmittedBrowserAction::Click => self.pointer_click,
+            AdmittedBrowserAction::InputText => self.text_input,
+            AdmittedBrowserAction::SelectOption => self.select_option,
+            AdmittedBrowserAction::SetValue => self.exact_value,
+            AdmittedBrowserAction::UploadFile => self.file_upload,
+        }
+    }
+
+    pub(crate) fn action_names(self) -> Vec<String> {
+        let mut names = Vec::new();
+        if self.pointer_click {
+            names.push("click".to_string());
+        }
+        if self.text_input {
+            names.push("input_text".to_string());
+        }
+        if self.select_option {
+            names.push("select_option".to_string());
+        }
+        if self.exact_value {
+            names.push("set_value".to_string());
+        }
+        if self.file_upload {
+            names.push("upload_file".to_string());
+        }
+        names
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SemanticNode {
     pub role: String,
@@ -128,6 +240,9 @@ pub struct SemanticNode {
     pub read_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
+    /// Canonical `browser_act` effects this node admits. Empty for semantic-only nodes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
     pub actionable: bool,
 }
 
@@ -270,6 +385,98 @@ pub(crate) fn clip_bytes(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_observation_json_publishes_model_facing_fields_only() {
+        let snapshot = SemanticSnapshot {
+            browser_id: "browser_abcdefghijklmnop".to_string(),
+            page_id: "page_abcdefghijklmnop".to_string(),
+            snapshot_generation: 4,
+            snapshot_mode: SnapshotMode::Interactive.as_str().to_string(),
+            auto_compacted: true,
+            max_nodes: 256,
+            max_depth: 32,
+            node_count: 2,
+            truncated: false,
+            nodes: vec![
+                SemanticNode {
+                    role: "combobox".to_string(),
+                    name: Some("Fruit".to_string()),
+                    description: None,
+                    value: None,
+                    group_id: None,
+                    group_role: None,
+                    group_label: None,
+                    checked: None,
+                    selected: None,
+                    required: Some(true),
+                    disabled: Some(false),
+                    read_only: None,
+                    element_id: Some("element_abcdefghijklmnop".to_string()),
+                    actions: vec!["select_option".to_string()],
+                    actionable: true,
+                },
+                SemanticNode {
+                    role: "option".to_string(),
+                    name: Some("Apple".to_string()),
+                    description: None,
+                    value: Some("a".to_string()),
+                    group_id: Some("group_1".to_string()),
+                    group_role: Some("combobox".to_string()),
+                    group_label: Some("Fruit".to_string()),
+                    checked: None,
+                    selected: Some(true),
+                    required: None,
+                    disabled: Some(false),
+                    read_only: None,
+                    element_id: None,
+                    actions: Vec::new(),
+                    actionable: false,
+                },
+            ],
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let object = value.as_object().unwrap();
+        for field in [
+            "snapshot_mode",
+            "auto_compacted",
+            "max_nodes",
+            "max_depth",
+            "nodes",
+        ] {
+            assert!(object.contains_key(field), "missing {field}");
+        }
+        for forbidden in ["target_id", "backend_node_id", "document_id"] {
+            assert!(!object.contains_key(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(value["snapshot_mode"], "interactive");
+        assert_eq!(value["auto_compacted"], true);
+        let option = &value["nodes"][1];
+        assert_eq!(option["name"], "Apple");
+        assert_eq!(option["value"], "a");
+        assert_eq!(option["group_label"], "Fruit");
+        assert_eq!(option["selected"], true);
+        assert_eq!(option["disabled"], false);
+        assert_eq!(option["actionable"], false);
+        assert!(option.get("actions").is_none());
+        assert!(option.get("element_id").is_none());
+        assert!(option.get("backend_node_id").is_none());
+
+        let stability = serde_json::to_value(BrowserStability {
+            stable: false,
+            waited_ms: 250,
+            reason: "dom_quiet_with_long_lived_network".to_string(),
+        })
+        .unwrap();
+        let mut stability_fields = stability
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        stability_fields.sort_unstable();
+        assert_eq!(stability_fields, ["reason", "stable", "waited_ms"]);
+    }
 
     #[test]
     fn navigation_policy_is_http_https_only() {

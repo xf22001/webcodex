@@ -4,6 +4,7 @@ mod commands;
 mod connection_id;
 mod connections;
 mod deadline;
+mod desktop_data_dir;
 mod desktop_shell;
 mod diagnostics;
 mod error;
@@ -12,6 +13,7 @@ mod models;
 mod operation;
 mod platform;
 mod process;
+mod project_inventory;
 mod runner_capability_grant;
 mod runtime_selection;
 mod ssh_resources;
@@ -25,6 +27,9 @@ mod workspace;
 use state::AppState;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
+
+/// The no-window CLI probe and Tauri command share one build-info source.
+pub use commands::get_desktop_build_info as desktop_build_info;
 
 pub fn run() {
     let app = tauri::Builder::default()
@@ -40,9 +45,19 @@ pub fn run() {
             Some(vec!["--background"]),
         ))
         .setup(|app| {
-            let data_dir = app.path().app_local_data_dir()?;
+            let logical_data_dir = app.path().app_local_data_dir()?;
+            let data_dir = desktop_data_dir::resolve(logical_data_dir)?;
+            eprintln!(
+                "WebCodex Desktop data root source={} physical_resolution={}",
+                data_dir.source.label(),
+                if data_dir.physical_resolution_changed {
+                    "changed"
+                } else {
+                    "unchanged"
+                }
+            );
             let resource_dir = app.path().resource_dir()?;
-            app.manage(AppState::new(data_dir, resource_dir)?);
+            app.manage(AppState::new_resolved(data_dir, resource_dir)?);
             app.manage(desktop_shell::DesktopShellState::default());
             app.manage(tray::TrayPresentationCache::default());
             tray::setup(app.handle())?;
@@ -59,6 +74,11 @@ pub fn run() {
             commands::get_runtime_settings,
             commands::get_desktop_build_info,
             commands::check_for_updates,
+            commands::get_update_download_state,
+            commands::download_update,
+            commands::cancel_update_download,
+            commands::set_automatic_update_download,
+            commands::install_verified_update,
             commands::remind_update_later,
             commands::open_latest_release,
             commands::get_diagnostics,
@@ -77,6 +97,7 @@ pub fn run() {
             commands::get_runner_settings,
             commands::add_runner_plugin,
             commands::update_runner_settings,
+            commands::update_runner_allowed_roots,
             commands::restart_owned_runner,
             commands::open_powershell_install_guide,
             commands::get_launch_at_login,
@@ -99,7 +120,12 @@ pub fn run() {
             commands::tunnel_profile_action,
             commands::inspect_project,
             commands::configure_local_setup,
+            commands::configure_environment,
+            commands::environment_service_action,
+            commands::repair_environment_user_credential,
             commands::activate_local_project,
+            commands::prepare_project_unregister,
+            commands::unregister_project,
             commands::configure_remote_setup,
             commands::start_quick_share,
             commands::stop_quick_share,

@@ -10,7 +10,7 @@ Server：
 
 - `webcodex --version` 能打印版本。
 - `webcodex server status --env-file /etc/webcodex/webcodex.env` 报告本地 server reachable。
-- 在 server host 上，`curl http://127.0.0.1:8080/openapi.json` 返回 OpenAPI JSON。
+- 在 server host 上，`curl -f http://127.0.0.1:8080/healthz` 返回 HTTP 200。
 - 如果使用 nginx 或其他 reverse proxy，public HTTPS 可访问。
 
 Client：
@@ -104,6 +104,27 @@ Runner。
 不要公开 access token、OAuth secret、`Authorization` header、完整 env file、完整
 `runner.toml`，也不要未经检查/脱敏直接贴 full raw trace。
 
+### 长任务期间 ChatGPT 显示 `Thinking stopped` / `Thinking failed`
+
+WebCodex 的长任务 Job 不依赖单个 ChatGPT/model turn 一直保持打开。命令或验证超过
+同步等待窗口后，会继续作为同一个 Job 运行，并保留稳定的 `job_id`。因此，ChatGPT
+界面在长任务期间出现 `Thinking stopped` 或 `Thinking failed`，**本身不能说明**
+本地进程或 WebCodex Job 已经失败，也不能据此判断存在某个固定的 Host/server 超时。
+
+遇到这种情况时：
+
+1. **不要立即重新执行同一个任务。** 如果手头还有 `job_id`，先观察这个 Job；
+   如果 Job 身份确实丢失，再用 Job 列表恢复身份。
+2. 如果原 Job 仍处于 running、queued 或 recovering 状态，继续观察它，或先处理
+   不依赖终态结果的其他工作。不要仅因为 ChatGPT turn 结束就启动第二个副本。
+3. 如果当前 ChatGPT 会话还能继续，在原会话发送“继续”，并让它重新检查已有 Job
+   后从先前进度继续。开始一个新的 model turn 不要求重新启动底层 Job。
+4. 只有确认原 Job 已经终止、丢失，且重试本身安全时，才考虑重新执行。状态不确定时，
+   应先重新观察/核对现有 Job，避免产生重复进程、重复副作用或资源冲突。
+
+更多 Job 行为见 [Coding workflow：Long-running work](CODING_WORKFLOW.md#long-running-work)
+和 [Runner：Jobs and concurrency](RUNNER.md#jobs-and-concurrency)。
+
 ## 常见问题
 
 ### `webcodex connect` 无法完成
@@ -174,7 +195,7 @@ sudo systemctl daemon-reload
 ```bash
 systemctl status webcodex
 journalctl -u webcodex
-curl http://127.0.0.1:8080/openapi.json
+curl -f http://127.0.0.1:8080/healthz
 ```
 
 如果本地 HTTP 正常但 public HTTPS 不通，检查 nginx upstream host/port 和 TLS 配置。WebCodex CLI 不会自动配置 reverse proxy。
@@ -247,11 +268,7 @@ Actions surface 已不再暴露退休的 `listRuntimeTools` facade。
 
 ### GPT Action 仍在使用旧 schema
 
-从已部署的 `/openapi.json` 重新导入 OpenAPI schema，然后检查 operation count。
-该数量由当前 Adaptive Direct projection 加 `call_runtime_tool` 动态派生，不应再和
-固定“推荐数量”比较。生成 surface 必须保持在 GPT Actions 的 30-operation ceiling
-以下；如果达到 ceiling，应调整 canonical Adaptive projection 或真实的 protocol
-exception，而不是静默截断 schema。
+先确认部署的 Server 是使用 `legacy-gpt-actions` 构建的；默认构建不会挂载 `/openapi.json` 或 `/api/actions/*`。对于明确保留的 legacy 部署，重新导入 `/openapi.json`。它的 operation set 是冻结兼容快照加 `call_runtime_tool`，正常维护的 Adaptive Runtime 变化不会再扩张该 surface。修改这层 adapter 时运行独立 legacy workflow 或 feature-enabled tests。
 
 ### MCP tool list 看起来是旧的
 
@@ -304,9 +321,7 @@ Runner-backed git project。
 
 ### `operation_count` 超过 30
 
-生成的 GPT Actions surface 必须保持在 30 operations 以下。long-tail runtime
-tools（包括 chunked artifact upload tools）继续通过 `call_runtime_tool` 调用；direct
-operations 从 canonical Adaptive Direct surface 派生，不维护单独的 Actions allowlist。
+只有启用 `legacy-gpt-actions` 的兼容构建才受这项限制。direct operations 来自冻结快照，long-tail entries 通过 `call_runtime_tool`；不要通过普通 Adaptive Runtime 调整来迁就这个 legacy budget。若冻结 surface 本身触及上限，应在 legacy adapter 内做明确兼容性调整，并由独立 legacy CI 验证。
 
 ### `artifact_upload_chunk` 报 `path` 缺失
 

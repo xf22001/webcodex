@@ -10,7 +10,7 @@ Server:
 
 - `webcodex --version` prints a version.
 - `webcodex server status --env-file /etc/webcodex/webcodex.env` reports the local server reachable.
-- `curl http://127.0.0.1:8080/openapi.json` returns OpenAPI JSON on the server host.
+- `curl -f http://127.0.0.1:8080/healthz` returns HTTP 200 on the server host.
 - Public HTTPS is reachable through nginx or your chosen reverse proxy, if used.
 
 Client:
@@ -111,6 +111,35 @@ When reporting this class of issue, include only safe evidence:
 Do **not** publish access tokens, OAuth secrets, `Authorization` headers,
 complete env files, complete `runner.toml`, or an unreviewed raw full trace.
 
+### ChatGPT reports `Thinking stopped` / `Thinking failed` during long-running work
+
+A long-running WebCodex Job does not depend on one ChatGPT/model turn remaining
+open. When a command or validation outlives the synchronous grace period, it
+continues as the same Job with a stable `job_id`. Therefore, `Thinking stopped`
+or `Thinking failed` in the ChatGPT UI during long-running work does **not by
+itself** mean that the local process or WebCodex Job failed, and it does not
+establish that a fixed Host/server timeout was reached.
+
+When this happens:
+
+1. **Do not immediately run the same task again.** If you still have the
+   `job_id`, observe that Job first. Use the Job list only when its identity was
+   genuinely lost.
+2. If the existing Job is still running, queued, or recovering, keep observing
+   it or continue independent work. Do not start a second copy merely because
+   the ChatGPT turn ended.
+3. If the same ChatGPT conversation can continue, send “continue” and ask it to
+   re-observe the existing Job before resuming from the previous progress. A new
+   model turn does not require restarting the underlying Job.
+4. Start a replacement only after the original Job is confirmed terminal or
+   lost and retrying is safe. If its state is uncertain, re-observe/reconcile
+   the existing Job first to avoid duplicate processes, duplicate side effects,
+   or resource conflicts.
+
+See [Coding workflow: Long-running work](CODING_WORKFLOW.md#long-running-work)
+and [Runner: Jobs and concurrency](RUNNER.md#jobs-and-concurrency) for the Job
+lifecycle details.
+
 ## Common issues
 
 ### `webcodex connect` cannot finish
@@ -190,7 +219,7 @@ Check the local service first, then the reverse proxy:
 ```bash
 systemctl status webcodex
 journalctl -u webcodex
-curl http://127.0.0.1:8080/openapi.json
+curl -f http://127.0.0.1:8080/healthz
 ```
 
 If local HTTP works but public HTTPS does not, check the nginx upstream host/port and TLS configuration. WebCodex CLI does not automate reverse proxy setup.
@@ -267,12 +296,7 @@ generic Actions surface no longer exposes the retired `listRuntimeTools` facade.
 
 ### GPT Action still uses an old schema
 
-Re-import the OpenAPI schema from the deployed `/openapi.json`, then check the
-operation count. It is derived from the current Adaptive Direct projection plus
-`call_runtime_tool`, so do not compare it with a fixed recommended count. The
-generated surface must remain below the GPT Actions 30-operation ceiling; if it
-reaches that ceiling, change the canonical Adaptive projection or a real protocol
-exception rather than silently truncating the schema.
+First confirm the deployed Server was built with `legacy-gpt-actions`; default builds do not mount `/openapi.json` or `/api/actions/*`. For an intentionally retained legacy deployment, re-import `/openapi.json`. Its operation set is a frozen compatibility snapshot plus `call_runtime_tool`; maintained Adaptive Runtime changes no longer grow it. Run the separate legacy workflow or the feature-enabled tests when changing that adapter.
 
 ### MCP tool list looks stale
 

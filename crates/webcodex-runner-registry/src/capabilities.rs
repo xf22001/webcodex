@@ -19,6 +19,7 @@ pub enum RunnerFeature {
     ApplyTextEditOccurrence,
     ApplyTextEditLocalGuardWithoutSha,
     ApplyTextEditLineScope,
+    ApplyTextEditRange,
     ApplyTextEditExpectedMatchCount,
     ApplyPatch,
     ApplyPatchMatchMetadata,
@@ -56,6 +57,7 @@ pub enum RunnerFeature {
     SkillManagement,
     BrowserObserve,
     BrowserControl,
+    BrowserElementActionAdmission,
     BrowserLaunch,
     ComputerObserve,
     ComputerApplicationDiscovery,
@@ -92,6 +94,7 @@ const ALL_RUNNER_FEATURES: &[RunnerFeature] = &[
     RunnerFeature::ApplyTextEditOccurrence,
     RunnerFeature::ApplyTextEditLocalGuardWithoutSha,
     RunnerFeature::ApplyTextEditLineScope,
+    RunnerFeature::ApplyTextEditRange,
     RunnerFeature::ApplyTextEditExpectedMatchCount,
     RunnerFeature::ApplyPatch,
     RunnerFeature::ApplyPatchMatchMetadata,
@@ -129,6 +132,7 @@ const ALL_RUNNER_FEATURES: &[RunnerFeature] = &[
     RunnerFeature::SkillManagement,
     RunnerFeature::BrowserObserve,
     RunnerFeature::BrowserControl,
+    RunnerFeature::BrowserElementActionAdmission,
     RunnerFeature::BrowserLaunch,
     RunnerFeature::ComputerObserve,
     RunnerFeature::ComputerApplicationDiscovery,
@@ -166,6 +170,26 @@ pub(crate) enum RunnerFeatureInference {
 }
 
 impl RunnerFeature {
+    pub(crate) const fn is_computer(self) -> bool {
+        matches!(
+            self,
+            Self::ComputerObserve
+                | Self::ComputerApplicationDiscovery
+                | Self::ComputerApplicationLaunch
+                | Self::ComputerDisplayObserve
+                | Self::ComputerPointerControl
+                | Self::ComputerClipboardRead
+                | Self::ComputerClipboardWrite
+                | Self::ComputerSnapshotRegion
+                | Self::ComputerAccessibilityObserve
+                | Self::ComputerElementState
+                | Self::ComputerControl
+                | Self::ComputerScrollToElement
+                | Self::ComputerKeyInput
+                | Self::ComputerWindowActivate
+                | Self::ComputerTextInput
+        )
+    }
     pub(crate) const fn all() -> &'static [Self] {
         ALL_RUNNER_FEATURES
     }
@@ -187,6 +211,7 @@ impl RunnerFeature {
                 wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LOCAL_GUARD_WITHOUT_SHA
             }
             Self::ApplyTextEditLineScope => wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE,
+            Self::ApplyTextEditRange => wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_RANGE,
             Self::ApplyTextEditExpectedMatchCount => {
                 wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_EXPECTED_MATCH_COUNT
             }
@@ -236,6 +261,9 @@ impl RunnerFeature {
             Self::SkillManagement => wire::RUNNER_CAPABILITY_SKILL_MANAGEMENT,
             Self::BrowserObserve => wire::RUNNER_CAPABILITY_BROWSER_OBSERVE,
             Self::BrowserControl => wire::RUNNER_CAPABILITY_BROWSER_CONTROL,
+            Self::BrowserElementActionAdmission => {
+                wire::RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION
+            }
             Self::BrowserLaunch => wire::RUNNER_CAPABILITY_BROWSER_LAUNCH,
             Self::ComputerObserve => wire::RUNNER_CAPABILITY_COMPUTER_OBSERVE,
             Self::ComputerApplicationDiscovery => {
@@ -282,6 +310,7 @@ impl RunnerFeature {
                 Self::ApplyTextEditLocalGuardWithoutSha
             }
             wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE => Self::ApplyTextEditLineScope,
+            wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_RANGE => Self::ApplyTextEditRange,
             wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_EXPECTED_MATCH_COUNT => {
                 Self::ApplyTextEditExpectedMatchCount
             }
@@ -331,6 +360,9 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_SKILL_MANAGEMENT => Self::SkillManagement,
             wire::RUNNER_CAPABILITY_BROWSER_OBSERVE => Self::BrowserObserve,
             wire::RUNNER_CAPABILITY_BROWSER_CONTROL => Self::BrowserControl,
+            wire::RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION => {
+                Self::BrowserElementActionAdmission
+            }
             wire::RUNNER_CAPABILITY_BROWSER_LAUNCH => Self::BrowserLaunch,
             wire::RUNNER_CAPABILITY_COMPUTER_OBSERVE => Self::ComputerObserve,
             wire::RUNNER_CAPABILITY_COMPUTER_APPLICATION_DISCOVERY => {
@@ -396,6 +428,7 @@ impl RunnerFeature {
             | Self::StructuredCargoTestLib
             | Self::StructuredCargoCheckPackages
             | Self::ApplyTextEditLineScope
+            | Self::ApplyTextEditRange
             | Self::ApplyTextEditExpectedMatchCount
             | Self::ApplyTextEditLocalGuardWithoutSha
             | Self::ApplyPatch
@@ -411,6 +444,7 @@ impl RunnerFeature {
             | Self::SkillManagement
             | Self::BrowserObserve
             | Self::BrowserControl
+            | Self::BrowserElementActionAdmission
             | Self::BrowserLaunch
             | Self::ComputerObserve
             | Self::ComputerApplicationDiscovery
@@ -453,6 +487,7 @@ impl RunnerFeature {
                 capabilities.apply_text_edit_local_guard_without_sha
             }
             Self::ApplyTextEditLineScope => capabilities.apply_text_edit_line_scope,
+            Self::ApplyTextEditRange => capabilities.apply_text_edit_range,
             Self::ApplyTextEditExpectedMatchCount => {
                 capabilities.apply_text_edit_expected_match_count
             }
@@ -496,6 +531,7 @@ impl RunnerFeature {
             Self::SkillManagement => capabilities.skill_management,
             Self::BrowserObserve => capabilities.browser_observe,
             Self::BrowserControl => capabilities.browser_control,
+            Self::BrowserElementActionAdmission => capabilities.browser_element_action_admission,
             Self::BrowserLaunch => capabilities.browser_launch,
             Self::ComputerObserve => capabilities.computer_observe,
             Self::ComputerApplicationDiscovery => capabilities.computer_application_discovery,

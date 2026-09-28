@@ -36,7 +36,7 @@ where
     }
 }
 
-fn compact_validation_job(
+pub(super) fn compact_validation_job(
     project: &str,
     source_fence: Option<webcodex_core::validation_source::ValidationSourceFence>,
 ) -> crate::runner_protocol::ShellJobInfo {
@@ -151,6 +151,62 @@ fn compact_validation_job_summary_reobserves_missing_crossed_and_restart_fences(
         assert!(!encoded.contains("secret assertion label"));
         assert!(!encoded.contains("0123456789abcdef01234567"));
     }
+}
+
+#[test]
+fn passive_validation_projection_separates_execution_result_from_source_freshness() {
+    let runtime = ToolRuntime::new_for_tests();
+    let project = "agent:passive-validation:demo";
+    let start = runtime.validation_sources.capture(project).unwrap();
+    let mut job = compact_validation_job(project, Some(start.clone()));
+    job.exit_code = Some(0);
+
+    let passed = runtime
+        .passive_job_validation_projection(&job, None)
+        .expect("structured validation projection");
+    assert_eq!(passed["tool"], "cargo_check");
+    assert_eq!(passed["passed"], true);
+    assert_eq!(passed["source_state"]["freshness"], "unproven");
+    assert_eq!(
+        passed["source_state"]["observed_mutation_fence"],
+        "uncrossed"
+    );
+    assert!(passed.get("diagnostics").is_none());
+
+    runtime
+        .validation_sources
+        .begin(project)
+        .unwrap()
+        .finish(&ToolResult::ok(json!({"state_changed": true})));
+    let stale = runtime
+        .passive_job_validation_projection(&job, None)
+        .expect("stale structured validation projection");
+    assert_eq!(
+        stale["passed"], true,
+        "execution success remains historical fact"
+    );
+    assert_eq!(stale["source_state"]["freshness"], "stale");
+    assert_eq!(stale["source_state"]["observed_mutation_fence"], "crossed");
+
+    job.exit_code = Some(1);
+    let failed = runtime
+        .passive_job_validation_projection(&job, None)
+        .expect("failed structured validation projection");
+    assert_eq!(failed["passed"], false);
+
+    let metadata = job.validation.as_mut().unwrap();
+    metadata.tool = "cargo_test".to_string();
+    metadata.kind = "test".to_string();
+    job.exit_code = Some(0);
+    job.test_count_evidence = None;
+    let inconclusive = runtime
+        .passive_job_validation_projection(&job, None)
+        .expect("test validation projection");
+    assert!(
+        inconclusive["passed"].is_null(),
+        "successful cargo_test without authoritative executed-test evidence must remain inconclusive"
+    );
+    assert_eq!(inconclusive["source_state"]["freshness"], "stale");
 }
 
 #[tokio::test]
@@ -566,20 +622,7 @@ async fn long_run_shell_hands_off_same_job_once_and_status_log_stop_observe_it()
 
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    assert!(result.output.get("promoted_to_job").is_none());
-    assert_eq!(result.output["terminal"], false);
-    assert_eq!(result.output["execution_state"], "running");
-    assert_eq!(result.output["command_started"], true);
-    assert_eq!(result.output["command_completed"], false);
-    assert_eq!(result.output["effective_timeout_secs"], 600);
-    assert_eq!(result.output["sync_wait_secs"], 1);
-    assert_eq!(result.output["job_id"], job_id);
-    assert_eq!(result.output["purpose"], "diagnostic");
-    assert_eq!(result.output["shell"], "bash");
-    assert_eq!(result.output["cwd"], ".");
-    assert_observe_job_continuation(&result.output);
-    assert!(result.output.as_object().unwrap().contains_key("activity"));
-    assert!(result.output["activity"].is_null());
+    assert_eq!(assert_sparse_pending_job_handoff(&result.output), job_id);
     assert_run_shell_result_matches_schema(&result);
     assert!(
         probe_patch_agent_request(&runtime, client_id)
@@ -808,6 +851,7 @@ async fn long_run_shell_async_job_capability_does_not_bypass_shell_authority() {
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                computer_session_availability: None,
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: Some(4),
@@ -1726,6 +1770,7 @@ pub(super) async fn register_job_agent_for_auth_with_reconciliation(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                computer_session_availability: None,
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: Some(4),
@@ -1780,6 +1825,7 @@ async fn register_managed_job_agent(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: Some(4),
@@ -1895,9 +1941,11 @@ fn assert_unknown_job(result: ToolResult) {
     assert!(result.output.get("recovery_tool").is_none());
     assert_eq!(
         result.output["suggested_call"],
-        json!({"tool": "list_jobs", "arguments": {}})
+        json!({"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}})
     );
     let suggested = &result.output["suggested_call"];
+    webcodex_tool_contracts::test_support::validate_generated_tool_call_against_registered_input_schema(suggested)
+        .expect("unknown Job recovery must pass list_jobs registered inputSchema");
     let parsed = ToolCall::from_tool_name(
         suggested["tool"].as_str().unwrap(),
         suggested["arguments"].clone(),
@@ -1992,7 +2040,7 @@ async fn managed_user_job_inventory_and_counts_do_not_cross_owner() {
         )
         .await;
     assert!(alice_status.success, "{:?}", alice_status.error);
-    assert_eq!(alice_status.output["agents"]["count"], 1);
+    assert_eq!(alice_status.output["runners"]["count"], 1);
     assert_eq!(alice_status.output["jobs"]["active_count"], 1);
     assert!(!alice_status.output.to_string().contains("bob-runner"));
     assert!(!alice_status.output.to_string().contains(&bob_job));
@@ -2484,13 +2532,13 @@ async fn runtime_status_and_list_runners_filter_concurrency_counts_by_auth_group
     assert_eq!(status_a.output["jobs"]["running_count"], 1);
     assert_eq!(status_a.output["jobs"]["queued_count"], 1);
     assert_eq!(
-        status_a.output["agents"]["clients"][0]["job_concurrency"],
+        status_a.output["runners"]["clients"][0]["job_concurrency"],
         json!({"limit": 4, "running": 1, "queued": 1})
     );
-    assert!(status_a.output["agents"]["clients"][0]
+    assert!(status_a.output["runners"]["clients"][0]
         .get("available_slots")
         .is_none());
-    assert!(status_a.output["agents"]["clients"][0]
+    assert!(status_a.output["runners"]["clients"][0]
         .get("saturated")
         .is_none());
 
@@ -2507,16 +2555,14 @@ async fn runtime_status_and_list_runners_filter_concurrency_counts_by_auth_group
         .await;
     assert!(agents_a.success, "{:?}", agents_a.error);
     assert_eq!(agents_a.output["count"], 1);
-    assert_eq!(agents_a.output["agents"][0]["client_id"], "status-a");
+    assert_eq!(agents_a.output["runners"][0]["client_id"], "status-a");
     assert_eq!(
-        agents_a.output["agents"][0]["job_concurrency"],
+        agents_a.output["runners"][0]["job_concurrency"],
         json!({"limit": 4, "running": 1, "queued": 1})
     );
-    assert_eq!(
-        agents_a.output["clients"][0]["job_concurrency"],
-        json!({"limit": 4, "running": 1, "queued": 1})
-    );
-    let new_observability = agents_a.output["agents"][0]["job_concurrency"]
+    assert!(agents_a.output.get("clients").is_none());
+    assert!(agents_a.output["summary"].get("clients").is_none());
+    let new_observability = agents_a.output["runners"][0]["job_concurrency"]
         .as_object()
         .unwrap();
     assert_eq!(new_observability.len(), 3);
@@ -2564,7 +2610,7 @@ async fn runtime_status_and_list_runners_filter_concurrency_counts_by_auth_group
     assert_eq!(status_bootstrap.output["jobs"]["active_count"], 5);
     assert_eq!(status_bootstrap.output["jobs"]["running_count"], 2);
     assert_eq!(status_bootstrap.output["jobs"]["queued_count"], 3);
-    assert_eq!(status_bootstrap.output["agents"]["count"], 3);
+    assert_eq!(status_bootstrap.output["runners"]["count"], 3);
 
     let compact_a = runtime
         .dispatch_with_auth(
@@ -2578,7 +2624,7 @@ async fn runtime_status_and_list_runners_filter_concurrency_counts_by_auth_group
         .await;
     assert_eq!(
         compact_a.output["jobs"],
-        json!({"active_count": 2, "running_count": 1, "queued_count": 1})
+        json!({"active_count": 2, "running_count": 1, "queued_count": 1, "recovering_count": 0, "lost_after_reconcile_count": 0})
     );
 }
 
@@ -2606,7 +2652,7 @@ async fn runtime_concurrency_counts_cover_all_visible_jobs_beyond_list_paginatio
     assert_eq!(status.output["jobs"]["running_count"], 0);
     assert_eq!(status.output["jobs"]["queued_count"], 21);
     assert_eq!(
-        status.output["agents"]["clients"][0]["job_concurrency"],
+        status.output["runners"]["clients"][0]["job_concurrency"],
         json!({"limit": 4, "running": 0, "queued": 21})
     );
 }
@@ -2750,22 +2796,51 @@ fn job_handoff_model_projection_keeps_identity_and_exceptional_receipts() {
     });
     let mut model = ToolResult::ok(receipt.clone());
     super::super::jobs::sparsify_job_handoff_model_result(&mut model);
+    assert_eq!(
+        model
+            .output
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "continuation".to_string(),
+            "execution_state".to_string(),
+            "pending_strategy".to_string(),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(model.output["execution_state"], "pending");
+    assert_observe_job_continuation(&model.output);
+    assert_eq!(
+        model.output["pending_strategy"],
+        json!({
+            "default": "continue_independent_work",
+            "passive_terminal_attention": "same_scope_may_surface",
+            "observe_continuation": "logs_details_recovery_fallback",
+            "observe_auto_follow": false,
+            "blocked_fallback": "wait_for_job_terminal",
+        })
+    );
     for key in [
+        "job_id",
+        "job_status",
+        "terminal",
         "promoted_to_job",
         "async_handoff_available",
         "observation_token",
         "continuation_semantics",
+        "stdout_truncated",
+        "stderr_truncated",
     ] {
-        assert!(model.output.get(key).is_none());
+        assert!(model.output.get(key).is_none(), "{key}");
         assert!(
             receipt.get(key).is_some(),
-            "internal receipt stays complete"
+            "internal receipt stays complete for {key}"
         );
     }
-    assert_eq!(model.output["terminal"], false);
-    assert_eq!(model.output["job_status"], "running");
-    assert_eq!(model.output["stdout_truncated"], true);
-    assert_observe_job_continuation(&model.output);
     assert_eq!(
         serde_json::to_string(&model.output)
             .unwrap()

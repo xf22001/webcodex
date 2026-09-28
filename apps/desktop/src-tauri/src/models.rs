@@ -19,6 +19,7 @@ pub enum ServerTopology {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunnerTopology {
     Local,
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub enum Enrollment {
     ManagedPairing,
     SharedKey,
     ExistingProfile { profile: String },
+    UserCredential,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,10 +151,10 @@ pub fn aggregate_readiness(
     exposure: ExposureReadiness,
     project: ProjectReadiness,
 ) -> ReadinessSnapshot {
-    let runtime_ready = server == ServerReadiness::Ready
-        && runner == RunnerReadiness::Ready
-        && project == ProjectReadiness::Ready;
-    let ready_for_chatgpt = runtime_ready && exposure == ExposureReadiness::RemoteReady;
+    let runtime_ready = server == ServerReadiness::Ready && runner == RunnerReadiness::Ready;
+    let project_usable = matches!(project, ProjectReadiness::Ready | ProjectReadiness::None);
+    let ready_for_chatgpt =
+        runtime_ready && project_usable && exposure == ExposureReadiness::RemoteReady;
     let (summary_kind, next_action_kind, summary, next_action) = if ready_for_chatgpt {
         (
             ReadinessSummaryKind::ReadyForChatGpt,
@@ -190,7 +192,7 @@ pub fn aggregate_readiness(
             "Runner is not connected".to_string(),
             Some("Start the Runner and wait for it to connect.".to_string()),
         )
-    } else if project != ProjectReadiness::Ready {
+    } else if !matches!(project, ProjectReadiness::Ready | ProjectReadiness::None) {
         (
             ReadinessSummaryKind::ProjectNotReady,
             Some(ReadinessNextActionKind::AddOrReloadProject),
@@ -255,8 +257,12 @@ pub struct QuickShareState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopOperationKind {
+    EnvironmentMigration,
+    DesktopUpdate,
+    EnvironmentService,
     LocalSetup,
     LocalProjectActivate,
+    ProjectUnregister,
     RemoteSetup,
     QuickShareStart,
     QuickShareStop,
@@ -278,8 +284,12 @@ pub enum DesktopOperationKind {
 impl DesktopOperationKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::EnvironmentMigration => "environment_migration",
+            Self::DesktopUpdate => "desktop_update",
+            Self::EnvironmentService => "environment_service",
             Self::LocalSetup => "local_setup",
             Self::LocalProjectActivate => "local_project_activate",
+            Self::ProjectUnregister => "project_unregister",
             Self::RemoteSetup => "remote_setup",
             Self::QuickShareStart => "quick_share_start",
             Self::QuickShareStop => "quick_share_stop",
@@ -392,6 +402,13 @@ pub struct ChatGptActivitySnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesktopStateSnapshot {
+    #[serde(default)]
+    pub can_repair_runner_credential: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_progress: Option<webcodex_environment::SetupProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_environment: Option<String>,
+    pub workspace_runner: Option<crate::webcodex::settings::SettingsTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_issue: Option<String>,
     pub saved_projects: Vec<ProjectSelection>,
@@ -423,6 +440,10 @@ pub struct DesktopStateSnapshot {
 impl Default for DesktopStateSnapshot {
     fn default() -> Self {
         Self {
+            can_repair_runner_credential: false,
+            setup_progress: None,
+            persistent_environment: None,
+            workspace_runner: None,
             configuration_issue: None,
             saved_projects: Vec::new(),
             topology: None,
@@ -475,6 +496,8 @@ pub struct StoredDesktopConfig {
     pub project: Option<ProjectSelection>,
     pub runtime: Option<StoredRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_autostart: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_connection: Option<RegularConnectionPreference>,
@@ -500,6 +523,7 @@ impl Default for StoredDesktopConfig {
             topology: None,
             project: None,
             runtime: None,
+            persistent_environment: None,
             runtime_autostart: None,
             preferred_connection: None,
             tunnel_proxy: Default::default(),
@@ -523,6 +547,54 @@ pub struct StoredRuntime {
     pub runner_client_id: Option<String>,
     pub project_id: Option<String>,
     pub runtime_project_id: Option<String>,
+}
+
+/// Transient native IPC input. Credentials are never included in Desktop state,
+/// activity entries, or the persistent setup journal.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentInput {
+    pub mode: String,
+    pub server_url: Option<String>,
+    pub project_path: Option<String>,
+    /// Missing preserves older callers; normal Desktop setup explicitly enables work.
+    pub runner: Option<bool>,
+    pub pairing_code: Option<String>,
+    pub user_token: Option<String>,
+    #[serde(default)]
+    pub replace_pairing_code: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentServiceComponent {
+    Server,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentServiceAction {
+    Start,
+    Stop,
+    Restart,
+    RepairCredential,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentServiceRequest {
+    pub environment_id: String,
+    pub component: EnvironmentServiceComponent,
+    pub action: EnvironmentServiceAction,
+}
+
+// Transient IPC only; never derive Debug or Serialize for credential input.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentUserCredentialRequest {
+    pub environment_id: String,
+    pub user_token: String,
 }
 
 #[cfg(test)]
@@ -602,8 +674,21 @@ mod tests {
             ExposureReadiness::RemoteReady,
             ProjectReadiness::None,
         );
-        assert!(!missing_project.runtime_ready);
-        assert!(!missing_project.ready_for_chatgpt);
+        assert!(missing_project.runtime_ready);
+        assert!(missing_project.ready_for_chatgpt);
+
+        let stale_project = aggregate_readiness(
+            ServerReadiness::Ready,
+            RunnerReadiness::Ready,
+            ExposureReadiness::RemoteReady,
+            ProjectReadiness::ReloadRequired,
+        );
+        assert!(stale_project.runtime_ready);
+        assert!(!stale_project.ready_for_chatgpt);
+        assert_eq!(
+            stale_project.summary_kind,
+            ReadinessSummaryKind::ProjectNotReady
+        );
 
         let local_only = aggregate_readiness(
             ServerReadiness::Ready,

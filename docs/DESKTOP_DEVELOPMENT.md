@@ -2,8 +2,7 @@
 
 [English](DESKTOP_DEVELOPMENT.md) | [简体中文](DESKTOP_DEVELOPMENT.zh-CN.md)
 
-This guide is for contributors who want to modify WebCodex Desktop, run it from
-source, or build an installable Windows/macOS package for local testing.
+This guide covers Desktop source development on Linux, Windows, and macOS, plus local packaging. For unified NSIS, `.pkg`, and `.deb` release/acceptance status, see [Unified installation](unified-installation.md). The Windows NSIS / macOS DMG helpers below remain local compatibility packaging workflows.
 
 For ordinary installation, use [Desktop installation](desktop-install.md). For
 day-to-day product use, see [Using Desktop](desktop-guide.md). Formal public
@@ -117,6 +116,12 @@ For an unusual local layout, set `WEBCODEX_DESKTOP_BIN_DIR` to another directory
 containing all three source-matched binaries. This override is a debug/development
 path. Installed non-debug Desktop builds require their bundled runtime resources.
 
+### Desktop data directory
+
+Desktop normally starts from Tauri's per-user app-local-data directory. On Windows, Desktop resolves the ancestors of the final Desktop-owned data-root component to their physical filesystem location before creating any missing tail directories. This supports redirected Windows profiles whose `C:\\Users\\<user>` path is an NTFS Junction while keeping one effective root for Desktop state, secrets, `runtime/local`, connection state, provider/coding-agent state, updates, diagnostics, and reset/recovery flows. An existing final WebCodex data-root component is not canonicalized through a Junction/symlink; such a reparse point is rejected instead so the credential-path safety boundary remains visible.
+
+For operator recovery or debugging, `WEBCODEX_DESKTOP_DATA_DIR` overrides the Tauri location. The value must be an absolute path. Windows applies the same physical-resolution rule to the override; Linux and macOS keep the supplied absolute path without new symlink canonicalization semantics. This override does **not** relax CLI credential-path checks: the bundled CLI still validates the final effective path and refuses unsafe credential-directory redirection.
+
 ## Run Desktop from source
 
 After building the dogfood runtime:
@@ -137,15 +142,79 @@ that is not a complete Desktop runtime and does not replace a Tauri run when the
 change depends on native commands, process lifecycle, tray/menu behavior, file
 dialogs, autostart, or bundled runtime behavior.
 
+## Linux source preview against an existing Server
+
+A native source preview uses the real Desktop backend and embedded frontend assets. It does not install a `.deb`, migrate service ownership, or establish reboot/installer acceptance. Debian/Ubuntu builds need `build-essential`, `pkg-config`, `libssl-dev`, `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, and `libayatana-appindicator3-dev`, as well as the Rust/Node prerequisites above. Run the following from the repository root after installing both npm dependency sets:
+
+```bash
+cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+npm run build --prefix apps/desktop
+cargo build --locked --profile dogfood \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml --features tauri/custom-protocol
+```
+
+Direct Cargo builds need `tauri/custom-protocol` to embed and load the built UI; the Tauri CLI normally selects it for packaged builds. These paths assume the default Cargo target directories. Verify `--build-info-json` on all four executables before deployment: source SHA, version, architecture, and dirty status must match the intended candidate. Build timestamps may differ. Local dogfood is not published build-provenance verification.
+
+If Server and Runner are already managed independently, connect Desktop as a viewer. On a machine with no saved Environment, import an existing **user API credential**, using the Server's actual reachable URL and a protected credential file:
+
+```bash
+target/dogfood/webcodex environment configure \
+  --join http://127.0.0.1:8080 --no-project \
+  --token-file /private/path/webcodex-user-token --bin-dir "$PWD/target/dogfood"
+WEBCODEX_DESKTOP_BIN_DIR="$PWD/target/dogfood" \
+  apps/desktop/src-tauri/target/dogfood/webcodex-desktop
+```
+
+Launch from the logged-in graphical session. An existing Environment is checked for conflicts; this procedure is not an instruction to overwrite it. Viewer setup creates no Runner identity and does not install, stop, or take over existing services. **Local Runner · Not configured** refers to this Desktop environment, while Projects can show authorized work on independently running local or remote Runners. Open `SERVER_URL/runtime` for the same Server's browser console.
+
+To upgrade independently managed Server/Runner binaries, first identify their real service owner, check active work, save the previous binaries/configuration and a consistent Server data snapshot, then use that owner's lifecycle controls. Verify the deployed build and recovery of the same Runner identities/project registrations. Keep existing Tunnel configuration with its owner. This manual source deployment is separate from Core migration and installer upgrade; see the [recorded Linux dogfood evidence](unified-deployment-validation.md#linux-source-deployment-evidence).
+
 ## Build a Windows installer locally
 
 The current Windows distribution format is a per-user NSIS installer. The
 official project build is unsigned.
 
+For normal local dogfood, use the complete helper from the repository root:
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1
+```
+
+By default it requires a clean committed worktree. It installs both shared frontend
+and Desktop npm dependencies, builds the three dogfood runtime binaries, stages the
+verified runtime, reuses `target\desktop-local-tauri\` as the Tauri compilation
+cache, creates the unsigned NSIS installer, and writes the installer plus SHA-256 file
+under `target\desktop-local-dist\`.
+
+To build an installer from uncommitted work for local testing, opt in explicitly:
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1 -AllowDirty
+```
+
+This does not disguise the source state: bundled runtime identity remains
+`dirty=true`, staging verifies that exact identity, and the output filename contains
+`dirty-<commit>`. Such an installer is local dogfood evidence only and must not be
+published as a release artifact.
+
+The helper deliberately does **not** install the package by default, so it is safe to
+use on a daily dogfood machine that already has WebCodex Desktop installed. To run
+the destructive native install/uninstall smoke as well, use a disposable VM/test user
+or a Windows user with no existing WebCodex Desktop installation:
+
+```powershell
+.\scripts\build_desktop_windows_local.ps1 -Smoke
+```
+
+The manual steps below are equivalent diagnostic stages when you need to inspect one
+part of the pipeline.
+
 ### 1. Use a clean committed source state
 
-The Desktop staging helper verifies exact build provenance and expects
-`dirty=false` in every embedded runtime binary.
+The manual flow below describes the clean path. The Desktop staging helper verifies the
+explicit expected dirty state; ordinary CI/release and this manual clean path expect
+`dirty=false` in every embedded runtime binary. Use the one-command `-AllowDirty`
+path above when intentionally packaging uncommitted local work.
 
 ```powershell
 git status --short
@@ -184,12 +253,16 @@ generated `webcodex-runtime` resource tree, and creates the Tauri config overlay
 ### 4. Build NSIS
 
 ```powershell
-$targetDir = Join-Path $PWD "target\desktop-local-tauri-$PID"
+$targetDir = Join-Path $PWD "target\desktop-local-tauri"
 $env:CARGO_TARGET_DIR = $targetDir
+$bundleDir = Join-Path $targetDir "release\bundle\nsis"
+if (Test-Path -LiteralPath $bundleDir) {
+  Remove-Item -LiteralPath $bundleDir -Recurse -Force
+}
 
 Push-Location apps\desktop
 try {
-  npm exec tauri -- build --bundles nsis --config $config --ci --no-sign -- --locked
+  node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $config --ci --no-sign -- --locked
   if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
 } finally {
   Pop-Location
@@ -199,7 +272,7 @@ try {
 The installer is under:
 
 ```text
-target\desktop-local-tauri-<pid>\release\bundle\nsis\
+target\desktop-local-tauri\release\bundle\nsis\
 ```
 
 Use the native host that matches the package:
@@ -250,7 +323,7 @@ For the normal local path, the repository already provides a complete helper:
 bash scripts/build_desktop_macos_local.sh
 ```
 
-It requires a clean worktree, installs Desktop npm dependencies, builds the dogfood runtime, stages it, creates the native ad-hoc signed DMG, runs the macOS smoke validation, and writes the final file under `target/desktop-local-dist/`. The steps below are the equivalent manual flow for understanding or diagnosing a build.
+It requires a clean worktree, installs both shared frontend and Desktop npm dependencies, builds the dogfood runtime, stages it, creates the native ad-hoc signed DMG, runs the macOS smoke validation, and writes the final file under `target/desktop-local-dist/`. The steps below are the equivalent manual flow for understanding or diagnosing a build.
 
 ### 1. Use a clean committed source state
 
@@ -417,6 +490,7 @@ change:
 - [extended native validation](../.github/workflows/extended-native.yml);
 - [release candidate build](../.github/workflows/release-build.yml);
 - `scripts/prepare_desktop_bundle.ps1`;
+- `scripts/build_desktop_windows_local.ps1`;
 - `scripts/build_desktop_macos_local.sh`;
 - `scripts/prepare_desktop_bundle_macos.py`;
 - `scripts/desktop_install_windows_smoke.ps1`;

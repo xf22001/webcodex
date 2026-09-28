@@ -128,6 +128,10 @@ pub struct WindowActivityEventRecord {
     pub project: Option<String>,
     pub status: String,
     pub meaningful: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_job_ids: Vec<String>,
     pub recorder_gap_session_id: Option<String>,
     pub workflow_links: Vec<WindowWorkflowLinkRecord>,
     /// Bounded Code Mode composition object extracted from sanitized ActionAudit
@@ -154,6 +158,7 @@ pub struct WindowActivityEventRecord {
 pub struct WindowActivitySummaryRecord {
     pub client_window_key: String,
     pub client_window_source: String,
+    pub first_seen_at_ms: i64,
     pub last_seen_at_ms: i64,
     pub last_tool_call_at_ms: Option<i64>,
     pub last_meaningful_activity_at_ms: Option<i64>,

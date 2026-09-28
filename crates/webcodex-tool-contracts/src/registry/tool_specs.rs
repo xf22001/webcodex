@@ -5,6 +5,7 @@ use serde_json::Value;
 mod memory;
 mod skills;
 
+use super::super::tool_catalog::EXACT_MANIFEST_SPECIALIST_TOOL_NAMES;
 use super::super::tool_definition::{
     lookup_tool_definition, model_visible_tool_definitions, runtime_tool_operator_extension_family,
     ToolDefinition, ToolOperatorExtensionFamily,
@@ -15,6 +16,17 @@ use std::collections::BTreeSet;
 
 pub fn registered_tool_specs() -> Vec<ToolSpec> {
     resolve_tool_specs(model_visible_tool_definitions())
+}
+
+/// Specialist mutation contracts are intentionally absent from the ordinary
+/// model surface but remain discoverable by exact name through tool_manifest.
+pub fn exact_manifest_specialist_tool_specs() -> Vec<ToolSpec> {
+    resolve_tool_specs(EXACT_MANIFEST_SPECIALIST_TOOL_NAMES.iter().map(|name| {
+        let definition = lookup_tool_definition(name)
+            .unwrap_or_else(|| panic!("missing exact-manifest specialist definition: {name}"));
+        debug_assert!(!definition.visibility.is_model_visible());
+        definition
+    }))
 }
 
 fn operator_extension_specs(
@@ -37,13 +49,22 @@ pub fn goal_plan_app_tool_specs() -> Vec<ToolSpec> {
     )]
 }
 
-/// Read-only Work Result App primitives. Canonical definitions stay ModelHidden;
-/// only the MCP Apps adapter projects live refresh, closeout sealing, and frozen lazy diff reads.
+/// Work Result App primitives. Canonical definitions stay ModelHidden; only the
+/// MCP Apps adapter projects live refresh, bounded Window collaboration, closeout
+/// sealing, and frozen lazy diff reads.
 pub fn work_result_app_tool_specs() -> Vec<ToolSpec> {
     vec![
         tool_spec(
             "work_result_state",
-            "App-only exact live Work Result refresh. Re-authorizes project + session_id and never records into the target Session. It returns live progress domains plus any retained immutable final-changes snapshot already sealed by a non-blocking finish_coding_task closeout; the refresh never creates or replaces that snapshot.",
+            "App-only exact live Work Result refresh. Re-authorizes the exact Project and optional context session_id and never consumes message attention or records into a Session. It returns Window activity and read-only Window collaboration, optional Session evidence plus any retained immutable final-changes snapshot already sealed by a non-blocking finish_coding_task closeout; the refresh never creates or replaces that snapshot.",
+        ),
+        tool_spec(
+            "work_result_activity_detail",
+            "Work Result App-only lazy detail read for one completed call identified by server_trace_id in the current canonical Host Window. The Window identity comes only from Host sideband; every read re-authorizes runtime visibility, returns bounded sanitized timing/correlation metadata, grants no authority, and never records the expansion as Window or Session activity.",
+        ),
+        tool_spec(
+            "work_result_send_message",
+            "Work Result App-only Operator-to-Window message. Routes to the current stable ClientWindow, never a Session or peer sender. Project authorization and session:collaborate scope are required; optional session_id is exact, visible, explicitly linked context only. Stores a bounded durable message without consuming model attention or creating a Session. Retry uncertain results with the same delivery_key and payload; conflicting reuse is rejected.",
         ),
         tool_spec(
             "changes_file_diff",
@@ -443,7 +464,16 @@ mod tests {
         assert!(work_on_project.contains("mode=worktree"));
         assert!(work_on_project.contains("exact Git base"));
         assert!(work_on_project.contains("Project authority"));
-        for name in ["list_runners", "runtime_status"] {
+        let status = &find("runtime_status").description;
+        for hint in [
+            "Job concurrency",
+            "sparse",
+            "full diagnostics",
+            "compact=false",
+        ] {
+            assert!(status.contains(hint), "runtime_status: {status}");
+        }
+        for name in ["list_runners"] {
             let description = &find(name).description;
             assert!(
                 description.contains("shared Job concurrency"),
@@ -519,7 +549,7 @@ mod tests {
 
     #[test]
     fn tool_specs_unified_diff_field_rejects_codex_wrapper() {
-        let specs = registered_tool_specs();
+        let specs = exact_manifest_specialist_tool_specs();
         let spec = specs
             .iter()
             .find(|spec| spec.name == "apply_unified_diff")

@@ -1,3 +1,4 @@
+import { displayProjectPath } from "../../ui/projectPresentation.js";
 import {
   Activity,
   ArrowRight,
@@ -29,7 +30,8 @@ import { useGoalWorkspace } from "../state/useGoalWorkspace.js";
 import { IconButton } from "./ui/IconButton.js";
 import type { SessionLocation } from "../state/useSessionWorkspace.js";
 
-export type WorkSurface = "goals" | "sessions";
+export type WorkSurface = "goals" | "windows" | "session";
+type WorkSurfaceTab = "goals" | "windows";
 
 type Props = {
   client: RuntimeV2Client;
@@ -69,14 +71,14 @@ function WorkSurfaceSwitch({
   language: RuntimeLanguage;
 }) {
   const t = (value: string) => translate(value, language);
-  return <SegmentedControl<WorkSurface>
+  return <SegmentedControl<WorkSurfaceTab>
     className="work-surface-control"
     aria-label={t("Work level")}
-    value={surface}
-    onChange={onSurfaceChange}
+    value={surface === "goals" ? "goals" : "windows"}
+    onChange={(value) => onSurfaceChange(value)}
     data={[
       { value: "goals", label: <span className="work-surface-label"><Flag size={13} />{t("Goals")}</span> },
-      { value: "sessions", label: <span className="work-surface-label"><Activity size={13} />{t("Sessions")}</span> },
+      { value: "windows", label: <span className="work-surface-label"><Activity size={13} />{t("Activity")}</span> },
     ]}
     fullWidth
     size="xs"
@@ -161,7 +163,7 @@ export function GoalWorkbench({
           <TextInput type="search" aria-label={t("Search Goals")} leftSection={<Search size={14} />}
             value={search} onChange={(event) => setSearch(event.currentTarget.value)} placeholder={t("Search Goals…")} />
           <ProjectPicker label={t("Filter Goals by Project")} allLabel={t("All Projects")} emptyLabel={t("No matching projects")} searchLabel={t("Search projects")}
-            value={projectFilter} onChange={setProjectFilter} options={projects.map((project) => ({ value: project.id, label: projectDisplayName(project.name, project.id), detail: project.path }))} />
+            value={projectFilter} onChange={setProjectFilter} options={projects.map((project) => ({ value: project.id, label: projectDisplayName(project.name, project.id, project.path), detail: displayProjectPath(project.path) }))} />
         </div>
         <div className="work-list-scroll goal-list-scroll">
           {state.truncated && <div className="inventory-note">{t("Goal inventory is bounded by the durable store.")}</div>}
@@ -387,7 +389,7 @@ function GoalInspector({ detail, controller, language, onOpenAgent }: { detail: 
     <>
       {goal.objective && <p className="goal-context-objective">{goal.objective}</p>}
       <section className="inspector-section"><h3>{t("Goal identity")}</h3><div className="fact-list"><div><span>{t("Goal")}</span><strong><code>{goal.summary.goal_id}</code></strong></div><div><span>{t("Revision")}</span><strong>{plan.revision}</strong></div><div><span>{t("Checkpoint")}</span><strong>{absoluteTime(plan.checkpoint_at_unix_ms || undefined)}</strong></div><div><span>{t("Updated")}</span><strong>{absoluteTime(plan.updated_at_unix_ms)}</strong></div></div></section>
-      <section className="inspector-section"><h3>{t("Projects")}</h3><div className="goal-inspector-list">{detail.projects.map((project) => <div key={project.id}><strong>{projectDisplayName(project.name, project.id)}</strong><small>{project.path || project.id}</small></div>)}{!detail.projects.length && <div className="empty-inline">{t("No authorized Project correlation")}</div>}</div></section>
+      <section className="inspector-section"><h3>{t("Projects")}</h3><div className="goal-inspector-list">{detail.projects.map((project) => <div key={project.id}><strong>{projectDisplayName(project.name, project.id, project.path)}</strong><small>{displayProjectPath(project.path) || project.id}</small></div>)}{!detail.projects.length && <div className="empty-inline">{t("No authorized Project correlation")}</div>}</div></section>
       <section className="inspector-section"><h3>{t("Completion conditions")}</h3><ol className="goal-condition-list">{goal.plan.completion_conditions.map((condition, index) => <li key={index}>{condition}</li>)}</ol></section>
       <section className="inspector-section"><h3>{t("Controller")}</h3>{controller ? <button className="goal-inspector-agent" type="button" onClick={() => onOpenAgent(controller.agent_id)}><Bot size={15} /><span><strong>{controller.display_name || controller.handle}</strong><small>{plan.continuity.production_auto_resume_available ? t("Auto-resume ready") : t("Auto-resume not ready")}</small></span><ArrowUpRight size={13} /></button> : <div className="empty-inline">{t("No controller configured")}</div>}</section>
     </>

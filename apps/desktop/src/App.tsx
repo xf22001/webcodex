@@ -32,7 +32,7 @@ function DesktopApp() {
   const { t } = useLocale();
   const s = useShellText();
   const [settingsSection, setSettingsSection] = useState<"diagnostics" | "runtime" | undefined>();
-  const { state, activity, navigation, setNavigation, refreshing, error, setError, cancelSubmittingId, showSetup, setShowSetup, setStartupAttempt, mainRef, commitState, openSetup, chooseLocalProject, refresh, resumeRuntime, cancelCurrentOperation, runStateOperation } = useDesktopWorkspace();
+  const { state, activity, navigation, setNavigation, refreshing, error, setError, cancelSubmittingId, showSetup, setShowSetup, setStartupAttempt, mainRef, commitState, openSetup, refresh, resumeRuntime, cancelCurrentOperation, runStateOperation } = useDesktopWorkspace();
   const updates = useRuntimeUpdates(Boolean(state && !state.current_operation && !state.configuration_issue));
   const openSettings = (section: "diagnostics" | "runtime") => { setSettingsSection(section); setNavigation("settings"); };
   if (!state) {
@@ -125,8 +125,6 @@ function DesktopApp() {
             refreshing={refreshing}
             onRefresh={() => void refresh()}
             onResumeRuntime={() => void resumeRuntime()}
-            onChooseProject={() => void chooseLocalProject()}
-            onOpenProject={(path) => void runStateOperation(() => desktopApi.activateLocalProject(path))}
             onChangeSetup={openSetup}
             onNavigate={setNavigation}
             onStopQuickShare={() => void runStateOperation(desktopApi.stopQuickShare)}
@@ -134,7 +132,7 @@ function DesktopApp() {
           />
         ))}
         {navigation === "projects" && (
-          <ProjectsPanel state={state} onChooseProject={() => void chooseLocalProject()} onSelectProject={(path) => void runStateOperation(() => desktopApi.activateLocalProject(path))} />
+          <ProjectsPanel />
         )}
         {navigation === "connection" && <ConnectionPanel state={state} onState={commitState} />}
         {navigation === "activity" && <ActivityPanel activity={activity} />}

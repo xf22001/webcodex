@@ -17,7 +17,7 @@ vi.mock("../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 const target = { config_path: "/fixture/runner.toml", client_id: "fixture", server_url: "http://127.0.0.1:62645" };
-const settings: RunnerSettings = { target, paths: { instruction_files: [], skill_roots: [] }, plugin_ids: [], can_restart: true };
+const settings: RunnerSettings = { target, paths: { instruction_files: [], skill_roots: [] }, file_access: { configured_roots: [], effective_roots: ["/fixture"], using_default_roots: true, allow_cwd_anywhere: false }, plugin_ids: [], can_restart: true };
 const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [] };
 function state(): DesktopState {
   return {
@@ -83,7 +83,7 @@ describe("Desktop Coding Agents", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restart Runner" }));
     await waitFor(() => expect(api.restartOwnedRunner).toHaveBeenCalledExactlyOnceWith(target));
     await waitFor(() => expect(within(screen.getByRole("article", { name: "Pi Agent" })).getByText("Configured · Active")).toBeInTheDocument());
-    expect(query).toHaveBeenLastCalledWith({ kind: "overview" });
+    expect(query).toHaveBeenLastCalledWith({ kind: "runner_details" });
   });
 
   it("never invents Active from desired state, another Runner or a stale provider name", async () => {

@@ -15,23 +15,25 @@ impl AppState {
             (
                 core.runtime_settings_snapshot().await,
                 core.config.runtime.clone(),
-                identity_from_config(&core.config),
+                runner_identity_from_config(&core.config),
             )
         };
         if let Some(runtime) = runtime {
-            settings.active_jobs =
-                crate::workspace::query(&runtime, crate::workspace::WorkspaceRequest::Overview {})
-                    .await
-                    .ok()
-                    .filter(|v| v.get("connected").and_then(Value::as_bool) == Some(true))
-                    .and_then(|v| observed_active_jobs(&v));
+            settings.active_jobs = crate::workspace::query(
+                &runtime,
+                crate::workspace::WorkspaceRequest::RunnerDetails {},
+            )
+            .await
+            .ok()
+            .filter(|v| v.get("connected").and_then(Value::as_bool) == Some(true))
+            .and_then(|v| observed_active_jobs(&v));
         } else {
             settings.active_jobs = Some(0);
         }
         let slot = self.core.lock().await;
         if slot.as_ref().is_none_or(|core| {
             core.config.runtime_selection_revision != settings.selection_revision
-                || identity_from_config(&core.config) != identity
+                || runner_identity_from_config(&core.config) != identity
         }) {
             return Err(runtime_selection::error("runtime_selection_changed"));
         }
@@ -225,6 +227,11 @@ impl DesktopCore {
     }
 
     pub(super) async fn runtime_switch_authority(&self) -> DesktopResult<()> {
+        if self.config.persistent_environment.is_some() {
+            return Err(runtime_selection::error(
+                "persistent_runtime_upgrade_required",
+            ));
+        }
         if self.configuration_issue.is_some() {
             return Err(runtime_selection::error("configuration_migration_failed"));
         }
@@ -329,7 +336,7 @@ impl DesktopCore {
             self.config.topology.as_ref().map(|t| &t.server),
             Some(ServerTopology::Local)
         );
-        let identity = identity_from_config(&self.config);
+        let identity = runner_identity_from_config(&self.config);
         if self.config.runtime.is_some() && identity.is_none() {
             return Err(runtime_selection::error("runtime_identity_unavailable"));
         }
@@ -449,7 +456,7 @@ impl DesktopCore {
     /// activation, port substitution, or credential regeneration on binary switch.
     pub(super) async fn start_existing_runtime(
         &mut self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RunnerRuntimeIdentity,
         local_server: bool,
         cancellation: &CancellationContext,
     ) -> DesktopResult<()> {
@@ -562,7 +569,7 @@ struct RuntimeSwitchExecution<'a> {
     candidate_binaries: ResolvedBinaries,
     previous_config: StoredDesktopConfig,
     previous_binaries: Option<ResolvedBinaries>,
-    identity: Option<ProjectRuntimeIdentity>,
+    identity: Option<RunnerRuntimeIdentity>,
     local: bool,
     cancellation: &'a CancellationContext,
 }

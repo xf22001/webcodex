@@ -27,6 +27,7 @@ async fn register(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                computer_session_availability: None,
                 client_id: client_id.into(),
                 runner_instance_id: format!("inst-{client_id}"),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -78,7 +79,7 @@ fn assert_safe_inventory(value: &Value) {
 }
 
 #[tokio::test]
-async fn coding_agent_discovery_survives_all_status_and_list_projections() {
+async fn coding_agent_discovery_is_available_in_diagnostic_status_and_runner_listing() {
     let runtime = test_runtime();
     register(
         &runtime,
@@ -92,12 +93,22 @@ async fn coding_agent_discovery_survives_all_status_and_list_projections() {
             .runtime_status_with_options(None, compact, false, None)
             .await;
         assert!(all.success);
-        assert_safe_inventory(&all.output["agents"]["clients"][0]["coding_agent_providers"]);
+        if compact {
+            assert!(all.output["runners"].get("clients").is_none());
+        } else {
+            assert_safe_inventory(&all.output["runners"]["clients"][0]["coding_agent_providers"]);
+        }
         let focused = runtime
             .runtime_status_with_options(None, compact, false, Some("mini".into()))
             .await;
         assert!(focused.success);
-        assert_safe_inventory(&focused.output["focus"]["coding_agent_providers"]);
+        if compact {
+            assert!(focused.output["focus"]
+                .get("coding_agent_providers")
+                .is_none());
+        } else {
+            assert_safe_inventory(&focused.output["focus"]["coding_agent_providers"]);
+        }
         assert!(!focused.output.to_string().contains("private-instance"));
     }
     for summary_only in [false, true] {
@@ -111,7 +122,7 @@ async fn coding_agent_discovery_survives_all_status_and_list_projections() {
             )
             .await;
         assert!(result.success);
-        assert_safe_inventory(&result.output["agents"][0]["coding_agent_providers"]);
+        assert_safe_inventory(&result.output["runners"][0]["coding_agent_providers"]);
     }
 }
 
@@ -137,14 +148,15 @@ async fn coding_agent_discovery_keeps_old_runners_compatible_and_other_owners_pr
         let result = runtime
             .runtime_status_with_options(Some(&alice), compact, false, None)
             .await;
-        assert_eq!(
-            result.output["agents"]["clients"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            result.output["agents"]["clients"][0]["coding_agent_providers"],
-            json!([])
-        );
+        assert_eq!(result.output["runners"]["count"], 1);
+        if compact {
+            assert!(result.output["runners"].get("clients").is_none());
+        } else {
+            assert_eq!(
+                result.output["runners"]["clients"][0]["coding_agent_providers"],
+                json!([])
+            );
+        }
         assert!(!result.output.to_string().contains("private-bob"));
         assert!(
             !runtime
@@ -154,13 +166,15 @@ async fn coding_agent_discovery_keeps_old_runners_compatible_and_other_owners_pr
         );
     }
     let list = runtime.list_runners(Some(&alice)).await;
-    assert_eq!(list.output["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(list.output["runners"].as_array().unwrap().len(), 1);
     assert!(!list.output.to_string().contains("private-bob"));
     register(&runtime, "empty", Some(vec![]), None).await;
     let focused = runtime
         .runtime_status_with_options(None, true, false, Some("empty".into()))
         .await;
-    assert_eq!(focused.output["focus"]["coding_agent_providers"], json!([]));
+    assert!(focused.output["focus"]
+        .get("coding_agent_providers")
+        .is_none());
 }
 
 #[tokio::test]
@@ -179,7 +193,7 @@ async fn coding_agent_discovery_bootstrap_selects_only_the_online_project_owner(
         crate::tool_runtime::coding_task::project_coding_agent_providers("missing", &status)
             .is_empty()
     );
-    let offline = json!({"agents":{"clients":[{"client_id":"mini","connected":false,"coding_agent_providers":[{"provider_id":"pi","name":"Pi"}]}]}});
+    let offline = json!({"runners":{"clients":[{"client_id":"mini","connected":false,"coding_agent_providers":[{"provider_id":"pi","name":"Pi"}]}]}});
     assert!(
         crate::tool_runtime::coding_task::project_coding_agent_providers("mini", &offline)
             .is_empty()
@@ -225,10 +239,20 @@ async fn coding_agent_discovery_start_never_falls_back_and_returns_exact_recover
     );
     assert_eq!(error.output["execution_state"], "not_started");
     assert_safe_inventory(&error.output["available_providers"]);
+    let suggested = &error.output["suggested_call"];
+    assert_eq!(suggested["follow_up_kind"], "fallback_recovery");
     assert_eq!(
-        error.output["suggested_call"],
-        json!({"tool":"runtime_status","arguments":{"client_id":"mini","compact":true}})
+        suggested,
+        &json!({
+            "follow_up_kind": "fallback_recovery",
+            "tool":"runtime_status",
+            "arguments":{"client_id":"mini","compact":true}
+        })
     );
+    webcodex_tool_contracts::test_support::validate_generated_tool_call_against_registered_input_schema(
+        suggested,
+    )
+    .expect("coding-agent inventory recovery must pass runtime_status registered inputSchema");
 }
 
 #[test]

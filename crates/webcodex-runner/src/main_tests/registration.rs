@@ -46,6 +46,17 @@ fn current_runner_registration_advertises_v2_and_complete_generation_baseline() 
         RUNNER_PROTOCOL_GENERATION_V2
     );
 
+    let browser_available = webcodex_browser::discover_chromium_executable().is_some();
+    assert_eq!(
+        body.capabilities.browser_element_action_admission,
+        browser_available,
+        "current Runner must advertise exact Browser element-action admission iff its Browser backend is available"
+    );
+    assert!(
+        !RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES
+            .contains(&"browser_element_action_admission"),
+        "Browser element-action admission is additive and must remain rolling-upgrade fenced"
+    );
     let capabilities = serde_json::to_value(&body.capabilities).unwrap();
     assert_eq!(
         RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES.len(),
@@ -55,6 +66,17 @@ fn current_runner_registration_advertises_v2_and_complete_generation_baseline() 
         !RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES
             .contains(&"apply_text_edit_line_scope"),
         "line scope is additive and must not become a generation-2 registration baseline"
+    );
+    assert!(
+        !RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES.contains(&"apply_text_edit_range"),
+        "range edits are additive and must not become a generation-2 registration baseline"
+    );
+    assert_eq!(
+        capabilities
+            .get("apply_text_edit_range")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "current Runner must explicitly advertise deterministic range edits"
     );
     assert!(
         !RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES

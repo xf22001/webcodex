@@ -27,7 +27,7 @@ pub use job::{
 pub use transport::{
     encode_quic_frame, encode_quic_register_frame, read_quic_frame, read_quic_register_frame,
     write_quic_frame, write_quic_register_frame, QuicFrameError, QuicRegisterFrame, RunnerEnvelope,
-    QUIC_FRAME_MAX_BYTES,
+    QUIC_FRAME_MAX_BYTES, RUNNER_ENVELOPE_MAX_BYTES,
 };
 
 pub const EXTERNAL_SEARCH_REQUEST_PREFIX: &str = "# webcodex:search_project_text:v1";
@@ -178,6 +178,10 @@ pub const RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LOCAL_GUARD_WITHOUT_SHA: &str =
 /// false and is never inferred from occurrence, protocol generation, file_write,
 /// version, transport, OS, or build identity.
 pub const RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE: &str = "apply_text_edit_line_scope";
+/// The Runner understands deterministic revision-fenced whole-line replacement
+/// edits (`replace_range`). Missing on older Runners is false and is never
+/// inferred from line_scope support or protocol generation.
+pub const RUNNER_CAPABILITY_APPLY_TEXT_EDIT_RANGE: &str = "apply_text_edit_range";
 /// Runner enforces explicit bounded all-match cardinality against one original
 /// source snapshot. Missing on older Runners is false; never inferred.
 pub const RUNNER_CAPABILITY_APPLY_TEXT_EDIT_EXPECTED_MATCH_COUNT: &str =
@@ -322,6 +326,11 @@ pub const RUNNER_CAPABILITY_BROWSER_OBSERVE: &str = "browser_observe";
 /// Missing on older Runners is false and is never inferred from Browser observation,
 /// Computer control, OS identity, protocol generation, or shell support.
 pub const RUNNER_CAPABILITY_BROWSER_CONTROL: &str = "browser_control";
+/// The Runner projects exact per-element Browser actions from the current semantic
+/// snapshot and enforces the same action admission before each element effect.
+/// Missing on older Runners is false and is never inferred from browser_control.
+pub const RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION: &str =
+    "browser_element_action_admission";
 /// Runner-owned creation of an ephemeral Chromium-family Browser runtime. Missing
 /// on older Runners is false and is never inferred from executable/platform facts.
 pub const RUNNER_CAPABILITY_BROWSER_LAUNCH: &str = "browser_launch";
@@ -465,6 +474,7 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_APPLY_TEXT_EDIT_OCCURRENCE,
     RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LOCAL_GUARD_WITHOUT_SHA,
     RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE,
+    RUNNER_CAPABILITY_APPLY_TEXT_EDIT_RANGE,
     RUNNER_CAPABILITY_APPLY_TEXT_EDIT_EXPECTED_MATCH_COUNT,
     RUNNER_CAPABILITY_APPLY_PATCH,
     RUNNER_CAPABILITY_APPLY_PATCH_MATCH_METADATA,
@@ -502,6 +512,7 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_SKILL_MANAGEMENT,
     RUNNER_CAPABILITY_BROWSER_OBSERVE,
     RUNNER_CAPABILITY_BROWSER_CONTROL,
+    RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION,
     RUNNER_CAPABILITY_BROWSER_LAUNCH,
     RUNNER_CAPABILITY_COMPUTER_OBSERVE,
     RUNNER_CAPABILITY_COMPUTER_APPLICATION_DISCOVERY,
@@ -581,6 +592,9 @@ pub struct RunnerCapabilities {
     /// Runners is false and is never inferred from occurrence or generation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub apply_text_edit_line_scope: bool,
+    /// Deterministic 1-based inclusive whole-line replacement support.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub apply_text_edit_range: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub apply_text_edit_expected_match_count: bool,
     /// Authoritative Codex-compatible patch parsing and transactional application.
@@ -726,6 +740,10 @@ pub struct RunnerCapabilities {
     /// Runner-owned Browser control excluding process launch.
     #[serde(default, skip_serializing_if = "is_false")]
     pub browser_control: bool,
+    /// Exact snapshot-advertised element action admission. Missing on older Runners
+    /// is false and never follows from generic Browser observation/control.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub browser_element_action_admission: bool,
     /// Runner-owned launch of ephemeral Chromium-family runtimes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub browser_launch: bool,
@@ -1048,6 +1066,7 @@ impl Default for RunnerCapabilities {
             apply_text_edit_occurrence: false,
             apply_text_edit_local_guard_without_sha: false,
             apply_text_edit_line_scope: false,
+            apply_text_edit_range: false,
             apply_text_edit_expected_match_count: false,
             apply_patch: false,
             apply_patch_match_metadata: false,
@@ -1085,6 +1104,7 @@ impl Default for RunnerCapabilities {
             skill_management: false,
             browser_observe: false,
             browser_control: false,
+            browser_element_action_admission: false,
             browser_launch: false,
             computer_observe: false,
             computer_application_discovery: false,
@@ -1413,6 +1433,10 @@ pub struct RunnerRegisterRequest {
     /// inherits the pre-0.4 missing-field=true behavior.
     #[serde(deserialize_with = "deserialize_registration_capabilities")]
     pub capabilities: RunnerCapabilities,
+    /// Current brokered login-session eligibility. Absent on transient and
+    /// older Runners, which retain their existing direct Computer behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_session_availability: Option<bool>,
     /// Optional bounded planning context declared by the Runner configuration.
     /// This is descriptive metadata only: it never grants authority or proves
     /// current host/service/network state.
@@ -1596,6 +1620,8 @@ pub struct RunnerView {
     pub connected: bool,
     pub last_seen: i64,
     pub capabilities: RunnerCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_session_availability: Option<bool>,
     /// Bounded sanitized startup-owned ACP provider inventory. Logical ids are
     /// model-visible planning metadata; executable/argv/env/PID/private ACP ids
     /// never enter this view.
@@ -1991,6 +2017,9 @@ pub struct RunnerPollPayload {
     /// metadata update; `Some([])` explicitly clears the active inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_gateway_providers: Option<Vec<crate::mcp_gateway::McpGatewayProvider>>,
+    /// Changed-only login-session eligibility for a brokered persistent Runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_session_availability: Option<bool>,
     /// Optional bounded project inventory page for the canonical paged inventory protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_inventory_page: Option<ShellProjectInventoryPage>,
@@ -2606,6 +2635,7 @@ mod envelope_tests {
 
     fn sample_register() -> RunnerRegisterRequest {
         RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             client_id: "ws-1".to_string(),
@@ -2627,6 +2657,7 @@ mod envelope_tests {
                 apply_text_edit_occurrence: false,
                 apply_text_edit_local_guard_without_sha: false,
                 apply_text_edit_line_scope: false,
+                apply_text_edit_range: false,
                 apply_text_edit_expected_match_count: false,
                 apply_patch: false,
                 apply_patch_match_metadata: false,
@@ -2664,6 +2695,7 @@ mod envelope_tests {
                 skill_management: false,
                 browser_observe: false,
                 browser_control: false,
+                browser_element_action_admission: false,
                 browser_launch: false,
                 computer_observe: false,
                 computer_application_discovery: false,
@@ -2816,6 +2848,30 @@ mod envelope_tests {
         let capabilities: RunnerCapabilities =
             serde_json::from_str(r#"{"project_path_registration":true}"#).unwrap();
         assert!(capabilities.project_path_registration);
+    }
+
+    #[test]
+    fn browser_element_action_admission_is_additive_and_default_false() {
+        let legacy: RunnerCapabilities = serde_json::from_str(
+            r#"{"browser_observe":true,"browser_control":true,"browser_launch":true}"#,
+        )
+        .unwrap();
+        assert!(legacy.browser_observe);
+        assert!(legacy.browser_control);
+        assert!(!legacy.browser_element_action_admission);
+        assert!(legacy.browser_launch);
+
+        let present: RunnerCapabilities =
+            serde_json::from_str(r#"{"browser_element_action_admission":true}"#).unwrap();
+        assert!(present.browser_element_action_admission);
+        assert!(!present.browser_observe);
+        assert!(!present.browser_control);
+        assert!(!present.browser_launch);
+        assert!(
+            RUNNER_CAPABILITY_NAMES.contains(&RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION)
+        );
+        assert!(!RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES
+            .contains(&RUNNER_CAPABILITY_BROWSER_ELEMENT_ACTION_ADMISSION));
     }
 
     #[test]
@@ -3814,6 +3870,7 @@ mod envelope_tests {
     fn runtime_metadata_and_legacy_poll_payloads_round_trip() {
         let env = RunnerEnvelope::RuntimeMetadata {
             tool_providers: sample_tool_providers(),
+            computer_session_availability: None,
             mcp_gateway_providers: Some(vec![crate::mcp_gateway::McpGatewayProvider {
                 provider_id: "blender".to_string(),
                 provider_instance_id: "instance-1".to_string(),
@@ -3938,6 +3995,7 @@ mod envelope_tests {
                 "apply_text_edit_occurrence",
                 "apply_text_edit_local_guard_without_sha",
                 "apply_text_edit_line_scope",
+                "apply_text_edit_range",
                 "apply_text_edit_expected_match_count",
                 "apply_patch",
                 "apply_patch_match_metadata",
@@ -3975,6 +4033,7 @@ mod envelope_tests {
                 "skill_management",
                 "browser_observe",
                 "browser_control",
+                "browser_element_action_admission",
                 "browser_launch",
                 "computer_observe",
                 "computer_application_discovery",
@@ -4221,6 +4280,7 @@ mod envelope_tests {
     #[tokio::test]
     async fn quic_register_codec_round_trips_current_wire_shape() {
         let payload = RunnerRegisterRequest {
+            computer_session_availability: None,
             process_started_at: None,
             build: None,
             client_id: "q-1".to_string(),
@@ -4669,8 +4729,8 @@ mod filter_canonical_tests {
 
     #[test]
     fn cargo_value_contract_normalizes_exactly_once_and_fails_closed() {
-        // The shared normalization contract used by both the synchronous
-        // command builders and the structured Job argv builder.
+        // The shared normalization contract used by adapter-owned validation
+        // plans and Runner-side canonical-step validation.
         assert_eq!(
             normalize_cargo_value("serde").unwrap(),
             Some("serde".to_string())

@@ -5,7 +5,7 @@ import { useProduct } from "../../i18n/product";
 import { useShellText } from "../../i18n/runtime-shell";
 import type { ActivityEntry } from "../../models/topology";
 import type { WindowDetail, WindowSummary } from "../../models/workspace";
-import { projectName, sessionTitle, useWorkspace, workspaceQuery } from "../workspace/WorkspaceContext";
+import { displayProjectPath, projectName, sessionTitle, useWorkspace, workspaceQuery } from "../workspace/WorkspaceContext";
 import { observationTime } from "../workspace/WorkspaceStatus";
 import { WindowActivityDetail } from "./WindowActivityDetail";
 import { WorkflowSessionDetail, sessionLifecycle, SessionAttention } from "./WorkflowSessionDetail";
@@ -51,6 +51,7 @@ export function ActivityPanel({ activity }: { activity: ActivityEntry[] }) {
   const visible = windows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const previews = useWindowPreviews(visible, tab === "windows" && !workspace.state.current_operation, workspace.revision);
   useEffect(() => { setPage(0); }, [project, tab]);
+  useEffect(() => { if (project && !workspace.projects.some(row => row.id === project)) setProject(""); }, [workspace.projects, project]);
   useEffect(() => { if (page * PAGE_SIZE >= windows.length && page > 0) setPage(0); }, [windows.length, page]);
   const projectLabel = (id?: string) => projectName(workspace.projects.find(row => row.id === id) || { id: id || "—" });
   const labels: Record<Tab, string> = { windows: s("ChatGPT calls"), sessions: s("Workflow Sessions"), system: s("System events") };
@@ -61,12 +62,12 @@ export function ActivityPanel({ activity }: { activity: ActivityEntry[] }) {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault(); const next = TABS[(TABS.indexOf(value) + (event.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length]; setTab(next); document.getElementById(`activity-tab-${next}`)?.focus();
     }}>{labels[value]}</button>)}</div>
-    {tab !== "system" && <div className="activity-project-filter"><span className="filter-label">{s("Project")}</span><ProjectPicker label={s("Project")} allLabel={p("allProjects")} emptyLabel={p("noMatches")} searchLabel={p("search")} value={project} onChange={setProject} options={workspace.projects.filter(row => row.id).map(row => ({ value: row.id, label: projectName(row), detail: row.path }))} /></div>}
+    {tab !== "system" && <div className="activity-project-filter"><span className="filter-label">{s("Project")}</span><ProjectPicker label={s("Project")} allLabel={p("allProjects")} emptyLabel={p("noMatches")} searchLabel={p("search")} value={project} onChange={setProject} options={workspace.projects.filter(row => row.id).map(row => ({ value: row.id, label: projectName(row), detail: displayProjectPath(row.path) }))} /></div>}
     {workspace.loading && <p role="status" className="workspace-notice">{p("loading")}</p>}
     <section role="tabpanel" id={`activity-view-${tab}`} aria-labelledby={`activity-tab-${tab}`}>
     {tab === "windows" && <>
       <div className="activity-overview"><span>{s("Calls in progress")}: <strong>{windows.reduce((total, row) => total + row.active_count, 0)}</strong></span><span>{s("Recent work")}: <strong>{windows.length}</strong></span></div>
-      {workspace.windowsError && <p role="alert">{p("loadError")}</p>}
+      {workspace.windowsError && <p role="alert">{p(workspace.windowsErrorReason)}</p>}
       {visible.map(row => {
         const detail = previews[row.client_window_key]; const latest = detail ? recentMeaningfulCalls(detail)[0] : undefined;
         const linked = detail?.linked_sessions.slice().sort((a, b) => (b.last_linked_at_ms ?? 0) - (a.last_linked_at_ms ?? 0)).find(link => link.title);
@@ -85,7 +86,7 @@ export function ActivityPanel({ activity }: { activity: ActivityEntry[] }) {
       {!windows.length && !workspace.loading && <WorkspaceEmptyState kind="activity" message={p("noWindows")} action={<button type="button" className="secondary-button" onClick={workspace.refresh}>{p("refresh")}</button>} />}
     </>}
     {tab === "sessions" && <>
-      {workspace.error && <p role="alert">{p("loadError")}</p>}
+      {workspace.error && <p role="alert">{p(workspace.errorReason)}</p>}
       {sessions.map(session => <button type="button" className="workspace-session-row" key={`${session.project_id}:${session.session_id}`} onClick={() => session.project_id && workspace.setSelection({ kind: "session", project: session.project_id, id: session.session_id })}>
         <div className="session-row-heading"><strong>{sessionTitle(session.title)}</strong><span className={`workspace-badge ${session.running_call || session.running_jobs ? "working" : ""}`}>{session.running_call || session.running_jobs ? p("inProgress") : sessionLifecycle(session.lifecycle, p)}</span></div>
         <span className="session-row-project">{projectLabel(session.project_id)} · {observationTime(session.updated_at * 1000, locale)}</span>

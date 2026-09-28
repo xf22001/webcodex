@@ -17,8 +17,7 @@ use super::files::{
 };
 #[cfg(any(test, feature = "root-test-support"))]
 use webcodex_core::runtime_contract::{
-    BUILTIN_CODING_WORKFLOW_CONTRACT, BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS,
-    BUILTIN_CODING_WORKFLOW_VERSION,
+    BUILTIN_CODING_WORKFLOW_CONTRACT, BUILTIN_CODING_WORKFLOW_VERSION,
 };
 
 fn finish_changes_schema() -> Value {
@@ -142,7 +141,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "presentation",
-                open_object_schema("Optional parser-ready presentation follow-up. Present only when this exact Workflow Session has a startup Git baseline, durable successful first-class Edit evidence, and the current final workspace still differs from that baseline; contains exactly one present_work_result suggested_call and is preserved in full and summary_only closeout."),
+                open_object_schema("Optional parser-ready presentation fallback. Normal substantial work should already have presented the current Window card near the first successful project-scoped action; closeout may suggest exactly one present_work_result call only when no card was mounted earlier."),
             ),
             (
                 "suggested_next_actions",
@@ -410,6 +409,7 @@ fn startup_session_schema() -> Value {
         "type": "object",
         "properties": {
             "session_id": {"type": "string", "pattern": "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$"},
+            "session_ref": {"type": "string", "pattern": "^~s[1-9][0-9]*$"},
             "mode": {"type": "string", "enum": ["normal", "read_only"]},
             "execution_context": session_execution_context_schema(
                 "Persistent execution defaults currently stored for this Workflow Session."
@@ -510,83 +510,101 @@ fn startup_workspace_schema() -> Value {
 #[cfg(any(test, feature = "root-test-support"))]
 fn startup_workflow_schema() -> Value {
     json!({
-        "type": "object",
-        "description": "WebCodex-owned shared workflow, selected tool strategy and optional review role. Separate from project instructions and Session authority.",
-        "properties": {
-            "contract": {"type": "string", "const": BUILTIN_CODING_WORKFLOW_CONTRACT},
-            "version": {"type": "integer", "const": BUILTIN_CODING_WORKFLOW_VERSION},
-            "authority": {"type": "string", "const": "model_guidance_only"},
-            "role_selection": {"type": "string", "maxLength": 240},
-            "guidance": {
-                "type": "array",
-                "description": "Default behavior for every coding/review task, including tasks without a named role. Guidance never grants authority.",
-                "minItems": 1,
-                "maxItems": BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS,
-                "items": {"type": "string", "maxLength": 320}
-            },
-            "tool_strategy": {
-                "type": "object",
-                "description": "Only the selected request-local tool strategy. Model guidance, never tool admission, authority, or durable Session state.",
-                "properties": {
-                    "profile": crate::schema_generation::typed_host_schema::<crate::tool_inputs::CodingGuidanceProfile>(),
-                    "guidance": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS,
-                        "items": {"type": "string", "maxLength": 320}
-                    }
+            "type": "object",
+            "description": "WebCodex-owned shared workflow, selected tool strategy and optional review role. Separate from project instructions and Session authority.",
+            "properties": {
+                "contract": {"type": "string", "const": BUILTIN_CODING_WORKFLOW_CONTRACT},
+                "version": {"type": "integer", "const": BUILTIN_CODING_WORKFLOW_VERSION},
+                "authority": {"type": "string", "const": "model_guidance_only"},
+                "role_selection": {"type": "string", "maxLength": 240},
+                "guidance": {
+                    "type": "array",
+                    "description": "Default behavior for every coding/review task, including tasks without a named role. Guidance never grants authority.",
+                    "minItems": 1,
+                    "items": {"type": "string"}
                 },
-                "required": ["profile", "guidance"],
-                "additionalProperties": false
-            },
-            "model_protocol": {
-                "type": "object",
-                "description": "Shared model-invocation guidance. It is not Session state, authority, or execution policy.",
-                "properties": {
-                    "handoff_recovery": {"type": "string", "maxLength": 720},
-                    "session_recording": {"type": "string", "maxLength": 720},
-                    "session_message_ack": {"type": "string", "maxLength": 720},
-                    "session_message_resolution": {"type": "string", "maxLength": 480},
-                    "context_sidecar": {"type": "string", "maxLength": 320},
-                    "control_sidecars": {"type": "string", "maxLength": 640},
-                    "runner_targeting": {"type": "string", "maxLength": 320},
-                    "persistent_shell": {"type": "string", "maxLength": 320},
-                    "goal_workflow": {"type": "string", "maxLength": 720},
-                    "goal_continuation": {"type": "string", "maxLength": 720},
-                    "goal_checkpoint": {"type": "string", "maxLength": 480},
-                    "work_result_presentation": {"type": "string", "maxLength": 640},
-                    "normal_closeout": {"type": "string", "maxLength": 480}
+                "tool_strategy": {
+                    "type": "object",
+                    "description": "Only the selected request-local tool strategy. Model guidance, never tool admission, authority, or durable Session state.",
+                    "properties": {
+                        "profile": crate::schema_generation::typed_host_schema::<crate::tool_inputs::CodingGuidanceProfile>(),
+                        "guidance": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"}
+                        }
+    ,
+                        "host_orchestration": {
+                            "type": "object",
+                            "description": "Host-native orchestration catalog derived from ToolDefinition guidance hints; present only for host_code_mode and never authority.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "guidance_only": {"type": "boolean", "const": true},
+                                "native_batch_first": {"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":128}},
+                                "independent_parallel_reads": {"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":128}},
+                                "compound_preferred": {"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":128}},
+                                "sequential": {"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":128}}
+                            },
+                            "required": ["guidance_only","native_batch_first","independent_parallel_reads","compound_preferred","sequential"]
+                        }
+                    },
+                    "required": ["profile", "guidance"],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "handoff_recovery",
-                    "session_recording",
-                    "session_message_ack",
-                    "session_message_resolution",
-                    "context_sidecar",
-                    "control_sidecars",
-                    "runner_targeting",
-                    "persistent_shell",
-                    "goal_workflow",
-                    "goal_continuation",
-                    "goal_checkpoint",
-                    "work_result_presentation",
-                    "normal_closeout"
-                ],
-                "additionalProperties": false
-            },
-            "roles": {
-                "type": "object",
-                "description": "Optional named review behavior. Ordinary implementation uses shared guidance and the selected tool strategy.",
-                "properties": {
-                    "independent_review": startup_workflow_role_schema()
+                "model_protocol": {
+                    "type": "object",
+                    "description": "Shared model-invocation guidance. It is not Session state, authority, or execution policy.",
+                    "properties": {
+                        "handoff_recovery": {"type": "string", "maxLength": 720},
+                        "session_recording": {"type": "string", "maxLength": 720},
+                        "session_message_ack": {"type": "string", "maxLength": 720},
+                        "window_reply": {"type": "string", "maxLength": 720},
+                        "session_message_resolution": {"type": "string", "maxLength": 480},
+                        "context_sidecar": {"type": "string", "maxLength": 320},
+                        "bootstrap_reuse": {"type": "string", "maxLength": 1024},
+                        "bootstrap_observations": {"type": "string", "maxLength": 1024},
+                        "control_sidecars": {"type": "string", "maxLength": 640},
+                        "runner_targeting": {"type": "string", "maxLength": 320},
+                        "persistent_shell": {"type": "string", "maxLength": 320},
+                        "goal_workflow": {"type": "string", "maxLength": 720},
+                        "goal_continuation": {"type": "string", "maxLength": 720},
+                        "goal_checkpoint": {"type": "string", "maxLength": 480},
+                        "work_result_presentation": {"type": "string", "maxLength": 640},
+                        "normal_closeout": {"type": "string", "maxLength": 480}
+                    },
+                    "required": [
+                        "handoff_recovery",
+                        "session_recording",
+                        "session_message_ack",
+                        "window_reply",
+                        "session_message_resolution",
+                        "context_sidecar",
+                        "bootstrap_reuse",
+                        "bootstrap_observations",
+                        "control_sidecars",
+                        "runner_targeting",
+                        "persistent_shell",
+                        "goal_workflow",
+                        "goal_continuation",
+                        "goal_checkpoint",
+                        "work_result_presentation",
+                        "normal_closeout"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": ["independent_review"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["contract", "version", "authority", "role_selection", "guidance", "tool_strategy", "model_protocol", "roles"],
-        "additionalProperties": false
-    })
+                "roles": {
+                    "type": "object",
+                    "description": "Optional named review behavior. Ordinary implementation uses shared guidance and the selected tool strategy.",
+                    "properties": {
+                        "independent_review": startup_workflow_role_schema()
+                    },
+                    "required": ["independent_review"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["contract", "version", "authority", "role_selection", "guidance", "tool_strategy", "model_protocol", "roles"],
+            "additionalProperties": false
+        })
 }
 
 #[cfg(any(test, feature = "root-test-support"))]
@@ -598,8 +616,7 @@ fn startup_workflow_role_schema() -> Value {
             "guidance": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS,
-                "items": {"type": "string", "maxLength": 320}
+                "items": {"type": "string"}
             }
         },
         "required": ["purpose", "guidance"],
@@ -1268,6 +1285,10 @@ fn work_on_project_output_schema() -> Value {
             schema_type("string", "Explicit Workflow Session id for exact continuation or recording on later calls."),
         ),
         (
+            "session_ref",
+            schema_type("string", "Server-issued principal-scoped short selector for the exact Workflow Session. Prefer it for ordinary business Session continuation; canonical session_id remains authoritative."),
+        ),
+        (
             "project",
             schema_type("string", "Project selector used to start or resume this task. For direct Project input this preserves the caller's accepted selector, including a Server-issued project_ref; for Runner path input it is the resolved canonical runtime Project id."),
         ),
@@ -1361,26 +1382,21 @@ fn work_on_project_output_schema() -> Value {
         ),
         (
             "suggested_call",
-            json!({
-                "type": "object",
-                "description": "Parser-ready recovery observation emitted when work_on_project can identify one exact safe next call.",
-                "properties": {
-                    "tool": {"type": "string", "const": "list_runners"},
-                    "arguments": {
-                        "type": "object",
-                        "properties": {
-                            "include_projects": {"type": "boolean", "const": false},
-                            "summary_only": {"type": "boolean", "const": true}
-                        },
-                        "required": ["include_projects", "summary_only"],
-                        "additionalProperties": false
-                    }
-                },
-                "required": ["tool", "arguments"],
-                "additionalProperties": false
-            }),
-        ),
-        (
+            super::common::suggested_tool_call_schema(
+                webcodex_core::runtime_contract::GeneratedFollowUpKind::FallbackRecovery,
+                "list_runners",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "include_projects": {"type": "boolean", "const": false},
+                        "summary_only": {"type": "boolean", "const": true}
+                    },
+                    "required": ["include_projects", "summary_only"]
+                }),
+                "Recovery observation when work_on_project cannot resolve one exact Runner.",
+            ),
+        ),        (
             "suggested_next_actions",
             array_schema(schema_type("string", "Short suggested action."), "Bounded non-default suggested next actions. Omitted when there is nothing more informative than beginning the requested task."),
         ),

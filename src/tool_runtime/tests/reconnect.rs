@@ -50,6 +50,7 @@ fn register_request(
     build: Option<RunnerBuildInfo>,
 ) -> RunnerRegisterRequest {
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        computer_session_availability: None,
         client_id: client_id.to_string(),
         runner_instance_id: instance.to_string(),
         runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -597,14 +598,14 @@ async fn runtime_status_keeps_generation_independent_from_transport() {
     let runners = status.output["version_compatibility"]["runners"]
         .as_array()
         .unwrap();
-    let clients = status.output["agents"]["clients"].as_array().unwrap();
+    let clients = status.output["runners"]["clients"].as_array().unwrap();
     for (client_id, _, transport) in cases {
         let runner = runners
             .iter()
             .find(|runner| runner["client_id"] == client_id)
             .unwrap_or_else(|| panic!("runner {client_id} missing"));
         assert_eq!(
-            runner["agent_protocol_generation"],
+            runner["runner_protocol_generation"],
             RUNNER_PROTOCOL_GENERATION_V2.get()
         );
         assert_eq!(runner["status"], "compatible");
@@ -615,7 +616,7 @@ async fn runtime_status_keeps_generation_independent_from_transport() {
             .unwrap_or_else(|| panic!("client {client_id} missing"));
         assert_eq!(client["transport"], transport);
         assert_eq!(
-            client["agent_protocol_generation"],
+            client["runner_protocol_generation"],
             RUNNER_PROTOCOL_GENERATION_V2.get()
         );
         assert_eq!(client["project_inventory"]["sync_state"], "pending");
@@ -722,19 +723,8 @@ async fn version_compatibility_reports_stable_mismatch_facts() {
     assert!(by_id("old-build")["reason_code"].is_null());
     assert!(by_id("old-build")["action"].is_null());
     let compact = crate::tool_runtime::runtime_info::compact_runtime_status(&status.output);
-    let compact_runner = compact["agents"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|runner| runner["client_id"] == "same-version-different-source")
-        .unwrap();
-    assert_eq!(compact_runner["version_matches_server"], true);
-    assert_eq!(compact_runner["source_alignment"]["status"], "different");
-    assert!(compact_runner.get("build_matches_server").is_none());
-    assert_eq!(
-        compact["version_compatibility"]["source_alignment"]["status"],
-        "different"
-    );
+    assert!(compact["runners"].get("clients").is_none());
+    assert_eq!(compact["compatibility"]["source_alignment"], "different");
 
     // No secrets/paths in the diagnostics.
     let text = compat.to_string().to_lowercase();
@@ -743,7 +733,7 @@ async fn version_compatibility_reports_stable_mismatch_facts() {
 }
 
 #[tokio::test]
-async fn runner_host_context_projects_to_full_list_and_compact_runtime() {
+async fn runner_host_context_is_diagnostic_only() {
     let runtime = test_runtime();
     let mut request = register_request("sf", "inst-host-context", None, None);
     request.host_context = Some(RunnerHostContext {
@@ -757,7 +747,7 @@ async fn runner_host_context_projects_to_full_list_and_compact_runtime() {
 
     let status = runtime.runtime_status(None).await;
     assert!(status.success);
-    let full = status.output["agents"]["clients"]
+    let full = status.output["runners"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -771,20 +761,12 @@ async fn runner_host_context_projects_to_full_list_and_compact_runtime() {
     );
 
     let compact = crate::tool_runtime::runtime_info::compact_runtime_status(&status.output);
-    let compact_sf = compact["agents"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|client| client["client_id"] == "sf")
-        .unwrap();
-    assert_eq!(compact_sf["agent_instance_id"], "inst-host-context");
-    assert_eq!(compact_sf["host_context"]["role"], "server_host");
-    assert!(compact_sf.get("capabilities").is_none());
-    assert!(compact_sf.get("policy").is_none());
+    assert!(compact["runners"].get("clients").is_none());
+    assert!(!compact.to_string().contains("host_context"));
 
     let listed = runtime.list_runners(None).await;
     assert!(listed.success);
-    let listed_sf = listed.output["agents"]
+    let listed_sf = listed.output["runners"]
         .as_array()
         .unwrap()
         .iter()
@@ -803,7 +785,7 @@ async fn runner_host_context_projects_to_full_list_and_compact_runtime() {
     });
     runtime.runner_registry.register(reconnect).await.unwrap();
     let after_reconnect = runtime.runtime_status(None).await;
-    let sf = after_reconnect.output["agents"]["clients"]
+    let sf = after_reconnect.output["runners"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -1273,4 +1255,75 @@ async fn coding_workflow_read_only_upgrade_is_atomic_and_permission_checked() {
         1,
         "coding workflow must not reread ordinary explored source files"
     );
+}
+
+#[tokio::test]
+async fn runtime_status_serialization_budget() {
+    let runtime = test_runtime();
+    for count in [0, 1, 8] {
+        for index in if count == 8 { 1..8 } else { 0..count } {
+            register_with_project(
+                &runtime,
+                &format!("status-{index}"),
+                &format!("instance-{index}"),
+                Some(1),
+                Some(RunnerBuildInfo {
+                    version: Some(
+                        if index == 0 {
+                            env!("CARGO_PKG_VERSION")
+                        } else {
+                            "0.0.1"
+                        }
+                        .into(),
+                    ),
+                    git_commit: Some(format!("{index:040x}")),
+                    git_dirty: Some(false),
+                    built_at: Some("1234567890".into()),
+                    target: Some("x86_64-unknown-linux-gnu".into()),
+                    architecture: Some("x86_64".into()),
+                }),
+            )
+            .await;
+        }
+        let full = runtime.runtime_status(None).await;
+        let sparse = runtime
+            .runtime_status_with_options(None, true, false, None)
+            .await;
+        assert!(full.success && sparse.success);
+        let full_bytes = serde_json::to_vec(&full.output).unwrap().len();
+        let sparse_bytes = serde_json::to_vec(&sparse.output).unwrap().len();
+        eprintln!("STATUS_SIZE runners={count} full={full_bytes} sparse={sparse_bytes}");
+        assert!(full_bytes <= 26_000, "full diagnostics grew: {full_bytes}");
+        assert!(sparse_bytes <= 900, "sparse fleet grew: {sparse_bytes}");
+        assert_eq!(sparse.output["runners"]["count"], count);
+        assert_eq!(sparse.output["jobs"]["recovering_count"], 0);
+        assert_eq!(sparse.output["jobs"]["lost_after_reconcile_count"], 0);
+        assert!(sparse.output["runners"].get("clients").is_none());
+        assert_eq!(
+            sparse.output["compatibility"]["protocol"],
+            full.output["protocol_compatibility"]
+        );
+        assert_eq!(
+            sparse.output["compatibility"]["build_alignment"],
+            full.output["build_alignment"]
+        );
+        if count > 1 {
+            assert_eq!(sparse.output["compatibility"]["mixed_builds_present"], true);
+        }
+        assert!(full.output.get("authority").is_some());
+        assert!(full.output.get("session_store").is_some());
+        if count > 0 {
+            let focused = runtime
+                .runtime_status_with_options(None, true, false, Some("status-0".into()))
+                .await;
+            assert!(focused.success);
+            let bytes = serde_json::to_vec(&focused.output).unwrap().len();
+            eprintln!("STATUS_SIZE runners={count} focused={bytes}");
+            assert!(bytes <= 1_050, "focused grew: {bytes}");
+            assert_eq!(focused.output["focus"]["client_id"], "status-0");
+            assert_eq!(focused.output["focus"]["runner_protocol_generation"], 2);
+            assert!(focused.output["focus"].get("capabilities").is_none());
+            assert!(!focused.output.to_string().contains("status-1"));
+        }
+    }
 }
