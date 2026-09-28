@@ -29,6 +29,10 @@ pub enum AdminCliCommand {
     RunnerTokensRegisterHash(AdminOptions, RunnerTokenRegisterHashArgs),
     RunnerTokensList(AdminOptions, UsernameArgs),
     RunnerTokensRevoke(AdminOptions, RevokeTokenArgs),
+    OAuthClientsList(AdminOptions),
+    OAuthRedirectUriAdd(AdminOptions, OAuthRedirectUriArgs),
+    OAuthRedirectUriRemove(AdminOptions, OAuthRedirectUriArgs),
+    OAuthScopesUpdate(AdminOptions, OAuthScopesArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -94,6 +98,22 @@ pub struct RunnerTokenRegisterHashArgs {
     pub token_hash: String,
     pub token_prefix: String,
     pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OAuthRedirectUriArgs {
+    pub client_id: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OAuthScopesArgs {
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    /// Expand to every scope the Server advertises in its OAuth discovery
+    /// document. Resolved against the live Server so the CLI never ships a
+    /// second, drifting copy of the scope registry.
+    pub all_scopes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

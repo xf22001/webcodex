@@ -12,6 +12,7 @@ fn config(id: TunnelProfileId) -> TunnelProfileConfigSnapshot {
     TunnelProfileConfigSnapshot {
         id,
         name: id.to_string(),
+        provider: webcodex_environment::TunnelProvider::OpenAiSecure,
         tunnel_id: Some(format!("tunnel_{}", id)),
         credential_present: true,
         enabled: true,
