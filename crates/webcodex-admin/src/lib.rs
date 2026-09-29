@@ -30,6 +30,8 @@ pub enum AdminCliCommand {
     RunnerTokensList(AdminOptions, UsernameArgs),
     RunnerTokensRevoke(AdminOptions, RevokeTokenArgs),
     OAuthClientsList(AdminOptions),
+    OAuthCreate(AdminOptions, OAuthCreateArgs),
+    OAuthShow(AdminOptions, OAuthShowArgs),
     OAuthRedirectUriAdd(AdminOptions, OAuthRedirectUriArgs),
     OAuthRedirectUriRemove(AdminOptions, OAuthRedirectUriArgs),
     OAuthScopesUpdate(AdminOptions, OAuthScopesArgs),
@@ -114,6 +116,26 @@ pub struct OAuthScopesArgs {
     /// document. Resolved against the live Server so the CLI never ships a
     /// second, drifting copy of the scope registry.
     pub all_scopes: bool,
+}
+
+/// Create one OAuth client. Scopes follow the same `--all-scopes` contract as
+/// `oauth update-scopes`; the Server's discovery document stays authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OAuthCreateArgs {
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    pub scopes: Vec<String>,
+    pub all_scopes: bool,
+}
+
+/// Render one client's ChatGPT/MCP connection panel. The client secret and the
+/// WebCodex PAT are local files: the Server never returns the secret after
+/// creation, so `--secret-file` / `--pat-file` fill those two lines only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OAuthShowArgs {
+    pub client_id: String,
+    pub secret_file: Option<PathBuf>,
+    pub pat_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

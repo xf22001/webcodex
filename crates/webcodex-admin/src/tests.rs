@@ -1004,3 +1004,170 @@ fn oauth_commands_require_an_operator_credential() {
     let req = build_admin_request(&cmd).unwrap();
     assert_eq!(req.token, "fake-operator-credential");
 }
+
+#[test]
+fn oauth_create_builds_the_client_create_request() {
+    let req = request(&[
+        "oauth",
+        "create",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--name",
+        "ChatGPT MCP",
+        "--redirect-uri",
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "--redirect-uri",
+        "https://example.test/callback",
+        "--scope",
+        "runtime:read",
+        "--scopes",
+        "project:write,job:run",
+    ]);
+    assert_eq!(req.path, "/api/oauth/clients/create");
+    assert_eq!(req.body["name"], "ChatGPT MCP");
+    assert_eq!(
+        req.body["redirect_uris"],
+        json!([
+            "https://chatgpt.com/connector_platform_oauth_redirect",
+            "https://example.test/callback"
+        ])
+    );
+    assert_eq!(
+        req.body["allowed_scopes"],
+        json!(["runtime:read", "project:write", "job:run"])
+    );
+}
+
+#[test]
+fn oauth_create_requires_name_redirect_uri_and_exactly_one_scope_source() {
+    let missing_name = parse_admin_cli(&args(&[
+        "oauth",
+        "create",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--redirect-uri",
+        "https://a.test/cb",
+        "--all-scopes",
+    ]))
+    .unwrap_err();
+    assert!(missing_name.contains("--name"), "{missing_name}");
+
+    let missing_uri = parse_admin_cli(&args(&[
+        "oauth",
+        "create",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--name",
+        "n",
+        "--all-scopes",
+    ]))
+    .unwrap_err();
+    assert!(missing_uri.contains("--redirect-uri"), "{missing_uri}");
+
+    let both = parse_admin_cli(&args(&[
+        "oauth",
+        "create",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--name",
+        "n",
+        "--redirect-uri",
+        "https://a.test/cb",
+        "--all-scopes",
+        "--scope",
+        "runtime:read",
+    ]))
+    .unwrap_err();
+    assert!(both.contains("only one of --all-scopes"), "{both}");
+
+    let none = parse_admin_cli(&args(&[
+        "oauth",
+        "create",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--name",
+        "n",
+        "--redirect-uri",
+        "https://a.test/cb",
+    ]))
+    .unwrap_err();
+    assert!(none.contains("--scope SCOPE"), "{none}");
+}
+
+#[test]
+fn oauth_show_targets_the_client_list_then_renders_a_panel() {
+    let cmd = parse_admin_cli(&args(&[
+        "oauth",
+        "show",
+        "--server-url",
+        "https://example.test",
+        "--token",
+        "fake-admin",
+        "--client-id",
+        "chatgpt-client",
+        "--secret-file",
+        "/tmp/secret",
+        "--pat-file",
+        "/tmp/pat",
+    ]))
+    .unwrap();
+    let req = build_admin_request(&cmd).unwrap();
+    assert_eq!(req.path, "/api/oauth/clients/list");
+    assert!(matches!(
+        cmd,
+        AdminCliCommand::OAuthShow(_, OAuthShowArgs { .. })
+    ));
+
+    let list = json!({
+        "success": true,
+        "clients": [{
+            "client_id": "chatgpt-client",
+            "allowed_scopes": ["runtime:read", "project:write"],
+            "redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"],
+        }]
+    });
+    // Without local secret/pat files the panel still renders, marking the
+    // two create-only / operator-only lines as not provided.
+    let panel = super::commands::render_oauth_connection_panel(
+        "https://example.test",
+        &OAuthShowArgs {
+            client_id: "chatgpt-client".into(),
+            secret_file: None,
+            pat_file: None,
+        },
+        &list,
+    )
+    .unwrap();
+    assert!(panel.contains("MCP URL                  https://example.test/mcp"));
+    assert!(panel.contains("Client ID                chatgpt-client"));
+    assert!(panel.contains("<not provided; pass --secret-file>"));
+    assert!(panel.contains("Authorization Endpoint   https://example.test/oauth/authorize"));
+    assert!(panel.contains("1) https://chatgpt.com/connector_platform_oauth_redirect"));
+    assert!(!panel.contains("wc_boot_"));
+}
+
+#[test]
+fn oauth_show_rejects_an_unknown_client() {
+    let list = json!({"success": true, "clients": []});
+    let error = super::commands::render_oauth_connection_panel(
+        "https://example.test",
+        &OAuthShowArgs {
+            client_id: "missing".into(),
+            secret_file: None,
+            pat_file: None,
+        },
+        &list,
+    )
+    .unwrap_err();
+    assert!(error.contains("not found"), "{error}");
+}
