@@ -983,9 +983,9 @@ pub(crate) fn observe_job_details_call(job_id: &str) -> Value {
 }
 
 /// Keep the internal handoff receipt intact for recording, then collapse a
-/// normal successful same-execution handoff to one generic pending marker, a
-/// short de-polling strategy, and its exact fallback continuation. The continuation
-/// retains durable identity; Job lifecycle/bookkeeping stays in canonical
+/// normal successful same-execution handoff to one generic pending marker and its
+/// exact fallback continuation. Static scheduling guidance lives in startup/discovery.
+/// The continuation retains durable identity; Job lifecycle/bookkeeping stays in canonical
 /// Session/registry state.
 pub(super) fn sparsify_job_handoff_model_result(result: &mut ToolResult) {
     if !result.success {
@@ -1018,16 +1018,6 @@ pub(super) fn sparsify_job_handoff_model_result(result: &mut ToolResult) {
     let continuation = call.clone();
     output.clear();
     output.insert("execution_state".to_string(), json!("pending"));
-    output.insert(
-        "pending_strategy".to_string(),
-        json!({
-            "default": "continue_independent_work",
-            "passive_terminal_attention": "same_scope_may_surface",
-            "observe_continuation": "logs_details_recovery_fallback",
-            "observe_auto_follow": false,
-            "blocked_fallback": "wait_for_job_terminal",
-        }),
-    );
     output.insert("continuation".to_string(), continuation);
 }
 
@@ -1036,7 +1026,7 @@ fn list_jobs_recovery_suggested_call(project: Option<&str>) -> Value {
     SuggestedToolCall::fallback_recovery("list_jobs", arguments).to_value()
 }
 
-fn invalid_job_observation_result(error_kind: &str, message: String) -> ToolResult {
+pub(super) fn invalid_job_observation_result(error_kind: &str, message: String) -> ToolResult {
     ToolResult::err_with_output(
         message,
         json!({
@@ -1832,6 +1822,8 @@ impl ToolRuntime {
                     "wait_outcome": wait.wait_outcome.as_str(),
                     "waited_ms": wait.waited_ms,
                     "changed": wait.changed,
+                    "meaningful_changed": wait.meaningful_changed,
+                    "heartbeat_changed": wait.heartbeat_changed,
                     "terminal": wait.terminal,
                     "executor": "agent",
                     "session_id": job.session_id,
@@ -1867,82 +1859,29 @@ impl ToolRuntime {
         session_id: Option<String>,
         auth: Option<&AuthContext>,
     ) -> ToolResult {
-        let max = limit.unwrap_or(20).clamp(1, 100);
-        let status_filter = status
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let project_filter = match project {
-            Some(value) => {
-                let value = value.trim();
-                if value.is_empty() || value.chars().count() > 512 {
-                    return invalid_job_observation_result(
-                        "invalid_project_filter",
-                        "invalid_project_filter: project must contain 1..=512 characters"
-                            .to_string(),
-                    );
-                }
-                Some(value.to_string())
-            }
-            None => None,
-        };
-        let session_filter = match session_id {
-            Some(value) => {
-                let value = value.trim();
-                if value.is_empty() || value.chars().count() > 128 {
-                    return invalid_job_observation_result(
-                        "invalid_session_filter",
-                        "invalid_session_filter: session_id must contain 1..=128 characters"
-                            .to_string(),
-                    );
-                }
-                Some(value.to_string())
-            }
-            None => None,
-        };
-
-        // Authorization/visibility is applied by the registry first. Focused
-        // filters only reduce that already-visible set, and limit is applied
-        // after every filter so exact project/session targets cannot be hidden
-        // behind unrelated recent Jobs.
-        let agent_jobs = self
-            .runner_registry
-            .list_jobs_for_auth_filtered(
-                crate::runner_http::runner_access_from_auth(auth).as_ref(),
-                project_filter.as_deref(),
-                session_filter.as_deref(),
+        let page = match self
+            .query_job_inventory_for_auth(
+                limit,
+                status.as_deref(),
+                project.as_deref(),
+                session_id.as_deref(),
+                auth,
             )
-            .await;
-        let mut summaries: Vec<Value> = agent_jobs
+            .await
+        {
+            Ok(page) => page,
+            Err(result) => return result,
+        };
+        let summaries = page
+            .jobs
             .iter()
-            .filter(|job| {
-                status_filter
-                    .as_ref()
-                    .map(|status| status == &job.status)
-                    .unwrap_or(true)
-            })
             .map(|job| self.model_job_summary_value(job))
-            .collect();
-
-        summaries.sort_by(|a, b| {
-            b["created_at"]
-                .as_i64()
-                .unwrap_or(0)
-                .cmp(&a["created_at"].as_i64().unwrap_or(0))
-                .then_with(|| {
-                    a["job_id"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .cmp(b["job_id"].as_str().unwrap_or_default())
-                })
-        });
-        let matched_count = summaries.len();
-        let truncated = matched_count > max;
-        summaries.truncate(max);
+            .collect::<Vec<_>>();
         ToolResult::ok(json!({
             "jobs": summaries,
             "count": summaries.len(),
-            "matched_count": matched_count,
-            "truncated": truncated,
+            "matched_count": page.matched_count,
+            "truncated": page.truncated(),
         }))
     }
 

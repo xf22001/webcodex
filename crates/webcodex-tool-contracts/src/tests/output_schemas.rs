@@ -1774,27 +1774,7 @@ fn key_tool_output_schemas_include_expected_fields() {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("wake_on")));
-        let pending_strategy = output_schema_property(&specs, name, "pending_strategy");
-        assert_eq!(
-            pending_strategy["properties"]["default"]["const"],
-            "continue_independent_work"
-        );
-        assert_eq!(
-            pending_strategy["properties"]["passive_terminal_attention"]["const"],
-            "same_scope_may_surface"
-        );
-        assert_eq!(
-            pending_strategy["properties"]["observe_continuation"]["const"],
-            "logs_details_recovery_fallback"
-        );
-        assert_eq!(
-            pending_strategy["properties"]["observe_auto_follow"]["const"],
-            false
-        );
-        assert_eq!(
-            pending_strategy["properties"]["blocked_fallback"]["const"],
-            "wait_for_job_terminal"
-        );
+        assert!(!has_output_field(name, "pending_strategy"));
         assert!(
             has_output_field(name, "failure_kind"),
             "{name} missing failure_kind"
@@ -2651,7 +2631,6 @@ fn default_output_schema_field_names() -> BTreeSet<&'static str> {
 #[test]
 fn model_visible_output_schemas_admit_bounded_passive_job_attention() {
     let attention = json!({
-        "changed": true,
         "items": [{
             "job_id": "wc_job_schema",
             "tool": "cargo_test",
@@ -2698,13 +2677,6 @@ fn model_visible_output_schemas_admit_bounded_passive_job_attention() {
         "success": true,
         "output": {
             "execution_state": "pending",
-            "pending_strategy": {
-                "default": "continue_independent_work",
-                "passive_terminal_attention": "same_scope_may_surface",
-                "observe_continuation": "logs_details_recovery_fallback",
-                "observe_auto_follow": false,
-                "blocked_fallback": "wait_for_job_terminal"
-            },
             "continuation": {
                 "follow_up_kind": "fallback_recovery",
                 "tool": "observe_jobs",
@@ -3539,4 +3511,50 @@ fn structured_validation_definitions_receive_the_validation_output_family() {
         }
     }
     assert!(count > 0);
+}
+
+#[test]
+fn passive_success_schema_keeps_source_truth_and_distinguishes_rich_failures() {
+    let schema = output_schema_for_tool("cargo_check");
+    let field = &schema["properties"]["output"]["properties"]["job_attention"];
+    let compact = json!({"items":[{
+        "job_id":"wc_job_success", "tool":"cargo_test", "outcome":"passed",
+        "validation":{"kind":"test", "tests_run_count":3, "zero_tests_run":false,
+            "source_state":{"freshness":"unproven","observed_mutation_fence":"uncrossed"}}
+    }]});
+    test_support::validate_schema_instance(&compact, field).unwrap();
+    for pointer in ["/items/0/outcome", "/items/0/validation/source_state"] {
+        let mut missing = compact.clone();
+        *missing.pointer_mut(pointer).unwrap() = Value::Null;
+        assert!(
+            test_support::validate_schema_instance(&missing, field).is_err(),
+            "{pointer}"
+        );
+    }
+    for (freshness, fence) in [("stale", "crossed"), ("unproven", "unknown")] {
+        let mut misleading = compact.clone();
+        misleading["items"][0]["validation"]["source_state"] =
+            json!({"freshness":freshness,"observed_mutation_fence":fence});
+        assert!(test_support::validate_schema_instance(&misleading, field).is_err());
+    }
+    for outcome in ["failed", "timed_out", "cancelled"] {
+        let mut failure = compact.clone();
+        failure["items"][0]["outcome"] = json!(outcome);
+        assert!(test_support::validate_schema_instance(&failure, field).is_err());
+    }
+}
+
+#[test]
+fn structured_validation_sparse_assertion_never_weakens_rejection_or_uncertainty() {
+    let schema = registry::output_schema_for_tool("cargo_test");
+    for output in [
+        serde_json::json!({"command_started":false,"command_completed":false,"failure_kind":"capability_unavailable"}),
+        serde_json::json!({"execution_state":"outcome_unknown","command_started":true,"command_completed":false,"terminal":false,"failure_kind":"outcome_unknown"}),
+    ] {
+        let mut wire =
+            serde_json::json!({"success":false,"error":"validation unavailable","output":output});
+        test_support::validate_schema_instance(&wire, &schema).unwrap();
+        wire["output"]["test_count_assertion"] = serde_json::json!({"minimum_tests":1});
+        assert!(test_support::validate_schema_instance(&wire, &schema).is_err());
+    }
 }

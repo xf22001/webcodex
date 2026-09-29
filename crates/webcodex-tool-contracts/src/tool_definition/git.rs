@@ -88,9 +88,9 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
             "Primary bounded Git review workflow. First call returns an exact snapshot, summary/signals, and first git_diff_hunks page. Continue with the returned opaque token and identical closed scope/paging inputs. Workspace mutation fails closed; committed review stays pinned to exact commits and merge-base.",
         ))),
         120,
+        super::ToolDirectReason::CoreWorkflow,
     ),
-    adaptive_runtime_direct(
-        change_summary_like(git_like(
+    change_summary_like(git_like(
             model_spec(
                 def(
                     "show_changes",
@@ -132,8 +132,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
                 "Review current worktree changes and optional bounded diff hunks for presentation, Session signals, and closeout internals. Ordinary code review uses review_changes. Read-only.",
             ),
         )),
-        130,
-    ),];
+];
 pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
     require_all_scopes(git_like(model_spec(
         def(

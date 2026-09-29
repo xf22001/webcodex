@@ -123,8 +123,8 @@ fn builtin_coding_workflow_defaults_cover_unnamed_tasks_without_granting_authori
         "passive Job attention",
         "observe_jobs is for logs/details/recovery",
         "list_jobs is identity recovery",
-        "wait_for_job_terminal only on a hard terminal dependency",
-        "Finish independent work first",
+        "Future activation: wait_for_job_terminal",
+        "finish ready work",
         "After Rust stabilizes, format once",
     ] {
         assert!(defaults.contains(boundary), "missing guidance: {boundary}");
@@ -260,16 +260,21 @@ fn host_code_mode_strategy_is_bounded_guidance_only() {
         "read_revision",
         "failure/recovery fields",
         "emit compact evidence",
-        "5s return guard",
         "execution_state=pending",
-        "retain the continuation as fallback",
+        "retain exact Job identity/continuation as fallback",
         "Job terminal does not imply mechanically_followable",
-        "finish independent calls",
+        "currently-ready independent calls",
         "observe_jobs heartbeat polling",
-        "Yield on deadline/budget guard",
-        "one wait_for_job_readiness",
-        "entire blocked exact set",
+        "wait_for_job_readiness join barrier",
+        "entire exact blocked set",
+        "one terminal Job can unlock a useful branch",
+        "all only when every blocked dependency is required",
         "Never per-Job waits, Promise.race",
+        "largest safe value from the remaining Host activation budget",
+        "45s maximum",
+        "do not prefer fixed 10/15/20s slices",
+        "recompute ready work and the blocked set",
+        "do not mechanically repeat the same-set wait",
         "Run to quiescence",
         "freeze covered source",
         "invalidate evidence",
@@ -390,5 +395,44 @@ fn tool_strategy_schema_requires_one_known_profile_and_closed_shape() {
         let mut invalid = workflow.clone();
         invalid["tool_strategy"] = strategy;
         assert!(validate_schema_instance_for_test(&invalid, &schema).is_err());
+    }
+}
+
+#[test]
+fn sparse_pending_receipts_rely_on_complete_static_scheduling_guidance() {
+    use crate::tool_runtime::tool_inputs::CodingGuidanceProfile;
+    for profile in [
+        CodingGuidanceProfile::Direct,
+        CodingGuidanceProfile::HostCodeMode,
+    ] {
+        let workflow = builtin_coding_workflow_projection(profile);
+        let text = workflow.to_string();
+        for rule in [
+            "continue independent work",
+            "finish ready work",
+            "wait_for_job_readiness join",
+            "any may unblock a branch",
+            "all requires every blocker",
+            "never mechanically refill",
+            "observe_jobs is for logs/details/recovery",
+            "Never retry/redispatch",
+            "Future activation: wait_for_job_terminal",
+            "fallback_recovery",
+        ] {
+            assert!(
+                text.contains(rule),
+                "missing static pending guidance: {rule}"
+            );
+        }
+        if profile == CodingGuidanceProfile::HostCodeMode {
+            for rule in [
+                "join barrier",
+                "Cross-turn hard dependency",
+                "do not mechanically repeat the same-set wait",
+                "fallback_recovery never auto-runs",
+            ] {
+                assert!(text.contains(rule), "missing Host guidance: {rule}");
+            }
+        }
     }
 }

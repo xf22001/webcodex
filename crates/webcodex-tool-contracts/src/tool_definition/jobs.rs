@@ -4,7 +4,8 @@ use super::RunnerCapabilityRequirement::{
 use super::ToolVisibility::{ModelHidden, ModelVisible};
 use super::{
     adaptive_runtime_direct, def, model_spec, permission_risk, require_all_scopes,
-    requires_explicit_business_session, ToolDefinition, PERMISSION_RISK_JOB, TOOL_CATEGORY_JOB,
+    requires_explicit_business_session, ToolDefinition, PERMISSION_RISK_JOB,
+    TOOL_CATEGORY_EXECUTION, TOOL_CATEGORY_JOB,
 };
 use crate::metadata::{
     ToolPathHint::None as NoPath,
@@ -27,7 +28,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     ]))
                     .execution(super::ToolAuditExecutionPolicy::DIRECT_ARGV_TEST_COUNTS),
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(StructuredProcess),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -52,6 +53,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolExecutionContinuation::ObserveJobs,
         )),
         70,
+        super::ToolDirectReason::CoreWorkflow,
     ),
     require_all_scopes(
         model_spec(
@@ -67,7 +69,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     ]),
                 ),
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(DetachedProcess),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -106,7 +108,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 ]))
                 .execution(super::ToolAuditExecutionPolicy::SCRIPT_TEST_COUNTS),
             ModelVisible,
-            TOOL_CATEGORY_JOB,
+            TOOL_CATEGORY_EXECUTION,
             Some(StructuredScript),
             TOOL_PROVIDER_RUNNER,
             super::ToolSemanticContract {
@@ -132,6 +134,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolExecutionContinuation::ObserveJobs,
         )),
         74,
+        super::ToolDirectReason::CoreWorkflow,
     ),
     adaptive_runtime_direct(
         model_spec(
@@ -144,7 +147,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     ]))
                     .execution(super::ToolAuditExecutionPolicy::TEST_COUNTS),
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(Shell),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -169,13 +172,14 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolExecutionContinuation::ObserveJobs,
         )),
         75,
+        super::ToolDirectReason::CoreWorkflow,
     ),
     requires_explicit_business_session(model_spec(
             def(
                 "open_session_shell",
                 super::ToolAuditPolicy::TYPED_CANONICAL,
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(PersistentShell),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -203,7 +207,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     ]),
                 ),
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(PersistentShell),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -232,7 +236,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             "session_shell_status",
             super::ToolAuditPolicy::TYPED_CANONICAL,
             ModelVisible,
-            TOOL_CATEGORY_JOB,
+            TOOL_CATEGORY_EXECUTION,
             Some(PersistentShell),
             TOOL_PROVIDER_RUNNER,
             super::ToolSemanticContract {
@@ -256,7 +260,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 "close_session_shell",
                 super::ToolAuditPolicy::TYPED_CANONICAL,
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(PersistentShell),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -287,7 +291,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                     ]))
                     .execution(super::ToolAuditExecutionPolicy::TEST_COUNTS),
                 ModelVisible,
-                TOOL_CATEGORY_JOB,
+                TOOL_CATEGORY_EXECUTION,
                 Some(AsyncJobs),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -369,9 +373,10 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             .with_host_orchestration_hint(
                 super::ToolHostOrchestrationHint::sequential().with_native_batch_field("items"),
             ),
-            "Explicit logs/details/recovery for a known pending execution; not the default follow-up to execution_state=pending. A returned continuation is fallback state, not a next-action command. Prefer passive terminal attention; do not call list_jobs first. Prefer observation_ref, or pass observation_token unchanged as after_observation_token; raw job_id/token are recovery fallback. No token or no wait_secs gives an immediate observation. With tokens, bounded wait_secs defaults to wake_on=change; use wake_on=terminal only when useful progress is blocked on terminal outcome. If independent work remains, continue it; do not poll for visibility, immediately follow a pending continuation, or keep a Host Code Mode cell alive with repeated same-Job observations. terminal wakes on any terminal Job; all_terminal waits for all. Item errors return immediately; timeout may include changed=true. summary_only compacts proven successful validation logs. Never launches, retries, stops, or subscribes.",
+            "Explicit logs/details/recovery for a known pending execution; not the default follow-up to execution_state=pending. A continuation is fallback, not a next-action command. Prefer passive terminal attention; do not call list_jobs first. Prefer observation_ref, or pass observation_token unchanged as after_observation_token. No token or no wait_secs gives an immediate observation. With tokens, bounded wait_secs defaults to wake_on=change; use wake_on=meaningful_change to suppress sequence-only heartbeat wakes while still waking for logs/lifecycle/activity/recovery, or wake_on=terminal only when useful progress is blocked on terminal outcome. If independent work remains, continue it; do not poll for visibility or repeatedly observe the same Job. terminal wakes on any terminal Job; all_terminal waits for all. Item errors return immediately; timeout may include changed=true. summary_only compacts successful validation logs. Never launches, retries, stops, or subscribes.",
         ).with_gpt_action_description("Observe one known pending execution only for logs/details/recovery or when passive terminal truth is insufficient. A continuation is fallback, not a next-action command. Do not list first, auto-follow, poll, or keep a Host Code Mode cell alive with repeated same-Job observations."),
         80,
+        super::ToolDirectReason::CoreWorkflow,
     ),
     adaptive_runtime_direct(
         model_spec(
@@ -401,12 +406,12 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             ).with_host_orchestration_hint(
                 super::ToolHostOrchestrationHint::sequential().with_native_batch_field("job_ids"),
             ),
-            "Transient sequential wait barrier for the current Host activation, with one absolute 1..45s deadline. First finish all ready independent work. Pass the entire currently blocked exact Job set in one call; never create one readiness wait per Job or use Promise.race on long waits. Stable-deduplicate IDs; authorize every unique public Job before waiting and fail the whole set on any invalid/invisible target. any wakes on the first terminal Job; all waits for every target. Failure/lost/stopped/timeout are terminal-ready, not success. Returns only ready status/outcome and pending IDs; deadline is a normal outcome. No logs, recovery, execution changes, durable wait or restart recovery. Ready does not authorize a follow-up: only follow_up_kind=mechanically_followable may run mechanically. Budget wait_secs from remaining cell time (prefer 10–15s); yield on deadline/budget guard. For a future activation use wait_for_job_terminal; for logs/details use observe_jobs.",
+            "Transient join barrier for the current Host activation. Finish all currently-ready independent work, then pass the entire exact blocked Job set once; never use per-Job waits or Promise.race. Use any when one terminal Job can unlock a useful dependent branch; use all only at a true join requiring every blocked dependency. Stable-deduplicate IDs and re-authorize every target before one 1..45s wait. Failure/lost/stopped/timeout are terminal-ready, not success. Sparse output: ready status/outcome plus pending IDs; deadline is normal. After deadline recompute work/set and do not mechanically repeat the same-set wait without new work, dependency change, or semantic information. No logs, execution changes, durable state, restart recovery, or retry authority. Ready never authorizes follow-up. Choose wait_secs from the largest safe remaining Host activation budget after return guard, max 45s; no fixed 10/15/20s slice is preferred. Future activation: wait_for_job_terminal; logs/details/recovery use observe_jobs.",
         ),
         77,
+        super::ToolDirectReason::CoreWorkflow,
     ),
-    adaptive_runtime_direct(
-        model_spec(
+    model_spec(
             def(
                 "wait_for_job_terminal",
                 super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -433,8 +438,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             ),
             "Arm one bounded one-shot terminal attention for one exact existing job_id. Exact keyed replay returns the same wait. Never starts, retries, stops, or replaces the Job. Terminal delivery is sparse status/outcome, never logs. automatic_resume_available is true only with a real current Host carrier. If suggested_call is supplied, use it only while waiting and only when no independent work remains; after presentation yield/end the current turn. An already-triggered wait needs no follow-up carrier. Do not poll, rearm/check repeatedly, or keep a Host Code Mode cell alive. Use observe_jobs only for explicit logs/details or recovery.",
         ).with_gpt_action_description("Arm one-shot terminal attention only when terminal outcome is a true dependency and no independent work remains. It never changes execution. Do not poll, rearm/check repeatedly, or keep a Host Code Mode cell alive. observe_jobs is only for explicit logs/details/recovery."),
-        79,
-    ),
+
 ];
 
 pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
@@ -467,8 +471,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
         ),
         "Recovery and inventory primitive for caller-visible Jobs, not the normal continuation step. Do not call list_jobs when the initiating pending result already provides an exact continuation or passive attention already identifies the execution; retain that continuation and continue independent work, using observe_jobs only when logs/details/recovery are needed. Use list_jobs when exact Job identity was lost, unknown_job explicitly requests inventory recovery, the user asks to enumerate background work, or multiple historical/parallel Jobs must be inspected. Exact project/session_id filters are preferred when known and combine with status using AND semantics. stdout/stderr bodies are never included; exact Job logs belong to observe_jobs.",
     ).with_gpt_action_description("Inventory caller-visible Jobs only when exact identity is lost or enumeration is requested. If an exact continuation or Job identity is already known, retain it and continue independent work; use observe_jobs only for logs/details/recovery."),
-    adaptive_runtime_direct(
-        model_spec(
+    model_spec(
             def(
                 "present_job_terminal_continuation",
                 super::ToolAuditPolicy::typed_fields(&[
@@ -479,7 +482,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
                     super::ToolAuditResultField::pointer("automatic_resume_available", "/job_terminal_continuation/automatic_resume_available"),
                     super::ToolAuditResultField::value("error_kind"),
                 ]),
-                ModelVisible,
+                ModelHidden,
                 TOOL_CATEGORY_JOB,
                 None,
                 TOOL_PROVIDER_NATIVE,
@@ -499,8 +502,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
             "Present one exact caller-owned still-waiting Job terminal wait as a bounded MCP App continuation card. Use this only as the final meaningful action when progress is blocked on that terminal transition; after successful presentation, yield/end the current model turn promptly so a later Host follow-up can create a fresh turn. An already-triggered wait should be handled in the current turn instead. Requires explicit wait_id, independently re-authorizes the wait and underlying Job visibility, never infers identity from Project, Session, ClientWindow, peer identity, credential, or recent activity, and never changes Job execution or terminal truth.",
         )
         .with_gpt_action_unsupported(),
-        78,
-    ),
+
     def(
         "job_terminal_continuation_bind",
         super::ToolAuditPolicy::typed_fields(&[

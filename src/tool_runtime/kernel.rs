@@ -13,6 +13,8 @@ use crate::auth::scopes::OAuthToolScopePolicy;
 use crate::auth::AuthContext;
 use serde_json::Value;
 
+mod postprocess;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolTransport {
     Api,
@@ -113,6 +115,9 @@ pub(crate) struct ToolCallOutcome {
     pub(crate) error_status: Option<ToolCallErrorStatus>,
     pub(crate) project: Option<String>,
     pub(crate) model_ergonomics: Option<ModelErgonomicsCompletion>,
+    /// Existing privacy-safe audit projection captured before model compaction.
+    /// Never serialized into ToolResult or interpreted as execution authority.
+    pub(crate) canonical_audit_output: Option<Value>,
     /// Trusted internal Window/Workflow Session correlation evidence. This is
     /// adapter metadata only and is never part of the public ToolResult.
     pub(crate) correlation: super::window_activity::ToolCallCorrelation,
@@ -371,6 +376,7 @@ impl ToolRuntime {
                     capabilities,
                     return_timing,
                     &mut control,
+                    &mut telemetry,
                 )
                 .await;
             if let Some(control) = control {
@@ -400,6 +406,7 @@ impl ToolRuntime {
         capabilities: ToolProtocolCapabilities,
         return_timing: super::return_timing::ToolReturnTimingPolicy,
         control: &mut Option<super::control_sidecar::ControlExecution>,
+        telemetry: &mut Option<ModelErgonomicsTimer>,
     ) -> ToolCallOutcome {
         // Admit before any tool-specific await or side effect. The permit is
         // retained through the complete call, including direct SSH effects.
@@ -414,6 +421,7 @@ impl ToolRuntime {
                     }),
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 }
             }
@@ -453,6 +461,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -466,6 +475,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+            canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -483,6 +493,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+            canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -496,6 +507,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+            canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -520,6 +532,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+            canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -541,6 +554,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+            canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -563,6 +577,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -583,6 +598,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -600,6 +616,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -619,6 +636,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -632,6 +650,7 @@ impl ToolRuntime {
                         error_status: Some(ToolCallErrorStatus::InvalidArguments { message }),
                         project: None,
                         model_ergonomics: None,
+                        canonical_audit_output: None,
                         correlation: Default::default(),
                     };
                 }
@@ -701,6 +720,7 @@ impl ToolRuntime {
                     error_status: None,
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 };
             }
@@ -735,6 +755,7 @@ impl ToolRuntime {
                 }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -748,6 +769,7 @@ impl ToolRuntime {
                 error_status: Some(error_status),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -760,6 +782,7 @@ impl ToolRuntime {
                 error_status: Some(ToolCallErrorStatus::InvalidArguments { message }),
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -792,6 +815,7 @@ impl ToolRuntime {
                         error_status: None,
                         project: None,
                         model_ergonomics: None,
+                        canonical_audit_output: None,
                         correlation: Default::default(),
                     };
                 }
@@ -820,6 +844,7 @@ impl ToolRuntime {
                         error_status: None,
                         project: None,
                         model_ergonomics: None,
+                        canonical_audit_output: None,
                         correlation: Default::default(),
                     };
                 }
@@ -885,6 +910,7 @@ impl ToolRuntime {
                 error_status: None,
                 project: None,
                 model_ergonomics: None,
+                canonical_audit_output: None,
                 correlation: Default::default(),
             };
         }
@@ -902,6 +928,7 @@ impl ToolRuntime {
                     error_status: Some(error_status),
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 };
             }
@@ -948,6 +975,7 @@ impl ToolRuntime {
                     error_status: Some(error_status),
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 };
             }
@@ -969,6 +997,7 @@ impl ToolRuntime {
                     error_status: Some(ToolCallErrorStatus::InvalidArguments { message }),
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 };
             }
@@ -1019,6 +1048,7 @@ impl ToolRuntime {
                     error_status: None,
                     project: None,
                     model_ergonomics: None,
+                    canonical_audit_output: None,
                     correlation: Default::default(),
                 };
             }
@@ -1180,106 +1210,21 @@ impl ToolRuntime {
                 recorder_ack_requested,
             );
         }
-        // Canonical execution evidence and every Session/context overlay are now
-        // complete. Consume the request-scoped plan exactly once to produce the
-        // final model-facing read/search result.
-        result_projection.project(&mut result);
-        if let (Some(session_id), Some(project)) = (
-            correlation.recorder_gap_session_id.as_deref(),
-            correlation.resolved_project.as_deref(),
-        ) {
-            // The gap remains correlation/audit truth. It is not actionable model
-            // guidance when this exact call already supplied the same authorized
-            // business Session for the same resolved Project.
-            if business_session_id.as_deref() != Some(session_id) {
-                if let Some(output) = result.output.as_object_mut() {
-                    output.insert(
-                        "workflow_recording_attention".to_string(),
-                        serde_json::json!({
-                            "status": "recording_session_missing",
-                            "candidate_session_id": session_id,
-                            "project": project,
-                            "reason": "same_window_recent_explicit_association"
-                        }),
-                    );
-                }
-            }
+        // Session/permission evidence is sealed above. The response stage owns
+        // canonical audit capture, one-shot model projection, and late sidecars.
+        let postprocess::PostRecordResult {
+            result,
+            canonical_audit_output,
+        } = postprocess::PostRecordResponse {
+            tool_name: &request.tool_name,
+            context,
+            capabilities,
+            recorder: &recorder_metadata,
+            correlation: &correlation,
+            business_session_id: business_session_id.as_deref(),
+            window_reply: window_reply.as_ref(),
         }
-        if request.tool_name == "tool_manifest" {
-            super::surface::sparsify_tool_manifest_model_result(&mut result);
-        }
-        // Final model-facing projection: authoritative permission decisions and
-        // recorder events have already been consumed by the Session ledger.
-        super::dispatch::sparsify_failure_model_result_metadata(&request.tool_name, &mut result);
-        if !result.success
-            && request.tool_name != "read_tool_trace"
-            && capabilities.trace_diagnostics
-            && context
-                .auth
-                .is_some_and(|auth| auth.has_scope(crate::auth::SCOPE_ADMIN))
-        {
-            if let (Some(trace_ref), Some(output)) = (
-                crate::tool_request_trace::current_full_trace_ref(),
-                result.output.as_object_mut(),
-            ) {
-                output.insert("trace_ref".to_string(), Value::String(trace_ref));
-            }
-        }
-        super::dispatch::sparsify_success_model_result_metadata(&request.tool_name, &mut result);
-        // The continuity hint is diagnostic only. Keep it inside the shared
-        // model-result hard ceiling; if an unrelated producer already consumed
-        // the full envelope, omit this non-authoritative overlay rather than
-        // changing the business result.
-        if result
-            .output
-            .as_object()
-            .is_some_and(|output| output.contains_key("workflow_recording_attention"))
-            && crate::json_measurement::serialized_json_len(&result).is_ok_and(|bytes| {
-                bytes > webcodex_workspace::file_read_range::MAX_SERIALIZED_OUTPUT_BYTES
-            })
-        {
-            if let Some(output) = result.output.as_object_mut() {
-                output.remove("workflow_recording_attention");
-            }
-        }
-        if super::tool_definition::is_model_visible_tool_name(&request.tool_name) {
-            self.add_window_model_reply_sidecar(
-                &mut result,
-                context.auth,
-                context.window,
-                window_reply.as_ref(),
-            );
-            let peer_project = correlation
-                .resolved_project
-                .as_deref()
-                .or(recorder_metadata.recording_session_project.as_deref());
-            if request.tool_name != "present_work_result" {
-                self.add_window_operator_projection(
-                    &mut result,
-                    context.auth,
-                    context.window,
-                    &recorder_metadata.ack_session_message_ids,
-                );
-            }
-            self.add_peer_collaboration_projection(
-                &mut result,
-                context.auth,
-                context.window,
-                peer_project,
-                &recorder_metadata.ack_session_message_ids,
-            );
-        }
-        if request.tool_name == "observe_jobs" {
-            super::observe_jobs::sparsify_observe_jobs_model_result(&mut result);
-        }
-        self.add_passive_job_attention(
-            &mut result,
-            &request.tool_name,
-            correlation.resolved_project.as_deref(),
-            correlation.business_session_id.as_deref(),
-            context.window,
-            context.auth,
-        )
+        .finish(self, result, result_projection, telemetry.as_mut())
         .await;
         ToolCallOutcome {
             success: result.success,
@@ -1287,6 +1232,7 @@ impl ToolRuntime {
             error_status: None,
             project,
             model_ergonomics: None,
+            canonical_audit_output,
             correlation,
         }
     }

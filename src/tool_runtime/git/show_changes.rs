@@ -2139,9 +2139,7 @@ fn set_show_changes_verdict(output: &mut Value) {
         let page_truncated = diff_truncation_reasons
             .iter()
             .any(|reason| matches!(*reason, "diff_hunk_count_limit" | "diff_byte_budget"));
-        let hunk_line_truncated = diff_truncation_reasons
-            .iter()
-            .any(|reason| *reason == "diff_hunk_line_limit");
+        let hunk_line_truncated = diff_truncation_reasons.contains(&"diff_hunk_line_limit");
         // show_changes currently reports line truncation at the aggregate diff
         // level, not as authoritative per-hunk provenance. Keep whole-worktree
         // scope rather than guessing which returned path owns the omitted lines.
@@ -2486,13 +2484,13 @@ impl ToolRuntime {
         .await
     }
 
-    /// Presentation must not execute repository-configured filters or hooks.
-    /// Reuse the ordinary bounded producer/parser without recording a Session.
-    pub(in crate::tool_runtime) async fn show_changes_for_presentation(
+    /// Passive card refresh is metadata-only; file content is explicitly lazy.
+    /// Keep the shared safe configuration and do not record a Session.
+    pub(in crate::tool_runtime) async fn workspace_metadata_for_presentation(
         &self,
         project: String,
     ) -> ToolResult {
-        self.show_changes_observation(project, None, Some(true), Some(16), Some(80), None, true)
+        self.show_changes_observation(project, None, Some(false), None, None, None, true)
             .await
     }
 

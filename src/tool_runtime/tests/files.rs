@@ -2241,7 +2241,7 @@ fn raw_search_request() -> SearchRequest {
 
 fn search_call(project: String, request: SearchRequest) -> ToolCall {
     ToolCall::SearchProjectTexts {
-        project: project,
+        project,
         queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
             pattern: request.pattern,
             pattern_mode: None,
@@ -2269,9 +2269,13 @@ fn extract_single_search_batch_result(batch: ToolResult) -> ToolResult {
     assert_eq!(items.len(), 1, "one-query search batch: {}", batch.output);
     let item = &items[0];
     ToolResult {
-        success: item["success"]
-            .as_bool()
-            .expect("one-query search item success"),
+        success: if batch.output.get("requested_count").is_none() {
+            assert!(item.get("success").is_none());
+            assert!(item.get("error").is_none());
+            true // The complete sparse batch branch proves every item succeeded.
+        } else {
+            item["success"].as_bool().expect("full search item success")
+        },
         output: item.get("output").cloned().unwrap_or(Value::Null),
         error: item
             .get("error")
@@ -4401,7 +4405,7 @@ async fn search_project_text_no_matches_returns_empty_matches() {
             runtime
                 .dispatch_with_auth(
                     ToolCall::SearchProjectTexts {
-                        project: project,
+                        project,
                         queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
                             pattern: "absent_needle".to_string(),
                             pattern_mode: None,
@@ -4461,7 +4465,7 @@ async fn search_project_text_excludes_sensitive_and_build_dirs() {
             runtime
                 .dispatch_with_auth(
                     ToolCall::SearchProjectTexts {
-                        project: project,
+                        project,
                         queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
                             pattern: "KEEP_SEARCH_NEEDLE".to_string(),
                             pattern_mode: None,
@@ -4834,7 +4838,7 @@ async fn search_project_text_context_does_not_enqueue_python_helper() {
             runtime
                 .dispatch_with_auth(
                     ToolCall::SearchProjectTexts {
-                        project: project,
+                        project,
                         queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
                             pattern: "needle".to_string(),
                             pattern_mode: None,

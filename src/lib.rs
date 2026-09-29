@@ -32,6 +32,7 @@ mod mcp;
 mod mcp_gateway;
 mod mcp_host;
 mod model_surface;
+mod model_workflow;
 pub(crate) use webcodex_store::models;
 mod oauth_http;
 #[cfg(feature = "legacy-gpt-actions")]
@@ -64,9 +65,10 @@ mod workspace_activity_store;
 
 #[cfg(test)]
 pub(crate) use webcodex_admin as admin_cli;
+pub(crate) use webcodex_build_info as build_info;
 pub(crate) use webcodex_core::{
-    apply_edits_shared, apply_patch_shared, artifact_policy, build_info, lsp_bridge,
-    runner_protocol, sensitive_paths,
+    apply_edits_shared, apply_patch_shared, artifact_policy, lsp_bridge, runner_protocol,
+    sensitive_paths,
 };
 pub(crate) use webcodex_runner_config as runner_config;
 pub(crate) use webcodex_workspace::project_overview;
@@ -280,6 +282,8 @@ pub async fn run_server_with_shutdown(
     }
     let config = Config::from_env();
     let mcp_host_policy = mcp_host::McpHostConfig::from_env().runtime_policy();
+    let model_workflow_policy =
+        model_workflow::ModelWorkflowPolicy::from_env().map_err(std::io::Error::other)?;
     let (acceptor, listener_mode, listener_addr) = server_listener::server_acceptor(&config.addr)
         .await
         .map_err(std::io::Error::other)?;
@@ -381,6 +385,7 @@ explicitly allow remote shared-key auth."
     let mut tool_runtime_builder =
         tool_runtime::ToolRuntime::new(runner_registry.clone(), runtime_info.clone())
             .with_mcp_host_policy(mcp_host_policy)
+            .with_model_workflow_policy(model_workflow_policy)
             .with_window_activity_database(db.clone())
             .with_memory_database(db.clone())
             .with_project_reference_database(db.clone())

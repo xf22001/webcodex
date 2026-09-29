@@ -52,6 +52,7 @@ mod helpers;
 mod hygiene;
 mod hygiene_tools;
 mod job_attention;
+mod job_query;
 mod job_terminal_wait;
 mod job_tools;
 mod jobs;
@@ -80,6 +81,7 @@ mod read_files;
 mod read_revisions;
 #[cfg(test)]
 pub(crate) use read_revisions::ReadRevisionTarget;
+mod result_projection;
 mod return_timing;
 mod runtime;
 mod runtime_info;

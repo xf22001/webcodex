@@ -188,7 +188,8 @@ async fn runner_supports_reflects_registered_capabilities() {
         project_path_registration: true,
         managed_worktree: false,
         structured_go_test_json: true,
-        project_validation_v1: false,
+        project_validation_v1: true,
+        project_validation_package_scope_v1: true,
         structured_go_test_tool: true,
         structured_go_test_packages: true,
         structured_cargo_test_lib: true,
@@ -221,6 +222,14 @@ async fn runner_supports_reflects_registered_capabilities() {
         .unwrap());
     assert!(registry
         .runner_supports("oe", RUNNER_CAPABILITY_FILE_READ)
+        .await
+        .unwrap());
+    assert!(registry
+        .runner_supports("oe", RUNNER_CAPABILITY_PROJECT_VALIDATION)
+        .await
+        .unwrap());
+    assert!(registry
+        .runner_supports("oe", RUNNER_CAPABILITY_PROJECT_VALIDATION_PACKAGE_SCOPE)
         .await
         .unwrap());
     assert!(registry
@@ -456,7 +465,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
             owner: None,
             hostname: None,
             host_context: None,
-            capabilities: crate::capabilities::all_enabled_capabilities(),
+            capabilities: all_enabled_capabilities(),
             policy: Some(crate::runner_protocol::RunnerPolicySummary {
                 ..Default::default()
             }),

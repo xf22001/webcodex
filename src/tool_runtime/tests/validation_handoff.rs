@@ -34,6 +34,7 @@ pub(super) async fn poll_start_validation_job(
     (request, job_id)
 }
 
+#[cfg(feature = "experimental-code-mode")]
 pub(super) async fn poll_start_validation_job_with_timeout(
     runtime: &ToolRuntime,
     client_id: &str,
@@ -404,6 +405,7 @@ async fn go_test_rejects_empty_or_oversized_package_lists_before_dispatch() {
             structured_validation_argv: true,
             structured_go_test_json: true,
             project_validation_v1: false,
+            project_validation_package_scope_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -539,6 +541,7 @@ async fn fast_go_test_uses_exact_structured_argv_cwd_and_records_session_evidenc
             structured_validation_argv: true,
             structured_go_test_json: true,
             project_validation_v1: false,
+            project_validation_package_scope_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -652,6 +655,7 @@ async fn go_test_failure_reports_failed_test_identity_in_result_and_session() {
             structured_validation_argv: true,
             structured_go_test_json: true,
             project_validation_v1: false,
+            project_validation_package_scope_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -741,6 +745,7 @@ async fn long_go_test_hands_off_same_job_and_terminal_evidence_is_queryable() {
             structured_validation_argv: true,
             structured_go_test_json: true,
             project_validation_v1: false,
+            project_validation_package_scope_v1: false,
             structured_go_test_tool: true,
             structured_go_test_packages: true,
             ..Default::default()
@@ -913,9 +918,9 @@ async fn fast_cargo_check_completes_in_windows_and_leaves_no_visible_job() {
 
     let result = task.await.unwrap();
     assert_sparse_validation_terminal_success(&result);
-    assert_eq!(result.output["warnings_count"], 0);
-    assert_eq!(result.output["errors_count"], 0);
-    assert!(result.output.get("diagnostics").is_some());
+    assert!(result.output.get("warnings_count").is_none());
+    assert!(result.output.get("errors_count").is_none());
+    assert!(result.output.get("diagnostics").is_none());
     assert_model_cargo_result_matches_schema("cargo_check", &result);
     // No redundant visible job.
     let list = runtime.list_jobs_for_auth(None, None, None).await;
@@ -3323,13 +3328,6 @@ fn cargo_output_schema_enforces_handoff_terminal_and_rejection_branches() {
         "success": true,
         "output": {
             "execution_state": "pending",
-            "pending_strategy": {
-                "default": "continue_independent_work",
-                "passive_terminal_attention": "same_scope_may_surface",
-                "observe_continuation": "logs_details_recovery_fallback",
-                "observe_auto_follow": false,
-                "blocked_fallback": "wait_for_job_terminal"
-            },
             "continuation": {
                 "follow_up_kind": "fallback_recovery",
                 "tool": "observe_jobs",
@@ -3422,7 +3420,8 @@ fn cargo_output_schema_enforces_handoff_terminal_and_rejection_branches() {
             "tests_passed": 1,
             "tests_failed": 0,
             "zero_tests_run": false,
-            "diagnostics": {},
+            "diagnostics": {"available":true,"parser":"structured_validation_parser"},
+            "source_state": {"freshness":"unproven","observed_mutation_fence":"uncrossed"},
             "permission": {"policy": "trusted_agent"}
         }
     });

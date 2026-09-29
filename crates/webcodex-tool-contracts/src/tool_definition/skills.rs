@@ -2,7 +2,7 @@ use super::RunnerCapabilityRequirement::{FileRead, SkillManagement};
 use super::ToolVisibility::{ModelHidden, ModelVisible};
 use super::{
     adaptive_runtime_direct, def, model_spec, require_all_scopes, ToolDefinition,
-    ToolOperatorExtensionFamily, TOOL_CATEGORY_RUNTIME,
+    ToolOperatorExtensionFamily, TOOL_CATEGORY_SKILL,
 };
 use crate::metadata::{
     ToolPathHint::None as NoPath,
@@ -53,7 +53,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     super::ToolAuditResultField::value("state_changed"),
                 ])),
                 ModelVisible,
-                TOOL_CATEGORY_RUNTIME,
+                TOOL_CATEGORY_SKILL,
                 Some(FileRead),
                 TOOL_PROVIDER_RUNNER,
                 super::ToolSemanticContract {
@@ -72,9 +72,9 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             "Load one uniquely named Skill by exact Unicode case folding. Returns its descriptor, bounded SKILL.md, and revisions in one read-only Project call. Missing, ambiguous, or truncated discovery fails closed; scripts and other Skill resources are never executed.",
         ),
         27,
+        super::ToolDirectReason::CoreWorkflow,
     ),
-    adaptive_runtime_direct(
-        require_all_scopes(
+    require_all_scopes(
             model_spec(
                 def(
                     "run_skill_resource",
@@ -95,7 +95,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                         "process_summary",
                     ])),
                     ModelVisible,
-                    TOOL_CATEGORY_RUNTIME,
+                    TOOL_CATEGORY_SKILL,
                     Some(super::RunnerCapabilityRequirement::SkillResourceExecution),
                     TOOL_PROVIDER_RUNNER,
                     super::ToolSemanticContract {
@@ -122,8 +122,6 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             )),
             &[PROJECT_READ, JOB_RUN],
         ),
-        71,
-    ),
     def(
         "skill_list",
         super::ToolAuditPolicy::typed_fields(&[
@@ -150,7 +148,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ])),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(FileRead),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {
@@ -201,7 +199,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ])),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(FileRead),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {
@@ -233,7 +231,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ]),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(SkillManagement),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {
@@ -271,7 +269,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ]),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(SkillManagement),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {
@@ -304,7 +302,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ]),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(SkillManagement),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {
@@ -336,7 +334,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolAuditResultField::value("state_changed"),
         ]),
         ModelHidden,
-        TOOL_CATEGORY_RUNTIME,
+        TOOL_CATEGORY_SKILL,
         Some(SkillManagement),
         TOOL_PROVIDER_RUNNER,
         super::ToolSemanticContract {

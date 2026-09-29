@@ -422,6 +422,14 @@ variant remains for that retired name; `work_on_project` calls the shared coding
 workflow engine directly, with diagnostic projection controls available only to
 tests rather than as a Session-selection or compatibility surface.
 
+Requested `project.instructions` context on `work_on_project` reuses that call's
+resolved Project and instruction observation. Material scopes remain independently
+checked; incomplete observations are not re-read or promoted to complete. The
+semantic-navigation status probe runs concurrently with required bootstrap
+observations. Startup does not wait solely for LSP: `not_observed` with null
+availability means required observations finished first. Explicit LSP tools still
+obtain current provider truth.
+
 `work_on_project` also owns the optional managed-worktree bootstrap without
 creating a new authority or Session concept. The canonical model-facing form is
 a fresh `project + mode=worktree` call. The Server first resolves and
@@ -771,7 +779,12 @@ durable/queryable sink for low-cardinality ergonomics telemetry. No second
 telemetry table or recorder is created. The shared ToolRuntime kernel owns the
 normal timer for a registered model-visible tool; the transport that already owns
 the outer Action Audit row then finalizes one `summary.model_ergonomics` object
-from the final model-facing ToolResult projection. A transport may use a bounded
+from the final model-facing ToolResult projection, retaining the canonical
+closed execution state captured before late model compaction. Execution
+ActionAudit receipts retain definition-authorized bounded lifecycle, validation
+counts/assertion verdicts, and source classifications, never raw command/script/stdout/stderr,
+diagnostic bodies, or source fence identity.
+Workflow Session evidence is consumed before projection. A transport may use a bounded
 fallback timer only after a runtime tool identity is established when MCP-only
 validation rejects the call before kernel entry or the MCP hard dispatch timeout
 prevents kernel completion. Batch items do not create generic invocation records,

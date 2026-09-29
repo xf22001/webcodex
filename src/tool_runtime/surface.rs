@@ -18,12 +18,12 @@ use super::registry::{
 };
 use super::runtime::ToolRuntime;
 use super::tool_definition::{
-    available_tool_manifest_intent_names, is_model_visible_tool_name, resolve_tool_manifest_intent,
-    runtime_tool_category, runtime_tool_execution_contract, runtime_tool_host_orchestration_hint,
-    runtime_tool_metadata, runtime_tool_operator_extension_family, ToolExecutionContract,
-    ToolManifestIntent, ToolOperatorExtensionFamily, TOOL_CATEGORY_ARTIFACT, TOOL_CATEGORY_EDIT,
-    TOOL_CATEGORY_GIT, TOOL_CATEGORY_PATCH, TOOL_CATEGORY_RUNTIME, TOOL_CATEGORY_SESSION,
-    TOOL_CATEGORY_VALIDATION, TOOL_DISCOVERY_GROUPS, TOOL_RECOMMENDED_FLOWS,
+    available_tool_manifest_intent_names, is_model_visible_tool_name,
+    model_visible_recommended_flows, resolve_tool_manifest_intent, runtime_tool_category,
+    runtime_tool_execution_contract, runtime_tool_host_orchestration_hint, runtime_tool_metadata,
+    runtime_tool_operator_extension_family, ToolExecutionContract, ToolManifestIntent,
+    ToolOperatorExtensionFamily, TOOL_CATEGORY_ARTIFACT, TOOL_CATEGORY_EDIT, TOOL_CATEGORY_GIT,
+    TOOL_CATEGORY_PATCH, TOOL_CATEGORY_RUNTIME, TOOL_CATEGORY_SESSION, TOOL_CATEGORY_VALIDATION,
 };
 use super::tool_inputs::ListToolsOptions;
 use super::tool_result::ToolResult;
@@ -395,27 +395,16 @@ fn code_mode_callable_contract(
 }
 
 pub(crate) fn registered_tool_categories() -> Value {
-    let mut categories = serde_json::Map::new();
-    for group in TOOL_DISCOVERY_GROUPS {
-        let tools = group
-            .tools
-            .iter()
-            .filter(|name| is_model_visible_tool_name(name))
-            .map(|name| Value::String((*name).to_string()))
-            .collect::<Vec<_>>();
-        if tools.is_empty() {
-            continue;
-        }
-        categories.insert(group.name.to_string(), Value::Array(tools));
-    }
-    Value::Object(categories)
+    // Category inventory needs static names, not every tool's full schemas.
+    json!(webcodex_tool_contracts::group_tool_names_by_category(
+        webcodex_tool_contracts::model_visible_tool_definitions().map(|definition| definition.name)
+    ))
 }
 
 /// Short GPT-facing flow hints. Their compact-discovery summary budget remains
 /// independently capped at 300 characters.
 pub(crate) fn recommended_flows() -> Vec<&'static str> {
-    TOOL_RECOMMENDED_FLOWS
-        .iter()
+    model_visible_recommended_flows()
         .map(|flow| flow.summary)
         .collect()
 }
@@ -1336,25 +1325,11 @@ fn list_tool_matches_feature(name: &str, feature: &str) -> bool {
     }
 }
 
-/// Build the categories map from runtime tool specs. Each category
-/// maps to a sorted list of tool names.
+/// Build a sorted taxonomy from the exact admitted ToolSpec selection.
 pub(super) fn build_manifest_categories(specs: &[ToolSpec]) -> Value {
-    let mut map: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for spec in specs {
-        let name = spec.name.as_str();
-        let category = runtime_tool_category(name);
-        map.entry(category).or_default().push(name.to_string());
-    }
-    let result: serde_json::Map<String, Value> = map
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k.to_string(),
-                Value::Array(v.into_iter().map(Value::String).collect()),
-            )
-        })
-        .collect();
-    Value::Object(result)
+    json!(webcodex_tool_contracts::group_tool_names_by_category(
+        specs.iter().map(|spec| spec.name.as_str())
+    ))
 }
 
 /// Build the risk summary map from the returned compact manifest specs.
@@ -1376,8 +1351,7 @@ pub(super) fn build_risk_summary(specs: &[&ToolSpec]) -> Value {
 /// Short, bounded list of recommended tool flows for common tasks. Each
 /// entry references only known tool names. Kept under 10 entries.
 pub(super) fn tool_manifest_recommended_flows() -> Vec<Value> {
-    TOOL_RECOMMENDED_FLOWS
-        .iter()
+    model_visible_recommended_flows()
         .map(|flow| {
             json!({
                 "name": flow.name,
@@ -1399,8 +1373,7 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let visible: std::collections::HashSet<&str> = visible_tools.into_iter().collect();
-    TOOL_RECOMMENDED_FLOWS
-        .iter()
+    model_visible_recommended_flows()
         .filter_map(|flow| {
             let mut seen = std::collections::HashSet::new();
             let tools: Vec<&str> = flow

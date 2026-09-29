@@ -5405,10 +5405,10 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webcodex-admin",
+ "webcodex-build-info",
  "webcodex-code-mode",
  "webcodex-core",
  "webcodex-environment",
- "webcodex-persistent-shell",
  "webcodex-runner-config",
  "webcodex-runner-registry",
  "webcodex-store",
@@ -5449,6 +5449,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "webcodex-build-info"
+version = "0.4.3"
+dependencies = [
+ "webcodex-core",
+]
+
+[[package]]
 name = "webcodex-cli"
 version = "0.4.3"
 dependencies = [
@@ -5469,6 +5476,7 @@ dependencies = [
  "uuid",
  "webcodex",
  "webcodex-admin",
+ "webcodex-build-info",
  "webcodex-core",
  "webcodex-environment",
  "webcodex-runner-config",
@@ -5540,7 +5548,6 @@ dependencies = [
  "toml 0.8.23",
  "url",
  "uuid",
- "webcodex-admin",
  "webcodex-core",
  "webcodex-runner-config",
  "windows-sys 0.61.2",
@@ -5609,6 +5616,7 @@ dependencies = [
  "url",
  "uuid",
  "webcodex-browser",
+ "webcodex-build-info",
  "webcodex-computer",
  "webcodex-core",
  "webcodex-environment",
@@ -5618,7 +5626,7 @@ dependencies = [
  "webcodex-runner-config",
  "webcodex-validation",
  "webcodex-workspace",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.7",
  "windows-sys 0.61.2",
  "xml",
  "zip",
@@ -5700,6 +5708,7 @@ dependencies = [
  "webcodex-tool-contracts",
  "webcodex-tool-runtime-contracts",
  "webcodex-workflow-session",
+ "webcodex-workspace",
 ]
 
 [[package]]

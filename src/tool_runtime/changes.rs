@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -19,9 +18,14 @@ use super::{ToolResult, ToolRuntime};
 // the immutable per-file view alive for a full day instead of the former 5-minute
 // transient presentation window.
 const CHANGES_SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+// Sealed results keep their original quota. Explicit live inspection gets a
+// small independent quota, so browsing cannot consume final-result retention.
+const MAX_WORKSPACE_SNAPSHOTS: usize = 8;
+const MAX_WORKSPACE_SNAPSHOTS_PER_CALLER: usize = 2;
 const MAX_CHANGES_SNAPSHOTS: usize = 32;
 const MAX_CHANGES_SNAPSHOTS_PER_CALLER: usize = 8;
 const MAX_CHANGES_FILES: usize = 24;
+const MAX_STORED_CHANGES_FILES: usize = 2_000;
 const MAX_CHANGES_PATH_CHARS: usize = 1024;
 const CHANGES_METADATA_SOURCE_BYTES: usize = 32 * 1024;
 const CHANGES_DIFF_MAX_BYTES: usize = 48 * 1024;
@@ -64,12 +68,30 @@ impl ChangesFileMetadata {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotRetention {
+    SealedResult,
+    WorkspaceInspection,
+}
+
+impl SnapshotRetention {
+    fn limits(self) -> (usize, usize) {
+        match self {
+            Self::SealedResult => (MAX_CHANGES_SNAPSHOTS, MAX_CHANGES_SNAPSHOTS_PER_CALLER),
+            Self::WorkspaceInspection => {
+                (MAX_WORKSPACE_SNAPSHOTS, MAX_WORKSPACE_SNAPSHOTS_PER_CALLER)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ChangesSnapshot {
+    retention: SnapshotRetention,
     snapshot_id: String,
     caller_fingerprint: String,
     project: String,
-    session_id: String,
+    session_id: Option<String>,
     attempt_key: String,
     baseline_tree: String,
     final_tree: String,
@@ -81,9 +103,13 @@ struct ChangesSnapshot {
 
 impl ChangesSnapshot {
     fn matches_identity(&self, caller_fingerprint: &str, project: &str, session_id: &str) -> bool {
-        self.caller_fingerprint == caller_fingerprint
+        self.matches_context(caller_fingerprint, project, Some(session_id))
+    }
+
+    fn matches_context(&self, caller: &str, project: &str, session: Option<&str>) -> bool {
+        self.caller_fingerprint == caller
             && self.project == project
-            && self.session_id == session_id
+            && self.session_id.as_deref() == session
     }
 
     fn matches_attempt(
@@ -104,15 +130,15 @@ impl ChangesSnapshot {
             "additions": self.totals.additions,
             "deletions": self.totals.deletions,
             "files_total": self.totals.files,
-            "files_returned": self.files.len(),
-            "files_truncated": self.files_truncated,
-            "files": self.files.iter().map(ChangesFileMetadata::to_value).collect::<Vec<_>>(),
+            "files_returned": self.files.len().min(MAX_CHANGES_FILES),
+            "files_truncated": self.files_truncated || self.files.len() > MAX_CHANGES_FILES,
+            "files": self.files.iter().take(MAX_CHANGES_FILES).map(ChangesFileMetadata::to_value).collect::<Vec<_>>(),
         })
     }
 }
 
 #[derive(Default)]
-struct ChangesSnapshotRegistry {
+pub(super) struct ChangesSnapshotRegistry {
     snapshots: VecDeque<ChangesSnapshot>,
 }
 
@@ -140,16 +166,17 @@ impl ChangesSnapshotRegistry {
     fn insert_or_get(&mut self, snapshot: ChangesSnapshot) -> ChangesSnapshot {
         let now = Instant::now();
         self.prune(now);
+        let retention = snapshot.retention;
+        let (global_limit, caller_limit) = retention.limits();
         if let Some(existing) = self
             .snapshots
             .iter()
             .find(|candidate| {
-                candidate.matches_attempt(
+                candidate.matches_context(
                     &snapshot.caller_fingerprint,
                     &snapshot.project,
-                    &snapshot.session_id,
-                    &snapshot.attempt_key,
-                )
+                    snapshot.session_id.as_deref(),
+                ) && candidate.attempt_key == snapshot.attempt_key
             })
             .cloned()
         {
@@ -158,22 +185,38 @@ impl ChangesSnapshotRegistry {
         while self
             .snapshots
             .iter()
-            .filter(|candidate| candidate.caller_fingerprint == snapshot.caller_fingerprint)
+            .filter(|candidate| {
+                candidate.retention == retention
+                    && candidate.caller_fingerprint == snapshot.caller_fingerprint
+            })
             .count()
-            >= MAX_CHANGES_SNAPSHOTS_PER_CALLER
+            >= caller_limit
         {
-            if let Some(index) = self
-                .snapshots
-                .iter()
-                .position(|candidate| candidate.caller_fingerprint == snapshot.caller_fingerprint)
-            {
+            if let Some(index) = self.snapshots.iter().position(|candidate| {
+                candidate.retention == retention
+                    && candidate.caller_fingerprint == snapshot.caller_fingerprint
+            }) {
                 self.snapshots.remove(index);
             } else {
                 break;
             }
         }
-        while self.snapshots.len() >= MAX_CHANGES_SNAPSHOTS {
-            self.snapshots.pop_front();
+        while self
+            .snapshots
+            .iter()
+            .filter(|candidate| candidate.retention == retention)
+            .count()
+            >= global_limit
+        {
+            if let Some(index) = self
+                .snapshots
+                .iter()
+                .position(|candidate| candidate.retention == retention)
+            {
+                self.snapshots.remove(index);
+            } else {
+                break;
+            }
         }
         self.snapshots.push_back(snapshot.clone());
         snapshot
@@ -191,11 +234,6 @@ impl ChangesSnapshotRegistry {
             .find(|snapshot| snapshot.snapshot_id == snapshot_id)
             .cloned()
     }
-}
-
-fn changes_snapshots() -> &'static Mutex<ChangesSnapshotRegistry> {
-    static REGISTRY: OnceLock<Mutex<ChangesSnapshotRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(ChangesSnapshotRegistry::default()))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -334,7 +372,8 @@ exit 0
         };
         let caller_fingerprint = workflow_session_authority_fingerprint(auth)
             .map_err(|_| changes_identity_error("session_authority_denied"))?;
-        Ok(changes_snapshots()
+        Ok(self
+            .changes_snapshots
             .lock()
             .expect("Changes snapshot registry mutex poisoned")
             .get_for_attempt(
@@ -368,7 +407,8 @@ exit 0
         }
         let caller_fingerprint = workflow_session_authority_fingerprint(auth)
             .map_err(|_| changes_identity_error("session_authority_denied"))?;
-        if let Some(snapshot) = changes_snapshots()
+        if let Some(snapshot) = self
+            .changes_snapshots
             .lock()
             .expect("Changes snapshot registry mutex poisoned")
             .get_for_attempt(
@@ -400,10 +440,11 @@ exit 0
             &final_tree,
         );
         let snapshot = ChangesSnapshot {
+            retention: SnapshotRetention::SealedResult,
             snapshot_id,
             caller_fingerprint,
             project: project.to_string(),
-            session_id: summary.session_id.clone(),
+            session_id: Some(summary.session_id.clone()),
             attempt_key: attempt_key.to_string(),
             baseline_tree: baseline_tree.to_string(),
             final_tree,
@@ -412,12 +453,152 @@ exit 0
             files_truncated,
             expires_at: Instant::now() + CHANGES_SNAPSHOT_TTL,
         };
-        let snapshot = changes_snapshots()
+        let snapshot = self
+            .changes_snapshots
             .lock()
             .expect("Changes snapshot registry mutex poisoned")
             .insert_or_get(snapshot);
 
         Ok(Some(snapshot.presentation_value()))
+    }
+
+    /// Shared lazy UI reader: exact caller/Project/optional Session, immutable
+    /// source, bounded pages, and the same safe per-file diff producer as finals.
+    pub(crate) async fn work_result_files(
+        &self,
+        project: String,
+        session_id: Option<String>,
+        request: webcodex_tool_contracts::WorkResultFilesRequest,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        if request.offset > MAX_STORED_CHANGES_FILES
+            || request
+                .path
+                .as_deref()
+                .is_some_and(|path| !valid_changes_path(path))
+            || (request.path.is_some() && (request.snapshot_id.is_none() || request.offset != 0))
+            || (request.snapshot_id.is_none() && (session_id.is_some() || request.offset != 0))
+        {
+            return changes_identity_error("changes_page_invalid");
+        }
+        let caller = match workflow_session_authority_fingerprint(auth) {
+            Ok(caller) => caller,
+            Err(_) => return changes_identity_error("session_authority_denied"),
+        };
+        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+            Ok(resolved) if resolved.resolved_id == project => resolved,
+            _ => return changes_identity_error("changes_project_not_exact"),
+        };
+        if let Some(session) = session_id.as_deref() {
+            if let Err(result) = self
+                .authorize_exact_changes_context(&project, session, "changes_file_diff", auth)
+                .await
+            {
+                return result;
+            }
+        }
+        let snapshot = if let Some(id) = request.snapshot_id {
+            let found = self
+                .changes_snapshots
+                .lock()
+                .expect("Changes registry")
+                .get(&id);
+            match found {
+                Some(snapshot)
+                    if snapshot.matches_context(&caller, &project, session_id.as_deref()) =>
+                {
+                    snapshot
+                }
+                _ => return changes_identity_error("changes_snapshot_unavailable"),
+            }
+        } else {
+            let (head, tree, _) = match self
+                .freeze_workspace_git_state(&resolved.resolved_id, false)
+                .await
+            {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+            let baseline = match head {
+                Some(head) => head,
+                None => {
+                    let empty = self
+                        .run_project_internal_posix_script_capture(
+                            &project,
+                            "printf '' | git hash-object -t tree --stdin".into(),
+                            10,
+                            None,
+                        )
+                        .await;
+                    match empty {
+                        Ok(output)
+                            if output.exit_code == Some(0)
+                                && valid_git_object_id(output.stdout.trim()) =>
+                        {
+                            output.stdout.trim().to_string()
+                        }
+                        _ => return changes_identity_error("changes_snapshot_failed"),
+                    }
+                }
+            };
+            let (totals, files, files_truncated) =
+                match self.changes_metadata(&project, &baseline, &tree).await {
+                    Ok(value) => value,
+                    Err(result) => return result,
+                };
+            let attempt_key = format!("workspace:{baseline}:{tree}");
+            let snapshot = ChangesSnapshot {
+                retention: SnapshotRetention::WorkspaceInspection,
+                snapshot_id: changes_snapshot_id(
+                    &caller,
+                    &project,
+                    "",
+                    &attempt_key,
+                    &baseline,
+                    &tree,
+                ),
+                caller_fingerprint: caller,
+                project: project.clone(),
+                session_id: None,
+                attempt_key,
+                baseline_tree: baseline,
+                final_tree: tree,
+                totals,
+                files,
+                files_truncated,
+                expires_at: Instant::now() + CHANGES_SNAPSHOT_TTL,
+            };
+            self.changes_snapshots
+                .lock()
+                .expect("Changes registry")
+                .insert_or_get(snapshot)
+        };
+        if let Some(path) = request.path {
+            let Some(file) = snapshot.files.iter().find(|file| file.path == path) else {
+                return changes_identity_error("changes_snapshot_path_not_allowed");
+            };
+            let diff = match self.frozen_changes_file_diff(&snapshot, file).await {
+                Ok(diff) => diff,
+                Err(result) => return result,
+            };
+            return ToolResult::ok(json!({"work_result_files": {
+                "project": project, "session_id": session_id, "snapshot_id": snapshot.snapshot_id,
+                "path": path, "diff": diff.text, "truncated": diff.truncated,
+            }}));
+        }
+        if request.offset > snapshot.files.len() {
+            return changes_identity_error("changes_page_invalid");
+        }
+        let end = request
+            .offset
+            .saturating_add(MAX_CHANGES_FILES)
+            .min(snapshot.files.len());
+        ToolResult::ok(json!({"work_result_files": {
+            "project": project, "session_id": session_id, "snapshot_id": snapshot.snapshot_id,
+            "offset": request.offset, "next_offset": (end < snapshot.files.len()).then_some(end),
+            "files_total": snapshot.totals.files, "source_truncated": snapshot.files_truncated,
+            "files": snapshot.files[request.offset..end].iter().map(ChangesFileMetadata::to_value).collect::<Vec<_>>(),
+        }}))
     }
 
     pub(crate) async fn changes_file_diff(
@@ -439,7 +620,8 @@ exit 0
             return changes_identity_error("changes_snapshot_path_invalid");
         }
 
-        let snapshot = changes_snapshots()
+        let snapshot = self
+            .changes_snapshots
             .lock()
             .expect("Changes snapshot registry mutex poisoned")
             .get(&snapshot_id);
@@ -678,7 +860,7 @@ printf 'WEBCODEX_WORKSPACE_STATUS=%s\n' "$status_fingerprint""#
         let statuses = parse_name_status_z(&name_status);
         let stats = parse_numstat_z(&numstat);
         let mut files = Vec::new();
-        for mut file in statuses.into_iter().take(MAX_CHANGES_FILES) {
+        for mut file in statuses.into_iter().take(MAX_STORED_CHANGES_FILES) {
             if let Some(stat) = stats.get(&file.path) {
                 file.additions = stat.additions;
                 file.deletions = stat.deletions;
@@ -886,14 +1068,14 @@ fn valid_changes_path(path: &str) -> bool {
     if path.split(['/', '\\']).any(|component| component == "..") {
         return false;
     }
-    validate_project_relative_path(path).is_ok()
+    !crate::sensitive_paths::is_secret_path(path) && validate_project_relative_path(path).is_ok()
 }
 
 fn parse_name_status_z(source: &str) -> Vec<ChangesFileMetadata> {
     let fields = complete_nul_prefix(source).split('\0').collect::<Vec<_>>();
     let mut index = 0;
     let mut files = Vec::new();
-    while index < fields.len() && files.len() < MAX_CHANGES_FILES {
+    while index < fields.len() && files.len() < MAX_STORED_CHANGES_FILES {
         let status = fields[index];
         index += 1;
         if status.is_empty() {
@@ -1005,9 +1187,10 @@ mod tests {
     fn snapshot_fixture(id: &str, caller: &str) -> ChangesSnapshot {
         ChangesSnapshot {
             snapshot_id: id.to_string(),
+            retention: SnapshotRetention::SealedResult,
             caller_fingerprint: caller.to_string(),
             project: "agent:runner:project".to_string(),
-            session_id: "session".to_string(),
+            session_id: Some("session".to_string()),
             attempt_key: format!("attempt-{id}"),
             baseline_tree: "a".repeat(40),
             final_tree: "b".repeat(40),
@@ -1016,6 +1199,48 @@ mod tests {
             files_truncated: false,
             expires_at: Instant::now() + CHANGES_SNAPSHOT_TTL,
         }
+    }
+
+    #[test]
+    fn changes_registry_is_shared_by_clones_but_isolated_between_runtimes() {
+        let runtime = ToolRuntime::new_for_tests();
+        let clone = runtime.clone();
+        let independent = ToolRuntime::new_for_tests();
+        runtime
+            .changes_snapshots
+            .lock()
+            .unwrap()
+            .insert(snapshot_fixture("runtime-only", "caller"));
+        assert!(clone
+            .changes_snapshots
+            .lock()
+            .unwrap()
+            .get("runtime-only")
+            .is_some());
+        assert!(independent
+            .changes_snapshots
+            .lock()
+            .unwrap()
+            .get("runtime-only")
+            .is_none());
+        for index in 0..MAX_CHANGES_SNAPSHOTS * 2 {
+            independent
+                .changes_snapshots
+                .lock()
+                .unwrap()
+                .insert(snapshot_fixture(&format!("other-{index}"), "caller"));
+        }
+        assert!(clone
+            .changes_snapshots
+            .lock()
+            .unwrap()
+            .get("runtime-only")
+            .is_some());
+        let weak = std::sync::Arc::downgrade(&runtime.changes_snapshots);
+        drop(runtime);
+        assert!(weak.upgrade().is_some());
+        drop(clone);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]
@@ -1065,6 +1290,90 @@ mod tests {
         assert!(registry.get("same-1").is_none());
     }
 
+    fn workspace_snapshot_fixture(id: &str, caller: &str) -> ChangesSnapshot {
+        ChangesSnapshot {
+            retention: SnapshotRetention::WorkspaceInspection,
+            session_id: None,
+            ..snapshot_fixture(id, caller)
+        }
+    }
+
+    #[test]
+    fn live_inspection_pressure_never_evicts_a_sealed_result_for_the_same_caller() {
+        let mut registry = ChangesSnapshotRegistry::default();
+        let sealed = snapshot_fixture("sealed", "caller");
+        let expiry = sealed.expires_at;
+        registry.insert(sealed);
+        for index in 0..(MAX_CHANGES_SNAPSHOTS_PER_CALLER + 4) {
+            registry.insert(workspace_snapshot_fixture(
+                &format!("live-{index}"),
+                "caller",
+            ));
+        }
+        assert_eq!(registry.get("sealed").unwrap().expires_at, expiry);
+        assert_eq!(
+            registry.snapshots.len(),
+            MAX_WORKSPACE_SNAPSHOTS_PER_CALLER + 1
+        );
+        assert!(registry.get("live-0").is_none());
+        assert!(registry
+            .get_for_attempt(
+                "caller",
+                "agent:runner:project",
+                "session",
+                "attempt-sealed"
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn global_retention_quotas_are_independent_bounded_and_bidirectional() {
+        let mut registry = ChangesSnapshotRegistry::default();
+        for index in 0..MAX_CHANGES_SNAPSHOTS {
+            registry.insert(snapshot_fixture(
+                &format!("sealed-{index}"),
+                &format!("caller-{index}"),
+            ));
+        }
+        for index in 0..=MAX_WORKSPACE_SNAPSHOTS {
+            registry.insert(workspace_snapshot_fixture(
+                &format!("live-{index}"),
+                &format!("caller-{index}"),
+            ));
+        }
+        assert_eq!(
+            registry.snapshots.len(),
+            MAX_CHANGES_SNAPSHOTS + MAX_WORKSPACE_SNAPSHOTS
+        );
+        for index in 0..MAX_CHANGES_SNAPSHOTS {
+            assert!(registry.get(&format!("sealed-{index}")).is_some());
+        }
+        assert!(registry.get("live-0").is_none());
+        assert!(registry.get("live-1").is_some());
+        registry.insert(snapshot_fixture("sealed-new", "new-caller"));
+        assert!(registry.get("sealed-0").is_none());
+        assert!(registry.get("live-1").is_some());
+        assert_eq!(
+            registry.snapshots.len(),
+            MAX_CHANGES_SNAPSHOTS + MAX_WORKSPACE_SNAPSHOTS
+        );
+    }
+
+    #[test]
+    fn live_snapshot_replay_neither_extends_ttl_nor_spends_another_slot() {
+        let mut registry = ChangesSnapshotRegistry::default();
+        let live = workspace_snapshot_fixture("live", "caller");
+        let expires_at = live.expires_at;
+        registry.insert(live);
+        let replay = registry.insert_or_get(workspace_snapshot_fixture("live", "caller"));
+        assert_eq!(replay.expires_at, expires_at);
+        assert_eq!(registry.snapshots.len(), 1);
+        assert!(!replay.matches_context("foreign", "agent:runner:project", None));
+        assert!(!replay.matches_context("caller", "agent:runner:project", Some("session")));
+        registry.prune(expires_at);
+        assert!(registry.get("live").is_none());
+    }
+
     #[test]
     fn frozen_changes_diff_budget_bounds_returned_utf8_not_only_source_bytes() {
         let mut text = format!("{}汉", "a".repeat(CHANGES_DIFF_MAX_BYTES - 1));
@@ -1083,7 +1392,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "src/a.rs");
 
-        let stats = parse_numstat_z("1\t2\tsrc/a.rs\03\t4\tsrc/partial");
+        let stats = parse_numstat_z("1\t2\tsrc/a.rs\x003\t4\tsrc/partial");
         assert_eq!(stats.len(), 1);
         assert_eq!(stats["src/a.rs"].additions, Some(1));
         assert_eq!(stats["src/a.rs"].deletions, Some(2));
@@ -1112,7 +1421,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "src/a.rs");
 
-        let stats = parse_numstat_z("1\t2\tsrc/a.rs\03\t4\tline\nbreak.rs\05\t6\tC:drive.rs\0");
+        let stats = parse_numstat_z("1\t2\tsrc/a.rs\x003\t4\tline\nbreak.rs\x005\t6\tC:drive.rs\0");
         assert_eq!(stats.len(), 1);
         assert_eq!(stats["src/a.rs"].additions, Some(1));
         assert_eq!(stats["src/a.rs"].deletions, Some(2));

@@ -276,6 +276,18 @@ impl SearchPatternMode {
     }
 }
 
+/// App-only inspection of a pinned Work Result file snapshot.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkResultFilesRequest {
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFilesItem {
@@ -406,6 +418,7 @@ pub const MAX_JOB_READINESS_WAIT_SECS: u64 = 45;
 pub enum ObserveJobsWakeOn {
     #[default]
     Change,
+    MeaningfulChange,
     Terminal,
     AllTerminal,
 }
@@ -1538,7 +1551,7 @@ pub enum ToolCall {
         /// Required exact runtime Project input. It is independently resolved and authorized on every call.
         #[schemars(length(min = 1, max = 512))]
         project: String,
-        /// Optional exact project-scoped Workflow Session association for compatibility.
+        /// Optional exact project-scoped Workflow Session for authorized Server Job state.
         /// Omit it when the Window has not created or resumed a Workflow Session.
         #[serde(default)]
         #[schemars(regex(pattern = "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$"))]
@@ -1546,12 +1559,15 @@ pub enum ToolCall {
     },
 
     /// App-only read of the same Window card projection. Optional Session identity
-    /// is association evidence only and is deliberately excluded from generic recording.
+    /// selects authorized Server Job state and is deliberately excluded from generic recording.
     WorkResultState {
         project: String,
         #[serde(default)]
         #[schemars(regex(pattern = "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$"))]
         session_id: Option<String>,
+        /// Explicit file page or lazy diff; omission keeps lightweight card state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<WorkResultFilesRequest>,
     },
 
     /// Work Result App-only lazy read of one completed call in the current
@@ -2764,6 +2780,11 @@ pub enum ToolCall {
         /// Omission means auto. Rust and Go are supported; Node/Python return unavailable.
         #[serde(default)]
         adapter: Option<webcodex_core::project_validation::ProjectValidationAdapter>,
+        /// Optional portable package scope. Rust check/test map packages to repeated Cargo -p selectors;
+        /// Go check/test map packages to bounded project-relative package patterns. Formatting with package
+        /// scope is not supported.
+        #[serde(default)]
+        scope: Option<webcodex_core::project_validation::ProjectValidationScope>,
         /// Total execution budget, clamped to 3600 seconds. Host grace never starts another execution.
         #[serde(default)]
         #[schemars(range(min = 1))]
@@ -3629,8 +3650,9 @@ pub enum ToolCall {
         idempotency_key: String,
     },
 
-    /// Compatibility name for server-local continuation Endpoint rotation.
-    /// Attach a current Host/Client Endpoint to a durable Agent.
+    /// Frozen GPT Actions spelling only; absent from the default canonical parser.
+    /// This exception retires with the legacy adapter, not with a schema refresh.
+    #[cfg(feature = "legacy-gpt-actions")]
     AttachAgentEndpoint {
         /// Canonical durable Agent id owned by the current communication principal.
         #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
@@ -4142,13 +4164,14 @@ pub enum ToolCall {
         #[serde(default, deserialize_with = "deserialize_observe_jobs_wait_secs")]
         wait_secs: Option<u64>,
         #[schemars(extend("default" = "change"))]
-        /// Bounded-wait wake policy. change (default) returns on any observable change. terminal waits for
-        /// any Job to be terminal; use it for one Job or when any terminal result unblocks progress.
-        /// all_terminal waits for every Job in a predetermined set needed before progress. Both coalesce
-        /// non-terminal log/progress/activity updates and return immediately on any item error or at the
-        /// shared deadline. Deadline returns timeout even when changed=true; deltas remain relative to the
-        /// caller's original tokens. No token means immediate baseline; no wait_secs means immediate
-        /// observation.
+        /// Bounded-wait wake policy. change (default) returns on any observable change.
+        /// meaningful_change suppresses sequence-only heartbeat revisions but still wakes for log,
+        /// lifecycle, progress, activity and recovery changes. terminal waits for any Job to be terminal;
+        /// use it for one Job or when any terminal result unblocks progress. all_terminal waits for every
+        /// Job in a predetermined set needed before progress. Terminal policies coalesce non-terminal
+        /// updates and all policies return immediately on any item error or at the shared deadline.
+        /// Deadline returns timeout even when changed=true; deltas remain relative to the caller's
+        /// original tokens. No token means immediate baseline; no wait_secs means immediate observation.
         #[serde(default)]
         wake_on: ObserveJobsWakeOn,
         /// Opt-in projection for proven successful structured validation Jobs. Removes routine
@@ -4164,11 +4187,15 @@ pub enum ToolCall {
     WaitForJobReadiness {
         /// Exact public Job IDs. Stable deduplication preserves first occurrence order;
         /// the resulting set must contain 1..8 Jobs. Every target is re-authorized before waiting.
-        #[schemars(length(min = 1))]
+        #[schemars(length(min = 1, max = 8))]
         job_ids: Vec<String>,
-        /// any returns on the first terminal Job; all requires every target terminal.
+        /// Use any when one terminal Job can unlock a useful dependent branch; use all only at a
+        /// true join point where every blocked dependency is required.
         mode: JobReadinessMode,
-        /// Explicit bounded wait, 1..45 seconds. Progress never extends its absolute deadline.
+        /// Explicit bounded wait, 1..45 seconds. Choose the largest safe value from the remaining
+        /// Host activation budget after its return guard; no fixed 10/15/20-second slice is preferred.
+        /// Progress never extends the absolute deadline. After deadline, recompute ready work and the
+        /// blocked set instead of mechanically repeating the same wait.
         #[schemars(range(min = 1, max = 45))]
         wait_secs: u64,
     },
@@ -5420,7 +5447,7 @@ fn canonicalize_process_argv_alias(name: &str, arguments: &mut Value) -> Result<
     };
     if let Some(canonical) = object.get("args") {
         if canonical != &alias {
-            return Err("ambiguous compatibility alias: args and argv differ".to_string());
+            return Err("ambiguous input alias: args and argv differ".to_string());
         }
     } else {
         object.insert("args".to_string(), alias);
@@ -5443,7 +5470,8 @@ impl ToolCall {
         Self::from_tool_name_with_normalization(name, arguments).map(|(call, _)| call)
     }
 
-    /// Returns a stable code only when a documented compatibility alias was used.
+    /// Returns a stable code only when an explicit ergonomic input alias was
+    /// normalized to avoid a mechanical retry. This is not API compatibility.
     pub fn from_tool_name_with_normalization(
         name: &str,
         arguments: Value,
@@ -5722,6 +5750,7 @@ impl ToolCall {
             Self::ListAgentIdentities { .. } => "list_agent_identities",
             Self::UpdateAgentIdentity { .. } => "update_agent_identity",
             Self::RotateAgentContinuationEndpoint { .. } => "rotate_agent_continuation_endpoint",
+            #[cfg(feature = "legacy-gpt-actions")]
             Self::AttachAgentEndpoint { .. } => "attach_agent_endpoint",
             Self::PresentAgentContinuation { .. } => "present_agent_continuation",
             Self::AgentContinuationBind { .. } => "agent_continuation_bind",

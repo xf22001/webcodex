@@ -130,8 +130,9 @@ without sending a message. Window activity calls are compact, collapsed by defau
 and fetch their sanitized trace/timing details only when expanded. The card header
 shows the canonical hashed Window key used by the Window activity ledger, making
 support traces attributable without exposing the Host's raw Window identifier.
-New cards use `ui://webcodex/work-result/v11` so Hosts with cached older templates
-load the updated activity presentation and lazy-detail contract.
+New cards use `ui://webcodex/work-result/v12` so Hosts with cached older templates
+load the progressive file-list and lazy-detail contract; v11 remains readable for
+previously mounted cards.
 
 ## Existing Server
 
@@ -294,7 +295,7 @@ work_on_project
 
 `present_work_result` is a one-card presentation layer for substantial coding, not a correctness primitive. Once mounted, its App-only state reads keep current progress, workspace, validation, and review visible without model polling. A non-blocking `finish_coding_task` seals eligible final changes in the presentation cache at closeout; the same card then discovers that immutable snapshot and can lazily expand per-file diffs. Tiny/read-only work should skip the card; repeated presentation of the same Session should be avoided.
 
-For ordinary portable read-only validation, prefer `project_validate`. It accepts only a closed `format_check` / `check` / `test` intent plus an optional `auto` / `rust` / `go` adapter hint; the Runner resolves the nearest unambiguous recipe on its own registered filesystem and then starts the existing structured validation Job. Rust maps to `cargo fmt -- --check`, `cargo check --all-targets`, or `cargo test`; Go maps to `go vet ./...` or `go test -json ./...`. Node/Python detection currently returns a bounded unsupported result. The request never carries arbitrary executable, argv, shell grammar, installation, or source mutation. Existing `cargo_*` / `go_test` tools remain available for ecosystem-specific advanced options. `project_validate` requires the additive `project_validation_v1` Runner capability; older Runners fail before execution and should be upgraded.
+For ordinary portable read-only validation, prefer `project_validate`. It accepts only a closed `format_check` / `check` / `test` intent plus an optional `auto` / `rust` / `go` adapter hint; the Runner resolves the nearest unambiguous recipe on its own registered filesystem and then starts the existing structured validation Job. Rust maps to `cargo fmt -- --check`, `cargo check --all-targets`, or `cargo test`; Go maps to `go vet ./...` or `go test -json ./...`. An optional bounded `scope.packages` (1..8 entries) narrows Rust check/test through repeated Cargo `-p` selectors and Go check/test through project-relative package patterns; package-scoped formatting fails closed. Node/Python detection currently returns a bounded unsupported result. The request never carries arbitrary executable, argv, shell grammar, installation, or source mutation. Existing `cargo_*` / `go_test` tools remain available for ecosystem-specific advanced options. `project_validate` requires the additive `project_validation_v1` Runner capability; scoped requests additionally require `project_validation_package_scope_v1`, so mixed-version deployments fail closed before sending the expanded request.
 
 Adaptive Runtime may expose common tools directly and long-tail tools through `call_runtime_tool`. Direct versus gateway exposure never changes schema validation, OAuth scope, Project authority, permission policy, Runner capability checks, Session fences, or effects.
 

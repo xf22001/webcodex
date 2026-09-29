@@ -270,6 +270,9 @@ async fn unauthorized_registration_is_existence_hiding_and_session_window_are_no
 #[tokio::test]
 async fn keyed_replay_reports_current_exact_carrier_capability_only_for_its_wait() {
     let (_temp, runtime, _db, controller) = attention_runtime_with_controller().await;
+    let runtime = runtime.with_model_workflow_policy(
+        crate::model_workflow::ModelWorkflowPolicy::from_values(None, Some("unattended")).unwrap(),
+    );
     let auth = shared_key_auth_context(&"7".repeat(64));
     let (job_id, _request) =
         start_owned_job(&runtime, "e3-carrier", "project-carrier", &auth).await;
@@ -388,11 +391,12 @@ async fn presentation_reauthorizes_exact_wait_and_exposes_no_ambient_authority_s
     assert!(!denied.success);
     assert_eq!(denied.output["error_kind"], "job_terminal_wait_not_found");
 
-    let spec = crate::tool_runtime::registered_tool_specs()
-        .into_iter()
-        .find(|spec| spec.name == "present_job_terminal_continuation")
-        .unwrap();
-    assert_eq!(spec.input_schema["required"], json!(["wait_id"]));
+    assert!(!crate::tool_runtime::registered_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "present_job_terminal_continuation"));
+    let schema =
+        webcodex_tool_contracts::input_schema_for_tool("present_job_terminal_continuation");
+    assert_eq!(schema["required"], json!(["wait_id"]));
     for forbidden in [
         "job_id",
         "session_id",
@@ -401,13 +405,16 @@ async fn presentation_reauthorizes_exact_wait_and_exposes_no_ambient_authority_s
         "principal_digest",
         "project",
     ] {
-        assert!(spec.input_schema["properties"].get(forbidden).is_none());
+        assert!(schema["properties"].get(forbidden).is_none());
     }
 }
 
 #[tokio::test]
 async fn app_binding_uses_hashed_host_sideband_only_and_never_returns_raw_identity_or_fence() {
     let (_temp, runtime, db, _controller) = attention_runtime_with_controller().await;
+    let runtime = runtime.with_model_workflow_policy(
+        crate::model_workflow::ModelWorkflowPolicy::from_values(None, Some("unattended")).unwrap(),
+    );
     let auth = shared_key_auth_context(&"6".repeat(64));
     let (job_id, _request) =
         start_owned_job(&runtime, "e3-sideband", "project-sideband", &auth).await;

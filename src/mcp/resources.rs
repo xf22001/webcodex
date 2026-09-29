@@ -60,12 +60,14 @@ pub(super) const MCP_RESULT_UI_RESOURCE_LEGACY_URIS: &[&str] = &[
     "ui://webcodex/result/v2",
     "ui://webcodex/result/v3",
 ];
-pub(super) const MCP_WORK_RESULT_UI_RESOURCE_URI: &str = "ui://webcodex/work-result/v11";
+pub(super) const MCP_WORK_RESULT_UI_RESOURCE_URI: &str = "ui://webcodex/work-result/v13";
 // Hosts can retain previously shipped Work Result / Changes resources across
 // deploys. Keep those URIs readable with the current safe template, but only the
-// canonical v11 descriptor admits a new card. Legacy payloads are never promoted
+// canonical v13 descriptor admits a new card. Legacy payloads are never promoted
 // into authoritative Work Result state.
 pub(super) const MCP_WORK_RESULT_UI_RESOURCE_LEGACY_URIS: &[&str] = &[
+    "ui://webcodex/work-result/v12",
+    "ui://webcodex/work-result/v11",
     "ui://webcodex/work-result/v10",
     "ui://webcodex/work-result/v9",
     "ui://webcodex/work-result/v8",
@@ -1228,7 +1230,7 @@ impl McpArtifactExportBase64Encoder {
             self.carry_len += take;
             index += take;
             if self.carry_len == 3 {
-                general_purpose::STANDARD.encode_string(&self.carry, &mut output);
+                general_purpose::STANDARD.encode_string(self.carry, &mut output);
                 self.carry_len = 0;
             }
         }

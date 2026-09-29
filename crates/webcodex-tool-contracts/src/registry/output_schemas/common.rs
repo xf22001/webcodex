@@ -17,7 +17,7 @@ pub(super) fn validation_source_state_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Source freshness is independent of execution pass/fail. V1 never proves current source: uncrossed covers only canonical potential mutation dispatches in one live Control Project epoch, not external/process writes or an immutable snapshot. This is an observation, not a reusable currentness certificate.",
+        "description": "Never certifies current source, regardless of execution outcome. Uncrossed covers only canonical potential mutation dispatches in one live Control Project epoch, not external/process writes or an immutable snapshot.",
         "properties": {
             "freshness": {"type": "string", "enum": ["unproven", "stale"]},
             "observed_mutation_fence": {"type": "string", "enum": ["uncrossed", "crossed", "unknown"]},
@@ -49,22 +49,6 @@ pub fn nullable_schema(kind: &str, description: &str) -> Value {
             { "type": "null" }
         ],
         "description": description,
-    })
-}
-
-pub(super) fn pending_job_strategy_schema() -> Value {
-    json!({
-        "type": "object",
-        "description": "Model-facing pending Job policy. Independent work is the default; eligible later same-scope results may carry passive terminal attention, exact observe_jobs continuation is only for logs/details/recovery, and blocking callers should wait once for terminal state.",
-        "additionalProperties": false,
-        "properties": {
-            "default": {"type": "string", "const": "continue_independent_work"},
-            "passive_terminal_attention": {"type": "string", "const": "same_scope_may_surface", "description": "Conditional guidance only: passive terminal attention may appear on a later eligible same-Window/Project/business-Session result; it is not guaranteed for every pending call."},
-            "observe_continuation": {"type": "string", "const": "logs_details_recovery_fallback"},
-            "observe_auto_follow": {"type": "boolean", "const": false},
-            "blocked_fallback": {"type": "string", "const": "wait_for_job_terminal"}
-        },
-        "required": ["default", "passive_terminal_attention", "observe_continuation", "observe_auto_follow", "blocked_fallback"]
     })
 }
 
@@ -590,7 +574,8 @@ pub fn recovery_kind_schema() -> Value {
 fn passive_failure_diagnostics_schema() -> Value {
     use webcodex_core::validation_evidence::{PASSIVE_MAX_DIAGNOSTICS, PASSIVE_MAX_FAILED_TESTS};
     let mut schema = super::testing::cargo_test_diagnostics_schema(
-        "Actionable safe parser evidence, at most 8 KiB serialized. Truncation or absent evidence leaves details available through observe_jobs.");
+        "Safe parser evidence, at most 8 KiB. For missing/truncated evidence use observe_jobs.",
+    );
     let fields = schema["properties"].as_object_mut().unwrap();
     for field in [
         "parser",
@@ -609,6 +594,13 @@ fn passive_failure_diagnostics_schema() -> Value {
     for field in fields.values_mut() {
         if let Some(object) = field.as_object_mut() {
             object.remove("description");
+        }
+    }
+    // Count names already express these facts; do not repeat them in each
+    // embedded passive schema alongside the explicit-observation descriptions.
+    if let Some(counts) = fields.get_mut("test_summary").unwrap()["properties"].as_object_mut() {
+        for count in counts.values_mut() {
+            count.as_object_mut().unwrap().remove("description");
         }
     }
     schema["required"] = json!([
@@ -646,20 +638,20 @@ pub(super) fn passive_job_attention_schema() -> Value {
             },
             "required": ["items"]
         }),
-        "Read this existing Job's bounded details only when sparse passive state is insufficient.",
+        "Read bounded details of this Job only if passive evidence is insufficient.",
     );
     let validation = json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Sparse validation truth. Execution pass/fail is historical; source_state independently says whether covered source has crossed a known canonical mutation fence.",
+        "description": "Historical validation proof; source_state independently describes the mutation fence.",
         "properties": {
             "tool": {"type": "string", "maxLength": 64},
             "kind": {"type": "string", "enum": ["format", "check", "test", "validation", "build", "release"]},
             "state": {"type": "string", "enum": ["pending", "running", "completed", "timed_out", "cancelled", "lost"]},
-            "passed": nullable_schema("boolean", "Validation verdict from the available authoritative execution/evidence contract; null means not proven."),
-            "tests_detected": nullable_schema("boolean", "Whether authoritative test evidence detected tests."),
-            "tests_run_count": nullable_schema("integer", "Authoritative executed-test count when available."),
-            "zero_tests_run": nullable_schema("boolean", "Whether authoritative evidence proved zero executed tests."),
+            "passed": nullable_schema("boolean", "Authoritative validation verdict; null is unproven."),
+            "tests_detected": nullable_schema("boolean", "Tests detected by authoritative evidence."),
+            "tests_run_count": nullable_schema("integer", "Proven executed-test count, else null."),
+            "zero_tests_run": nullable_schema("boolean", "Whether zero tests ran; null if unproven."),
             "test_count_assertion": cargo_test_count_assertion_schema(),
             "require_tests": {"type": "boolean"},
             "no_run": {"type": "boolean"},
@@ -667,14 +659,13 @@ pub(super) fn passive_job_attention_schema() -> Value {
             "source_state": validation_source_state_schema(),
             "diagnostics": passive_failure_diagnostics_schema()
         },
-        "required": ["tool", "kind", "state", "passed", "source_state"]
+        "required": ["kind", "source_state"]
     });
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Optional bounded same-turn sidecar for changed durable executions in the exact authenticated Window/Project/Workflow-Session context. It never starts, retries, waits for, or polls Runner execution.",
+        "description": "Changed Jobs in the exact authenticated Window/Project/Workflow Session. Passive only: never starts, retries, waits or polls.",
         "properties": {
-            "changed": {"type": "boolean", "const": true},
             "items": {
                 "type": "array",
                 "minItems": 1,
@@ -689,17 +680,43 @@ pub(super) fn passive_job_attention_schema() -> Value {
                         "state": {"type": "string", "enum": ["active", "terminal"]},
                         "recovery_state": {"type": "string", "maxLength": 64},
                         "recovery_reason_code": {"type": "string", "maxLength": 128},
-                        "outcome": {"type": "string", "enum": ["passed", "failed", "timed_out", "cancelled"]},
-                        "exit_code": nullable_schema("integer", "Terminal process exit code when known."),
-                        "command_ok": nullable_schema("boolean", "Whether the underlying command completed successfully; validation proof remains under validation."),
+                        "outcome": {"type": "string", "enum": ["passed", "failed", "timed_out", "cancelled"], "description": "Terminal execution outcome. Without state/status, any validation also passed; source_state never certifies current source."},
+                        "exit_code": nullable_schema("integer", "Known terminal exit code, else null."),
+                        "command_ok": nullable_schema("boolean", "Process success only; see validation for proof."),
                         "validation": validation,
                         "details": details
                     },
-                    "required": ["job_id", "tool", "status", "state"]
+                    "required": ["job_id", "tool"],
+                    "oneOf": [
+                        {
+                            "required": ["status", "state"],
+                            "properties": {"validation": {"required": ["tool", "state", "passed"]}}
+                        },
+                        {
+                            "required": ["outcome"],
+                            "properties": {
+                                "outcome": {"const": "passed"},
+                                "status": {"enum": []}, "state": {"enum": []},
+                                "exit_code": {"enum": []}, "command_ok": {"enum": []}, "details": {"enum": []},
+                                "recovery_state": {"enum": []}, "recovery_reason_code": {"enum": []},
+                                "validation": {
+                                    "properties": {
+                                        "state": {"enum": []}, "passed": {"enum": []}, "diagnostics": {"enum": []},
+                                        "source_state": {
+                                            "properties": {
+                                                "freshness": {"const": "unproven"},
+                                                "observed_mutation_fence": {"const": "uncrossed"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
                 }
             }
         },
-        "required": ["changed", "items"]
+        "required": ["items"]
     })
 }
 
@@ -853,14 +870,14 @@ pub fn cargo_test_count_assertion_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": webcodex_core::runner_protocol::CARGO_TEST_MIN_TESTS_MAX,
-                "description": "Effective caller-requested minimum after combining require_tests and min_tests."
+                "description": "Caller minimum combining require_tests and min_tests."
             },
             "actual_tests_run": {
                 "anyOf": [
                     {"type": "integer", "minimum": 0},
                     {"type": "null"}
                 ],
-                "description": "Proven executed test count, or null when complete count evidence was unavailable."
+                "description": "Proven executed count; null if complete count evidence is unavailable."
             },
             "status": {
                 "type": "string",
@@ -873,7 +890,7 @@ pub fn cargo_test_count_assertion_schema() -> Value {
             "evidence_reason_code": {
                 "type": "string",
                 "enum": ["complete_summary", "output_truncated", "partial_harness_summary", "no_complete_summary", "incomplete_stream"],
-                "description": "Why executed-test count evidence was proven or remained unavailable; this refines evidence diagnostics without changing the assertion verdict."
+                "description": "Why count evidence is proven/unavailable; diagnostic only, never changes the verdict."
             }
         },
         "required": ["minimum_tests", "actual_tests_run", "status", "reason_code", "evidence_reason_code"]

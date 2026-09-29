@@ -11,7 +11,9 @@ async fn setup(grace_ms: u64) -> ToolRuntime {
         RunnerCapabilities {
             async_shell_jobs: true,
             structured_validation_argv: true,
+            structured_cargo_check_packages: true,
             project_validation_v1: true,
+            project_validation_package_scope_v1: true,
             structured_go_test_json: true,
             structured_go_test_tool: true,
             structured_cargo_test_count_assertion: true,
@@ -38,14 +40,15 @@ async fn reply_plan(
         ProjectValidationAction::Check => webcodex_validation::SemanticCheck::Check,
         ProjectValidationAction::Test => webcodex_validation::SemanticCheck::Test,
     };
-    let adapter = webcodex_validation::validation_adapter_for_recipe(backend, check).unwrap();
-    let step = adapter
-        .build_readonly_plan(webcodex_validation::ValidationCommandOptions {
-            check: action == ProjectValidationAction::FormatCheck,
-            ..Default::default()
-        })
-        .unwrap()
-        .structured_step;
+    let operation = webcodex_validation::project_validation_operation(
+        backend,
+        check,
+        semantic.scope.as_ref().map(|scope| scope.packages.clone()),
+    )
+    .unwrap();
+    let adapter = operation.adapter();
+    let step = operation.build_readonly_plan().unwrap().structured_step;
+    let validation_target_id = operation.validation_target_id(Some(".")).unwrap();
     let plan = ProjectValidationPlan {
         provenance: ProjectValidationProvenance {
             request: semantic,
@@ -57,7 +60,7 @@ async fn reply_plan(
         },
         adapter: adapter.tool_identity().into(),
         step,
-        validation_target_id: format!("target:{}", "a".repeat(24)),
+        validation_target_id,
     };
     complete_sync_shell_lifecycle(
         runtime,
@@ -73,12 +76,21 @@ async fn reply_plan(
     poll_start_validation_job(runtime, "project-validation").await
 }
 fn call(action: ProjectValidationAction, session_id: Option<String>) -> ToolCall {
+    call_with_scope(action, session_id, None)
+}
+
+fn call_with_scope(
+    action: ProjectValidationAction,
+    session_id: Option<String>,
+    packages: Option<Vec<String>>,
+) -> ToolCall {
     ToolCall::ProjectValidate {
         project: agent_test_project_id("project-validation"),
         session_id,
         cwd: None,
         action,
         adapter: None,
+        scope: packages.map(|packages| ProjectValidationScope { packages }),
         timeout_secs: Some(60),
     }
 }
@@ -130,7 +142,14 @@ async fn project_validation_fast_rust_check_records_resolved_evidence() {
         .unwrap();
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result);
-    assert_eq!(result.output["backend"], "rust");
+    assert_eq!(
+        result.output["source_state"]["observed_mutation_fence"],
+        "uncrossed"
+    );
+    assert_eq!(result.output["source_state"]["freshness"], "unproven");
+    assert!(result.output.get("backend").is_none());
+    assert!(result.output.get("action").is_none());
+    assert!(result.output.get("diagnostics").is_none());
     assert_eq!(result.output["adapter"], "cargo_check");
     assert_model_cargo_result_matches_schema("project_validate", &result);
     assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
@@ -142,7 +161,7 @@ async fn project_validation_fast_rust_check_records_resolved_evidence() {
     assert_eq!(validation["status"], "passed", "{validation}");
     assert_eq!(
         validation["latest"]["identity"],
-        format!("target:{}", "a".repeat(24))
+        "target:f9d553ae448eadebf9aaae0e"
     );
 }
 #[tokio::test]
@@ -219,4 +238,164 @@ async fn project_validation_capability_mismatch_starts_nothing() {
     assert!(probe_patch_agent_request(&runtime, "project-validation")
         .await
         .is_none());
+}
+
+#[tokio::test]
+async fn project_validation_scoped_rust_check_preserves_scope_in_job_metadata() {
+    let runtime = setup(500).await;
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .dispatch_with_auth(
+                    call_with_scope(
+                        ProjectValidationAction::Check,
+                        None,
+                        Some(vec!["package-b".into(), "package-a".into()]),
+                    ),
+                    Some(&auth_context(None, true)),
+                )
+                .await
+        }
+    });
+    let (request, job_id) = reply_plan(&runtime, "rust", ProjectValidationAction::Check).await;
+    let metadata = request
+        .job_context
+        .as_ref()
+        .unwrap()
+        .validation
+        .as_ref()
+        .unwrap();
+    assert_eq!(metadata.tool, "project_validate");
+    assert_eq!(metadata.adapter, "cargo_check");
+    assert_eq!(
+        metadata.steps[0].args,
+        [
+            "check",
+            "--all-targets",
+            "-p",
+            "package-a",
+            "-p",
+            "package-b"
+        ]
+    );
+    assert_eq!(
+        metadata
+            .project_validation
+            .as_ref()
+            .unwrap()
+            .request
+            .scope
+            .as_ref()
+            .unwrap()
+            .packages,
+        ["package-b", "package-a"]
+    );
+    assert_ne!(
+        metadata.validation_target_id.as_deref(),
+        Some("target:f9d553ae448eadebf9aaae0e")
+    );
+    runtime
+        .runner_registry
+        .update_job(cargo_test_update(
+            "project-validation",
+            &request.request_id,
+            &job_id,
+            "completed",
+            "",
+            "Finished dev profile\n",
+            Some(0),
+            completed_progress(),
+            true,
+        ))
+        .await
+        .unwrap();
+    let result = task.await.unwrap();
+    assert!(result.success, "{result:?}");
+}
+
+#[tokio::test]
+async fn project_validation_package_scope_requires_additive_runner_capability() {
+    let runtime = runtime_with_agent_project("project-validation");
+    register_agent(
+        &runtime,
+        "project-validation",
+        None,
+        RunnerCapabilities {
+            async_shell_jobs: true,
+            structured_validation_argv: true,
+            project_validation_v1: true,
+            project_validation_package_scope_v1: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let result = runtime
+        .dispatch_with_auth(
+            call_with_scope(
+                ProjectValidationAction::Check,
+                None,
+                Some(vec!["package-a".into()]),
+            ),
+            Some(&auth_context(None, true)),
+        )
+        .await;
+    assert!(!result.success);
+    assert!(result
+        .error
+        .unwrap()
+        .contains("project_validation_package_scope_v1"));
+    assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+    assert!(probe_patch_agent_request(&runtime, "project-validation")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn project_validation_readonly_adapters_preserve_source_fence_through_handoff() {
+    for (backend, action, adapter, stdout) in [
+        ("rust", ProjectValidationAction::FormatCheck, "cargo_fmt", ""),
+        ("rust", ProjectValidationAction::Test, "cargo_test", "running 1 test\ntest example ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"),
+        ("go", ProjectValidationAction::Check, "go_vet", ""),
+        ("go", ProjectValidationAction::Test, "go_test", "{\"Action\":\"run\",\"Package\":\"example/pkg\",\"Test\":\"TestOne\"}\n{\"Action\":\"pass\",\"Package\":\"example/pkg\",\"Test\":\"TestOne\"}\n{\"Action\":\"pass\",\"Package\":\"example/pkg\"}\n"),
+    ] {
+        for external_writer in [false, true] {
+            let runtime = setup(1).await;
+            let project = agent_test_project_id("project-validation");
+            let session = runtime.sessions.start_session(Some(project.clone()), None);
+            let before = runtime.validation_sources.capture(&project).unwrap();
+            let writer = external_writer.then(|| runtime.validation_sources.begin(&project).unwrap());
+            let task = tokio::spawn({
+                let runtime = runtime.clone();
+                let id = session.session_id.clone();
+                async move { runtime.dispatch_with_auth(call(action, Some(id)), Some(&auth_context(None, true))).await }
+            });
+            let (request, job_id) = reply_plan(&runtime, backend, action).await;
+            let metadata = request.job_context.as_ref().unwrap().validation.as_ref().unwrap();
+            assert_eq!(metadata.adapter, adapter);
+            assert_eq!(metadata.source_fence.as_ref().unwrap().quiescent, !external_writer);
+            let pending = task.await.unwrap();
+            assert_eq!(pending.output["execution_state"], "pending");
+            assert_eq!(pending.output["continuation"]["arguments"]["items"][0]["job_id"], job_id);
+            runtime.runner_registry.update_job(cargo_test_update(
+                "project-validation", &request.request_id, &job_id, "completed", stdout, "", Some(0), completed_progress(), true,
+            )).await.unwrap();
+            let status = runtime.job_status_for_auth(job_id.clone(), false, None).await;
+            assert_eq!(status.output["validation"]["source_state"]["observed_mutation_fence"], if external_writer { "unknown" } else { "uncrossed" }, "{status:?}");
+            assert_eq!(status.output["validation"]["passed"], true, "{status:?}");
+            let summary = runtime.sessions.summary(&session.session_id, None).unwrap();
+            let _ = runtime.validation_summary_for_session_with_jobs(&summary, 50, Some(&auth_context(None, true))).await;
+            let reconciled = runtime.sessions.summary(&session.session_id, None).unwrap();
+            let terminal = reconciled.events.iter().filter(|event| event.kind == "validation_job_terminal" && event.job_id.as_deref() == Some(job_id.as_str())).collect::<Vec<_>>();
+            assert_eq!(terminal.len(), 1, "adapter={adapter}");
+            assert_eq!(terminal[0].tool_name, "project_validate");
+            assert_eq!(terminal[0].validation_output_summary.as_ref().unwrap()["adapter"], adapter);
+            let encoded = serde_json::to_value(terminal[0]).unwrap();
+            assert!(encoded.to_string().contains(if external_writer { "unknown" } else { "uncrossed" }), "{encoded}");
+            let after = runtime.validation_sources.capture(&project).unwrap();
+            assert_eq!(after.generation, before.generation + u64::from(external_writer));
+            assert!(probe_patch_agent_request(&runtime, "project-validation").await.is_none());
+            drop(writer);
+        }
+    }
 }

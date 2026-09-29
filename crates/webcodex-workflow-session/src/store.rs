@@ -73,6 +73,9 @@ use super::util::{
 #[path = "identifier_tests.rs"]
 mod identifier_tests;
 
+#[cfg(test)]
+mod scale_tests;
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     /// Shared session map and LRU metadata.
@@ -548,7 +551,7 @@ impl SessionStore {
         let summary = {
             let mut inner = self.inner.lock().expect("session store mutex poisoned");
             let session_id = inner
-                .allocate_session_id(|| webcodex_core::compact::random_suffix::<12>())
+                .allocate_session_id(webcodex_core::compact::random_suffix::<12>)
                 .ok_or_else(|| "session_id_allocation_exhausted".to_string())?;
             let now = now_ts();
             let guards = SessionGuards::effective(opts.mode, opts.guards);
@@ -797,7 +800,7 @@ impl SessionStore {
                     return Err(CodingSessionError::CommitFailed);
                 }
                 let new_session_id = inner
-                    .allocate_session_id(|| webcodex_core::compact::random_suffix::<12>())
+                    .allocate_session_id(webcodex_core::compact::random_suffix::<12>)
                     .ok_or(CodingSessionError::CommitFailed)?;
                 let execution_context = requested_execution_context.clone().unwrap_or_default();
                 let execution_context_changed = !execution_context.is_empty();
@@ -1737,12 +1740,11 @@ impl SessionStore {
             || retained_terminal_job_ids
                 .iter()
                 .any(|candidate| *candidate != candidate.trim() || !is_safe_job_id(candidate))
-            || !retained_terminal_job_ids
-                .iter()
-                .any(|candidate| *candidate == job_id)
+            || !retained_terminal_job_ids.contains(&job_id)
             || !matches!(
                 tool_name,
-                "cargo_fmt"
+                "project_validate"
+                    | "cargo_fmt"
                     | "cargo_check"
                     | "cargo_test"
                     | "go_test"
@@ -1970,9 +1972,7 @@ impl SessionStore {
                     .materialized_validation_job_ids
                     .iter()
                     .position(|materialized| {
-                        !retained_terminal_job_ids
-                            .iter()
-                            .any(|candidate| *candidate == materialized.as_str())
+                        !retained_terminal_job_ids.contains(&materialized.as_str())
                     })
             else {
                 // A complete valid terminal snapshot cannot name more than the
@@ -2936,8 +2936,7 @@ impl SessionStoreInner {
             }
         }
         let now = now_ts();
-        let message_id =
-            allocate_message_id(record, || webcodex_core::compact::random_suffix::<12>())?;
+        let message_id = allocate_message_id(record, webcodex_core::compact::random_suffix::<12>)?;
         let message = SessionMessage {
             message_id,
             session_id: input.session_id.clone(),
@@ -3181,8 +3180,7 @@ impl SessionStoreInner {
             return Err(SessionMessageError::MessageNotOpen);
         }
 
-        let message_id =
-            allocate_message_id(record, || webcodex_core::compact::random_suffix::<12>())?;
+        let message_id = allocate_message_id(record, webcodex_core::compact::random_suffix::<12>)?;
         let original_revision = record
             .message_observation_revision
             .checked_add(1)
@@ -3507,8 +3505,7 @@ impl SessionStoreInner {
             });
         }
 
-        let message_id =
-            allocate_message_id(record, || webcodex_core::compact::random_suffix::<12>())?;
+        let message_id = allocate_message_id(record, webcodex_core::compact::random_suffix::<12>)?;
         let todo_revision = record
             .message_observation_revision
             .checked_add(1)

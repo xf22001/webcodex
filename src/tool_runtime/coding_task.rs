@@ -15,8 +15,8 @@ use super::continuation_feedback::{
     ContinuationToolFailureSnapshot,
 };
 use super::git_review_snapshot::{
-    caller_fingerprint as review_caller_fingerprint, latest_workspace_snapshot,
-    workspace_snapshot_complete_for_closeout, GitReviewSnapshot,
+    caller_fingerprint as review_caller_fingerprint, workspace_snapshot_complete_for_closeout,
+    GitReviewSnapshot,
 };
 use super::handoff::{
     actionable_unexpected_failure_count, apply_compact_workflow_outcomes, closeout_work_projection,
@@ -41,7 +41,7 @@ use super::startup_brief::{
     startup_brief_from_output, StartupBriefInput, StartupExtensions, StartupPluginEntry,
     StartupPluginsCatalog, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
 };
-use super::tool_catalog::TOOL_RECOMMENDED_FLOWS;
+use super::tool_catalog::model_visible_recommended_flows;
 use super::tool_inputs::{CodingGuidanceProfile, SessionMode, StartupDetail};
 use super::tool_result::{RecoveryKind, ToolResult};
 use super::unknown_session_result;
@@ -65,6 +65,13 @@ const FINISH_SESSION_EVENT_LIMIT: usize = 200;
 /// the standalone `project_overview` tool's 30s wait. An optional overview
 /// failure must not block the coding task, so it fails over quickly.
 pub(crate) const DEFAULT_REPOSITORY_OVERVIEW_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Request-local observations for the post-result context sidecar. Never persisted
+/// or inferred from the public startup projection.
+pub(crate) struct BootstrapContext {
+    pub(crate) project: ResolvedProject,
+    pub(crate) instructions: ProjectInstructionsSnapshot,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ProjectResolutionMetadata {
@@ -536,6 +543,7 @@ impl ToolRuntime {
         trusted_recording_session_id: Option<&str>,
         trusted_recording_session_project: Option<&str>,
         transport: SessionTransport,
+        bootstrap_context: &mut Option<BootstrapContext>,
     ) -> ToolResult {
         let detail = startup.detail;
         let project_source = match resolve_project_source(project, client_id, path) {
@@ -933,11 +941,9 @@ impl ToolRuntime {
                 );
             }
         }
-        // Semantic-navigation and fixed project-instruction observation remain
-        // mandatory startup probes. Extension discovery is an independent,
-        // bounded observation that runs concurrently only when the caller keeps
-        // include_extension_catalog enabled. Diagnostic projections can still
-        // run the optional repository overview concurrently.
+        // LSP availability is advisory: observe it concurrently, but stop waiting
+        // when the mandatory startup observations finish.
+        let (startup_complete, startup_completed) = tokio::sync::oneshot::channel();
         let extension_discovery = async {
             if startup.include_extension_catalog {
                 Some(self.extension_discovery_for_startup(&resolved, auth).await)
@@ -946,49 +952,44 @@ impl ToolRuntime {
             }
         };
         let startup_context = Box::pin(async {
-            if startup.include_repository_overview {
-                let (semantic_navigation, project_instructions, repository_overview, extensions) =
-                    futures_util::future::join4(
-                        self.probe_semantic_navigation_for_startup(&resolved),
-                        self.load_effective_coding_instructions(&resolved, auth),
-                        self.repository_overview_for_startup(&resolved, auth),
-                        extension_discovery,
-                    )
-                    .await;
-                (
-                    semantic_navigation,
-                    project_instructions,
-                    repository_overview,
-                    extensions,
-                )
-            } else {
-                let (semantic_navigation, project_instructions, extensions) =
-                    futures_util::future::join3(
-                        self.probe_semantic_navigation_for_startup(&resolved),
-                        self.load_effective_coding_instructions(&resolved, auth),
-                        extension_discovery,
-                    )
-                    .await;
-                (
-                    semantic_navigation,
-                    project_instructions,
-                    repository_overview_not_requested(),
-                    extensions,
-                )
-            }
+            let repository_overview = async {
+                if startup.include_repository_overview {
+                    self.repository_overview_for_startup(&resolved, auth).await
+                } else {
+                    repository_overview_not_requested()
+                }
+            };
+            futures_util::future::join3(
+                self.load_effective_coding_instructions(&resolved, auth),
+                repository_overview,
+                extension_discovery,
+            )
+            .await
         });
-        // Git/runtime observations are independent of the instruction/LSP/extension
-        // probes above. Run them together so ordinary startup pays the slowest
-        // observation, not the sum of unrelated Runner round trips.
-        let git_summary = Box::pin(
-            self.coding_startup_git_summary(&resolved.resolved_id, include_recent_commits),
-        );
-        let (
-            (semantic_navigation, project_instructions, repository_overview, extensions),
-            runtime_status_result,
-            (git, git_warnings),
-        ) = futures_util::future::join3(startup_context, self.runtime_status(auth), git_summary)
+        let mandatory = async {
+            let observations = futures_util::future::join3(
+                startup_context,
+                self.runtime_status(auth),
+                Box::pin(
+                    self.coding_startup_git_summary(&resolved.resolved_id, include_recent_commits),
+                ),
+            )
             .await;
+            let _ = startup_complete.send(());
+            observations
+        };
+        let (
+            semantic_navigation,
+            (
+                (project_instructions, repository_overview, extensions),
+                runtime_status_result,
+                (git, git_warnings),
+            ),
+        ) = futures_util::future::join(
+            self.probe_semantic_navigation_for_startup(&resolved, startup_completed),
+            mandatory,
+        )
+        .await;
         let semantic_navigation = serde_json::to_value(semantic_navigation).unwrap_or_else(|_| {
             json!({
                 "supported": false,
@@ -996,6 +997,10 @@ impl ToolRuntime {
                 "status": "probe_failed",
                 "reason_code": "status_probe_failed",
             })
+        });
+        *bootstrap_context = Some(BootstrapContext {
+            project: resolved.clone(),
+            instructions: project_instructions.clone(),
         });
         // Coding startup always observes every fixed repository-rule
         // candidate. The complete bounded body remains only in the in-memory
@@ -1430,6 +1435,7 @@ impl ToolRuntime {
             trusted_recording_session_id,
             trusted_recording_session_project,
             transport,
+            &mut None,
         )
         .await
     }
@@ -1496,6 +1502,7 @@ impl ToolRuntime {
         trusted_recording_session_project: Option<&str>,
         transport: SessionTransport,
         correlation: &mut ToolCallCorrelation,
+        bootstrap_context: &mut Option<BootstrapContext>,
     ) -> ToolResult {
         let project_source = match resolve_project_source(project, client_id, path) {
             Ok(source) => source,
@@ -1592,6 +1599,7 @@ impl ToolRuntime {
                 trusted_recording_session_id,
                 trusted_recording_session_project,
                 transport,
+                bootstrap_context,
             )
             .await;
         if !result.success {
@@ -1696,7 +1704,11 @@ impl ToolRuntime {
         });
         let reusable_snapshot = if summary_only {
             review_caller_fingerprint(auth).ok().and_then(|caller| {
-                latest_workspace_snapshot(&caller, &resolved.resolved_id, Some(&session_id))
+                self.latest_workspace_review_snapshot(
+                    &caller,
+                    &resolved.resolved_id,
+                    Some(&session_id),
+                )
             })
         } else {
             review_snapshot_reuse["reason_code"] =
@@ -3183,8 +3195,7 @@ fn recommended_flow_groups(visible: Option<&HashSet<&str>>) -> Value {
     const GROUPS: &[&str] = &["inspect", "edit", "validate", "review", "handoff"];
     let mut map = serde_json::Map::new();
     for group in GROUPS {
-        let tools = TOOL_RECOMMENDED_FLOWS
-            .iter()
+        let tools = model_visible_recommended_flows()
             .find(|flow| flow.name == *group)
             .map(|flow| {
                 let mut seen = HashSet::new();
