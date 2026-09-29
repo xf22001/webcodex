@@ -456,7 +456,7 @@ fn validate_test_count_evidence(
         return Ok(());
     };
     let cargo_test = job.validation.as_ref().is_some_and(|metadata| {
-        metadata.tool == "cargo_test" && metadata.kind == "test" && metadata.no_run != Some(true)
+        metadata.adapter == "cargo_test" && metadata.kind == "test" && metadata.no_run != Some(true)
     });
     if !cargo_test || !lifecycle.is_terminal() || !update.finished || !evidence.is_valid() {
         return invalid_progress("test_count_evidence_invalid");
@@ -1184,6 +1184,17 @@ impl RunnerRegistry {
                 client_id
             ));
         }
+        if validation
+            .as_ref()
+            .is_some_and(|v| v.project_validation.is_some())
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::ProjectValidation)
+        {
+            return Err(
+                "capability_unavailable: upgrade target Runner for project_validation_v1".into(),
+            );
+        }
         if !validation_steps.is_empty()
             && !runner
                 .runner_features
@@ -1269,7 +1280,7 @@ impl RunnerRegistry {
         }
         if validation
             .as_ref()
-            .is_some_and(|metadata| metadata.tool == "go_test")
+            .is_some_and(|metadata| metadata.adapter == "go_test")
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredGoTestTool)
@@ -1412,10 +1423,15 @@ impl RunnerRegistry {
         if job.visibility == ShellJobVisibility::CleanupPending {
             return Err(format!("structured job cleanup is pending: {job_id}"));
         }
-        // A terminal update may race the sync-wait deadline. Keep terminal
-        // records hidden so the initiating structured tool call returns its
-        // terminal result instead of handing off an already-finished Job.
-        if !job.lifecycle.is_terminal() {
+        // A conclusive terminal update may race the sync-wait deadline. Keep
+        // those records hidden so the initiating structured tool call returns
+        // the terminal result without leaving a redundant public Job. An
+        // outcome_unknown terminal is different: the initiating result cannot
+        // safely authorize a retry, so preserve the same durable Job as the
+        // recovery identity instead of discarding the only reconciliation handle.
+        let publish_terminal_recovery = job.lifecycle.is_terminal()
+            && job.command_execution_state == Some(ShellCommandExecutionState::OutcomeUnknown);
+        if !job.lifecycle.is_terminal() || publish_terminal_recovery {
             let view = job_view(job);
             if view.observation_token.is_none() {
                 return Err(format!(
@@ -1715,6 +1731,40 @@ impl RunnerRegistry {
             return Err(format!("unknown shell job: {}", job_id));
         }
         Ok(job_view(job))
+    }
+
+    /// Resolve one observability-only Project anchor for an exact Job set under
+    /// one registry snapshot. Every Job must be Public, caller-visible, and carry
+    /// the same non-empty immutable Project id; otherwise attribution fails closed.
+    /// This never refreshes lifecycle state and never grants Project authority.
+    pub async fn common_job_project_for_auth(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        job_ids: &[&str],
+    ) -> Option<String> {
+        if job_ids.is_empty() {
+            return None;
+        }
+        let inner = self.inner.lock().await;
+        let mut common: Option<String> = None;
+        for job_id in job_ids {
+            let job = inner.jobs_by_id.get(*job_id)?;
+            if job.visibility != ShellJobVisibility::Public
+                || !shell_job_visible_to_auth(auth, &inner, job)
+            {
+                return None;
+            }
+            let project = job.project_id.as_deref()?.trim();
+            if project.is_empty() {
+                return None;
+            }
+            match common.as_deref() {
+                None => common = Some(project.to_string()),
+                Some(existing) if existing == project => {}
+                Some(_) => return None,
+            }
+        }
+        common
     }
 
     pub async fn list_jobs(&self, limit: Option<usize>) -> Vec<ShellJobInfo> {

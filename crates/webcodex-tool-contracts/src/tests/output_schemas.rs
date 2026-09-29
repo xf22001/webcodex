@@ -1544,6 +1544,33 @@ fn key_tool_output_schemas_include_expected_fields() {
         ("run_process", "run_process", run_process_schema),
         ("run_script", "run_script", run_script_schema),
     ] {
+        let mut uncertain = structured_execution_output(
+            execution_source,
+            "outcome_unknown",
+            true,
+            false,
+            true,
+            false,
+            Some("job-1"),
+            Some("lost"),
+        );
+        uncertain["success"] = json!(false);
+        uncertain["error"] = json!("execution outcome is unknown");
+        uncertain["output"]["promoted_to_job"] = json!(true);
+        uncertain["output"]["observation_token"] = json!("observation");
+        uncertain["output"]["async_handoff_available"] = json!(true);
+        uncertain["output"]["command_ok"] = json!(false);
+        uncertain["output"]["failure_kind"] = json!("outcome_unknown");
+        uncertain["output"]["tool_failure"] = json!(true);
+        test_support::validate_schema_instance(&uncertain, schema).unwrap_or_else(|error| {
+            panic!("{tool} must admit an uncertain execution with its exact recovery Job: {error}")
+        });
+    }
+
+    for (tool, execution_source, schema) in [
+        ("run_process", "run_process", run_process_schema),
+        ("run_script", "run_script", run_script_schema),
+    ] {
         let mut promoted_without_job_id = structured_execution_output(
             execution_source,
             "running",
@@ -3483,4 +3510,33 @@ fn browser_observation_schema_accepts_canonical_runner_output_and_rejects_privat
     let mut leaked_endpoint = effect;
     leaked_endpoint["debug_endpoint"] = json!("ws://127.0.0.1/devtools");
     assert!(act_ok(leaked_endpoint).is_err());
+}
+
+#[test]
+fn structured_validation_definitions_receive_the_validation_output_family() {
+    let mut count = 0;
+    for definition in tool_definitions().filter(|definition| {
+        definition
+            .execution
+            .is_some_and(|execution| execution.form == ToolExecutionForm::StructuredValidation)
+    }) {
+        count += 1;
+        let schema = output_schema_for_tool(definition.name);
+        let properties = schema["properties"]["output"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{} validation output properties", definition.name));
+        for field in [
+            "source_state",
+            "execution_state",
+            "failure_kind",
+            "continuation",
+        ] {
+            assert!(
+                properties.contains_key(field),
+                "{} missing {field}",
+                definition.name
+            );
+        }
+    }
+    assert!(count > 0);
 }

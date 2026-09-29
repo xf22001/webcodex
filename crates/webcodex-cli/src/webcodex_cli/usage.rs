@@ -34,7 +34,8 @@ Advanced / operator:\n\
   plugin                        Inspect, check, and reload Native Tool Plugins\n\
   users                         Manage users\n\
   tokens                        Manage personal API credentials\n\
-  runner-tokens                 Manage Runner transport credentials\n\n\
+  runner-tokens                 Manage Runner transport credentials\n\
+  oauth                         Manage Server OAuth clients used by MCP clients\n\n\
 Options:\n\
   -h, --help                    Print help and exit\n\
   -V, --version                 Print version and exit\n"
@@ -42,7 +43,7 @@ Options:\n\
 
 pub(crate) fn controller_usage() -> &'static str {
     "Usage: webcodex controller <COMMAND> [OPTIONS]\n\n\
-WSL/Linux terminal control plane for a local or remote WebCodex Server, local Runner, and optional local OpenAI Tunnel.\n\n\
+WSL/Linux terminal control plane for a local or remote WebCodex Server, local Runner, and optional local Tunnel.\n\n\
 Commands:\n\
   init       Create controller.toml with local defaults\n\
   run        Run the Controller in the foreground and own child processes\n\
@@ -67,6 +68,7 @@ Common options:\n\
   --confirm       Required by controller uninstall\n\
   --json          Machine-readable output for status/doctor/project\n\
   -h, --help      Print help and exit\n\n\
+The local Tunnel follows [tunnel].provider in controller.toml (openai | cloudflare): openai reads CONTROL_PLANE_TUNNEL_ID plus CONTROL_PLANE_API_KEY from the Server env file, cloudflare reads WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN.\n\
 Controller V0 does not modify Desktop and uses existing Server, Runner, and Tunnel process contracts.\n"
 }
 
@@ -430,15 +432,17 @@ For start/stop/restart/logs/uninstall, --service-file PATH targets a custom mana
 }
 
 pub(crate) fn server_tunnel_usage() -> &'static str {
-    "Usage: webcodex server tunnel --provider openai --env-file PATH --json [--stop-on-stdin-eof]\n\n\
-Run the canonical OpenAI Secure Tunnel for an already-running local WebCodex Server.\n\n\
+    "Usage: webcodex server tunnel --provider openai|cloudflare --env-file PATH --json [--stop-on-stdin-eof]\n\n\
+Run the persistent Server Tunnel for an already-running local WebCodex Server.\n\n\
 Options:\n\
-  --provider openai          Required provider; regular Cloudflare remains a separate future contract\n\
+  --provider openai|cloudflare Required transport provider\n\
   --env-file PATH            Local Server env file used for loopback address and bootstrap authority\n\
   --json                     Emit the safe machine readiness event\n\
   --stop-on-stdin-eof        Stop when the owning integration closes stdin (default: keep running)\n\
   -h, --help                 Print help and exit\n\n\
-The Tunnel exposes only the local Server MCP endpoint and authenticates it with the effective Server bootstrap credential (process environment overrides the env file). The ready event contains only provider/readiness/clipboard metadata; credentials are never printed.\n"
+openai     OpenAI Secure MCP Tunnel: uses the pinned verified tunnel-client and authenticates with the effective Server bootstrap credential (process environment overrides the env file).\n\
+cloudflare Cloudflare named Tunnel: supervises cloudflared against WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN (process environment overrides the env file). The public hostname and ingress belong to the Cloudflare dashboard, so this provider needs no local URL configuration.\n\
+The ready event contains only provider/readiness metadata; credentials are never printed.\n"
 }
 
 pub(crate) fn server_init_usage() -> &'static str {

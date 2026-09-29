@@ -13,6 +13,7 @@ use crate::platform;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use url::Url;
+use webcodex_environment::TunnelProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRuntimeIdentity {
@@ -373,9 +374,14 @@ impl WebCodexAdapter {
         Ok(command)
     }
 
+    /// The persistent Tunnel command for one saved profile. The provider comes
+    /// from the profile itself, so a Cloudflare named Tunnel is launched as
+    /// `--provider cloudflare` rather than being silently forced onto the
+    /// OpenAI Secure MCP Tunnel transport.
     pub fn regular_tunnel_command(
         &self,
         env_file: &Path,
+        provider: TunnelProvider,
         tunnel_proxy: Option<&str>,
     ) -> DesktopResult<Command> {
         let binaries = self.binaries()?;
@@ -384,11 +390,13 @@ impl WebCodexAdapter {
             .arg("server")
             .arg("tunnel")
             .arg("--provider")
-            .arg("openai")
+            .arg(provider.as_str())
             .arg("--env-file")
             .arg(env_file)
             .arg("--json")
             .arg("--stop-on-stdin-eof")
+            // Neither provider's child may pick up an ambient OpenAI SDK
+            // credential; each reads its own explicit profile credential.
             .env_remove("OPENAI_ADMIN_KEY")
             .env_remove("OPENAI_API_KEY");
         configure_tunnel_proxy_environment(&mut command, tunnel_proxy);
@@ -1298,7 +1306,11 @@ mod tests {
             approved_custom_fingerprint: None,
         };
         let command = adapter
-            .regular_tunnel_command(Path::new("server.env"), Some("http://127.0.0.1:7890"))
+            .regular_tunnel_command(
+                Path::new("server.env"),
+                TunnelProvider::OpenAiSecure,
+                Some("http://127.0.0.1:7890"),
+            )
             .unwrap();
         let args: Vec<_> = command
             .get_args()
@@ -1330,6 +1342,33 @@ mod tests {
             name.to_str() == Some("HTTPS_PROXY")
                 && value.and_then(|value| value.to_str()) == Some("http://127.0.0.1:7890")
         }));
+
+        // A Cloudflare named Tunnel keeps the same command shape but must not be
+        // launched as the OpenAI transport.
+        let named = adapter
+            .regular_tunnel_command(
+                Path::new("server.env"),
+                TunnelProvider::CloudflareNamed,
+                None,
+            )
+            .unwrap();
+        let args: Vec<_> = named
+            .get_args()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "server",
+                "tunnel",
+                "--provider",
+                "cloudflare",
+                "--env-file",
+                "server.env",
+                "--json",
+                "--stop-on-stdin-eof",
+            ]
+        );
     }
 
     #[test]

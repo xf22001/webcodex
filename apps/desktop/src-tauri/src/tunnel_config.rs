@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::Command;
+use webcodex_environment::TunnelProvider;
 
 const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROFILES: usize = 128;
@@ -17,6 +18,12 @@ const SCHEMA_VERSION: u32 = 2;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Credentials {
+    /// Absent in files written before the provider dimension existed; those
+    /// profiles are OpenAI Secure MCP Tunnels, which is `TunnelProvider`'s
+    /// default. The provider is part of the credential's identity: the two
+    /// providers' secrets are never interchangeable.
+    #[serde(default)]
+    provider: TunnelProvider,
     tunnel_id: String,
     api_key: String,
 }
@@ -44,6 +51,7 @@ struct StoredProfiles {
 pub struct TunnelProfileConfigSnapshot {
     pub id: TunnelProfileId,
     pub name: String,
+    pub provider: TunnelProvider,
     pub tunnel_id: Option<String>,
     pub credential_present: bool,
     pub enabled: bool,
@@ -72,12 +80,17 @@ impl Default for TunnelConfig {
     }
 }
 
-// Write-only IPC input. A blank API key retains that exact profile's credential.
+// Write-only IPC input. An omitted API key retains that exact profile's
+// credential; an explicitly supplied key must itself be a valid secret.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelProfileRequest {
     pub id: Option<TunnelProfileId>,
     pub name: String,
+    /// Defaults to the OpenAI Secure MCP Tunnel so a request from an older
+    /// Desktop build keeps its original meaning.
+    #[serde(default)]
+    pub provider: TunnelProvider,
     pub tunnel_id: String,
     pub api_key: Option<String>,
     pub autostart: bool,
@@ -116,6 +129,10 @@ impl TunnelConfig {
         let credentials = match &profile.credentials {
             Some(pair) => pair.clone(),
             None if id == TunnelProfileId::DEFAULT => Credentials {
+                // The environment fallback is the legacy OpenAI Secure Tunnel
+                // identity: CONTROL_PLANE_* is the only credential pair WebCodex
+                // reads from the process environment.
+                provider: TunnelProvider::OpenAiSecure,
                 tunnel_id: std::env::var("CONTROL_PLANE_TUNNEL_ID")
                     .unwrap_or_default()
                     .trim()
@@ -127,11 +144,36 @@ impl TunnelConfig {
             },
             None => return Err(invalid()),
         };
-        validate_pair(&credentials.tunnel_id, &credentials.api_key)?;
+        validate_credentials(
+            credentials.provider,
+            &credentials.tunnel_id,
+            &credentials.api_key,
+        )?;
         Ok(webcodex_environment::TunnelCredentials {
+            provider: credentials.provider,
             tunnel_id: webcodex_environment::Secret::new(credentials.tunnel_id),
             api_key: webcodex_environment::Secret::new(credentials.api_key),
         })
+    }
+
+    /// The provider this profile is bound to. A Desktop-managed launch needs it
+    /// before the profile's secrets are read, so the Tunnel command is built
+    /// with the same provider the profile was configured with.
+    pub(crate) fn provider_for(&self, id: TunnelProfileId) -> DesktopResult<TunnelProvider> {
+        if self.invalid {
+            return Err(invalid());
+        }
+        let profile = self
+            .stored
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .ok_or_else(missing)?;
+        Ok(profile
+            .credentials
+            .as_ref()
+            .map(|pair| pair.provider)
+            .unwrap_or_default())
     }
 
     pub fn load(path: &Path, legacy_autostart: bool) -> Self {
@@ -177,7 +219,7 @@ impl TunnelConfig {
             let credentials: Option<Credentials> =
                 serde_json::from_value(value).map_err(|_| invalid())?;
             if let Some(pair) = &credentials {
-                validate_pair(&pair.tunnel_id, &pair.api_key)?;
+                validate_credentials(pair.provider, &pair.tunnel_id, &pair.api_key)?;
             }
             Ok((
                 StoredProfiles {
@@ -227,7 +269,14 @@ impl TunnelConfig {
                 Some(TunnelProfileConfigSnapshot {
                     id: profile.id,
                     name: profile.name.clone(),
-                    tunnel_id: safe.effective_tunnel_id,
+                    provider: profile
+                        .credentials
+                        .as_ref()
+                        .map(|pair| pair.provider)
+                        .unwrap_or_default(),
+                    // A Cloudflare named Tunnel may carry no ID at all, since
+                    // its token already identifies the tunnel.
+                    tunnel_id: safe.effective_tunnel_id.filter(|value| !value.is_empty()),
                     credential_present: safe.api_key_present,
                     enabled: profile.enabled,
                     autostart: profile.autostart,
@@ -287,27 +336,53 @@ impl TunnelConfig {
         }
         let name = request.name.trim().to_string();
         validate_name(&name)?;
+        let provider = request.provider;
+        // A profile's provider is part of its identity: its saved environment
+        // file and managed service are bound to exactly one transport. Changing
+        // it in place would strand them, so a switch needs a new connection.
+        if let Some(existing) = previous {
+            if existing
+                .credentials
+                .as_ref()
+                .map(|pair| pair.provider)
+                .unwrap_or_default()
+                != provider
+            {
+                return Err(DesktopError::new(
+                    "tunnel_profile_provider_fixed",
+                    "This connection is already bound to another Tunnel provider",
+                    "Delete this connection and add a new one to use a different provider.",
+                ));
+            }
+        }
         let tunnel_id = request.tunnel_id.trim().to_string();
-        let api_key = request
-            .api_key
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().to_string())
-            .or_else(|| {
-                previous
-                    .and_then(|p| p.credentials.as_ref())
-                    .map(|p| p.api_key.clone())
+        // Only an omitted key retains the saved secret. An explicitly supplied
+        // key is the operator's new secret and must pass credential validation
+        // on its own; whitespace must not silently fall back to the old value.
+        let api_key = match request.api_key {
+            Some(value) => value.trim().to_string(),
+            None => previous
+                .and_then(|p| p.credentials.as_ref())
+                .map(|p| p.api_key.clone())
+                .or_else(|| {
+                    // Only the legacy OpenAI default falls back to the environment.
+                    previous
+                        .filter(|p| {
+                            provider == TunnelProvider::OpenAiSecure
+                                && p.id == TunnelProfileId::DEFAULT
+                                && p.credentials.is_none()
+                        })
+                        .and_then(|_| std::env::var("CONTROL_PLANE_API_KEY").ok())
+                })
+                .ok_or_else(invalid)?,
+        };
+        validate_credentials(provider, &tunnel_id, &api_key)?;
+        if !tunnel_id.is_empty()
+            && self.profiles().iter().any(|p| {
+                p.id != id
+                    && p.provider == provider
+                    && p.tunnel_id.as_deref() == Some(tunnel_id.as_str())
             })
-            .or_else(|| {
-                previous
-                    .filter(|p| p.id == TunnelProfileId::DEFAULT && p.credentials.is_none())
-                    .and_then(|_| std::env::var("CONTROL_PLANE_API_KEY").ok())
-            })
-            .ok_or_else(invalid)?;
-        validate_pair(&tunnel_id, &api_key)?;
-        if self
-            .profiles()
-            .iter()
-            .any(|p| p.id != id && p.tunnel_id.as_deref() == Some(tunnel_id.as_str()))
         {
             return Err(DesktopError::new(
                 "tunnel_profile_duplicate",
@@ -318,7 +393,11 @@ impl TunnelConfig {
         let next = TunnelProfile {
             id,
             name,
-            credentials: Some(Credentials { tunnel_id, api_key }),
+            credentials: Some(Credentials {
+                provider,
+                tunnel_id,
+                api_key,
+            }),
             enabled: previous.map(|p| p.enabled).unwrap_or(true),
             autostart: request.autostart,
             revision: next_revision(previous.map(|p| p.revision))?,
@@ -407,6 +486,10 @@ impl TunnelConfig {
                     TunnelProfileRequest {
                         id: Some(TunnelProfileId::DEFAULT),
                         name,
+                        // First-run/legacy onboarding is the OpenAI Secure MCP
+                        // Tunnel. A Cloudflare named Tunnel is added as its own
+                        // connection instead.
+                        provider: TunnelProvider::OpenAiSecure,
                         tunnel_id,
                         api_key,
                         autostart,
@@ -460,6 +543,10 @@ impl TunnelConfig {
         let credentials = match &profile.credentials {
             Some(pair) => pair.clone(),
             None if id == TunnelProfileId::DEFAULT => Credentials {
+                // The environment fallback is the legacy OpenAI Secure Tunnel
+                // identity: CONTROL_PLANE_* is the only credential pair WebCodex
+                // reads from the process environment.
+                provider: TunnelProvider::OpenAiSecure,
                 tunnel_id: std::env::var("CONTROL_PLANE_TUNNEL_ID")
                     .unwrap_or_default()
                     .trim()
@@ -471,18 +558,36 @@ impl TunnelConfig {
             },
             None => return Err(invalid()),
         };
-        validate_pair(&credentials.tunnel_id, &credentials.api_key)?;
-        if self
-            .profiles()
-            .iter()
-            .any(|p| p.id != id && p.tunnel_id.as_deref() == Some(&credentials.tunnel_id))
+        validate_credentials(
+            credentials.provider,
+            &credentials.tunnel_id,
+            &credentials.api_key,
+        )?;
+        if !credentials.tunnel_id.is_empty()
+            && self.profiles().iter().any(|p| {
+                p.id != id
+                    && p.provider == credentials.provider
+                    && p.tunnel_id.as_deref() == Some(credentials.tunnel_id.as_str())
+            })
         {
             return Err(invalid());
         }
-        command
-            .env("CONTROL_PLANE_TUNNEL_ID", credentials.tunnel_id)
-            .env("CONTROL_PLANE_API_KEY", credentials.api_key)
-            .env("WEBCODEX_TUNNEL_PROFILE_ID", id.to_string());
+        // Each provider's transport reads its own credential keys, so a saved
+        // profile never has to be reinterpreted as another provider's shape.
+        match credentials.provider {
+            TunnelProvider::OpenAiSecure => {
+                command
+                    .env("CONTROL_PLANE_TUNNEL_ID", &credentials.tunnel_id)
+                    .env("CONTROL_PLANE_API_KEY", &credentials.api_key);
+            }
+            TunnelProvider::CloudflareNamed => {
+                if !credentials.tunnel_id.is_empty() {
+                    command.env("WEBCODEX_CLOUDFLARE_TUNNEL_ID", &credentials.tunnel_id);
+                }
+                command.env("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN", &credentials.api_key);
+            }
+        }
+        command.env("WEBCODEX_TUNNEL_PROFILE_ID", id.to_string());
         Ok(())
     }
 
@@ -560,8 +665,13 @@ fn validate_store(stored: &StoredProfiles) -> DesktopResult<()> {
         }
         validate_name(&profile.name)?;
         if let Some(pair) = &profile.credentials {
-            validate_pair(&pair.tunnel_id, &pair.api_key)?;
-            if !tunnels.insert(&pair.tunnel_id) {
+            validate_credentials(pair.provider, &pair.tunnel_id, &pair.api_key)?;
+            // An empty label is the normal Cloudflare case, and two empty
+            // labels are not a conflict. The same ID under two different
+            // providers is also not a conflict, so the key includes the provider.
+            if !pair.tunnel_id.is_empty()
+                && !tunnels.insert((pair.provider, pair.tunnel_id.clone()))
+            {
                 return Err(invalid());
             }
         } else if profile.id != TunnelProfileId::DEFAULT {
@@ -587,8 +697,27 @@ fn valid_id(id: &str) -> bool {
 fn valid_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= 8192 && key.bytes().all(|b| b.is_ascii_graphic())
 }
-fn validate_pair(id: &str, key: &str) -> DesktopResult<()> {
-    if valid_id(id) && valid_key(key) {
+/// A Cloudflare named Tunnel token. Stricter than `valid_key` because this
+/// secret is later written into the line-oriented profile file, where a quote,
+/// backslash or newline would corrupt the record.
+fn valid_tunnel_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 8192
+        && token.bytes().all(|b| b.is_ascii_graphic())
+        && !token.contains(['"', '\''])
+}
+/// Credential shape rules, per provider. An OpenAI Secure MCP Tunnel needs the
+/// issued `tunnel_<hex>` ID plus its restricted key; a Cloudflare named Tunnel
+/// is managed remotely, so its token alone is the credential and the optional
+/// ID is only a human-readable label.
+fn validate_credentials(provider: TunnelProvider, id: &str, key: &str) -> DesktopResult<()> {
+    let valid = match provider {
+        TunnelProvider::OpenAiSecure => valid_id(id) && valid_key(key),
+        TunnelProvider::CloudflareNamed => {
+            (id.is_empty() || valid_id(id)) && valid_tunnel_token(key)
+        }
+    };
+    if valid {
         Ok(())
     } else {
         Err(invalid())

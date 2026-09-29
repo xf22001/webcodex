@@ -3,7 +3,9 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use webcodex_environment::*;
 
-const USAGE: &str = "webcodex environment <COMMAND>\n\nconfigure [--create | --join URL] [--runner] [--project PATH | --no-project]\n          [--code-stdin | --token-file PATH] [--new-pairing-code]\nresume    [--code-stdin] [--new-pairing-code] [--token-file PATH]\ninvite\nadd-project PATH [--code-stdin] [--new-pairing-code]\nremove-project PROJECT_ID\nstatus|doctor\nstart|stop|restart <server|runner|tunnel> [--profile PROFILE]\nrepair-credential runner\nrepair-user-credential [--token-file PATH]\nuninstall-service <server|runner|tunnel> [--profile PROFILE]\nconfigure-tunnel [PROFILE] [--credentials-file PATH]\ntunnel-status [PROFILE]\nremove-tunnel [PROFILE]\nupgrade-preflight|upgrade-prepare --candidate-dir PATH [--development-build]\nupgrade-finish|upgrade-rollback\nmigrate-legacy-runner --join URL --project PATH --token-file PATH [--profile PROFILE] (Linux)\nmigrate-legacy-server --user NAME --token-file PATH --listen ORIGINAL_ADDR [--server-url URL] (Linux)\ninstaller-authorize --upgrade-receipt PATH --candidate-dir PATH\ninstaller-apply --upgrade-receipt PATH --candidate-dir PATH --installer-file PATH (OS authorization required)\ninstaller-verify --candidate-dir PATH\ninstaller-verify-same --candidate-dir PATH --expected-runtime-dir PATH\ninstaller-finish|installer-cancel\n\nPublic environment commands accept --json and --environment-dir PATH.\nInstaller finalization uses only the fixed owner authorization.\nAdvanced: --bin-dir PATH (configure and explicit migration).\n--runner enables local work without requiring an initial project.\nViewer-only uses a user credential; pairing codes are only for Runner machines.\nTunnel credentials use hidden input or a protected JSON file with tunnel_id and api_key.\n";
+const USAGE: &str = "webcodex environment <COMMAND>\n\nconfigure [--create | --join URL] [--runner] [--project PATH | --no-project]\n          [--code-stdin | --token-file PATH] [--new-pairing-code]\nresume    [--code-stdin] [--new-pairing-code] [--token-file PATH]\ninvite\nadd-project PATH [--code-stdin] [--new-pairing-code]\nremove-project PROJECT_ID\nstatus|doctor\nstart|stop|restart <server|runner|tunnel> [--profile PROFILE]\nrepair-credential runner\nrepair-user-credential [--token-file PATH]\nuninstall-service <server|runner|tunnel> [--profile PROFILE]\nconfigure-tunnel [PROFILE] [--provider openai|cloudflare] [--credentials-file PATH]\ntunnel-status [PROFILE]\nremove-tunnel [PROFILE]\nupgrade-preflight|upgrade-prepare --candidate-dir PATH [--development-build]\nupgrade-finish|upgrade-rollback\nmigrate-legacy-runner --join URL --project PATH --token-file PATH [--profile PROFILE] (Linux)\nmigrate-legacy-server --user NAME --token-file PATH --listen ORIGINAL_ADDR [--server-url URL] (Linux)\ninstaller-authorize --upgrade-receipt PATH --candidate-dir PATH\ninstaller-apply --upgrade-receipt PATH --candidate-dir PATH --installer-file PATH --installer-target TARGET (OS authorization required)\ninstaller-verify --candidate-dir PATH\ninstaller-verify-same --candidate-dir PATH --expected-runtime-dir PATH\ninstaller-finish|installer-cancel\n\nPublic environment commands accept --json and --environment-dir PATH.\nInstaller finalization uses only the fixed owner authorization.\nAdvanced: --bin-dir PATH (configure and explicit migration).\n--runner enables local work without requiring an initial project.\nViewer-only uses a user credential; pairing codes are only for Runner machines.\nTunnel credentials use hidden input or a protected JSON file: {\"tunnel_id\":\"...\",\"api_key\":\"...\"}\n\
+for the openai provider, or {\"provider\":\"cloudflare\",\"token\":\"...\"} for a Cloudflare named Tunnel.\n\
+A profile's provider is fixed once configured; remove-tunnel first to switch providers.\n";
 
 #[derive(Default)]
 struct Input {
@@ -23,9 +25,11 @@ struct Input {
     candidate_dir: Option<PathBuf>,
     development_build: bool,
     credentials_file: Option<PathBuf>,
+    provider: Option<String>,
     profile: Option<String>,
     upgrade_receipt: Option<PathBuf>,
     installer_file: Option<PathBuf>,
+    installer_target: Option<String>,
     expected_runtime_dir: Option<PathBuf>,
     username: Option<String>,
     listen: Option<String>,
@@ -63,9 +67,11 @@ fn parse(args: &[String]) -> Result<Input, String> {
             "--candidate-dir" => input.candidate_dir = Some(PathBuf::from(value(&mut iter)?)),
             "--token-file" => input.token_file = Some(PathBuf::from(value(&mut iter)?)),
             "--credentials-file" => input.credentials_file = Some(PathBuf::from(value(&mut iter)?)),
+            "--provider" => input.provider = Some(value(&mut iter)?),
             "--profile" => input.profile = Some(value(&mut iter)?),
             "--upgrade-receipt" => input.upgrade_receipt = Some(PathBuf::from(value(&mut iter)?)),
             "--installer-file" => input.installer_file = Some(PathBuf::from(value(&mut iter)?)),
+            "--installer-target" => input.installer_target = Some(value(&mut iter)?),
             "--expected-runtime-dir" => {
                 input.expected_runtime_dir = Some(PathBuf::from(value(&mut iter)?))
             }
@@ -107,6 +113,9 @@ fn parse(args: &[String]) -> Result<Input, String> {
     }
     if input.credentials_file.is_some() && input.command != "configure-tunnel" {
         return Err("--credentials-file applies only to configure-tunnel".into());
+    }
+    if input.provider.is_some() && input.command != "configure-tunnel" {
+        return Err("--provider applies only to configure-tunnel".into());
     }
     if (input.username.is_some() || input.listen.is_some() || input.server_url.is_some())
         && input.command != "migrate-legacy-server"
@@ -171,10 +180,10 @@ async fn run_inner(args: &[String]) -> Result<String, String> {
             while let Some(option) = options.next() {
                 match option.as_str() {
                     "--json" => {},
-                    "--upgrade-receipt" | "--candidate-dir" | "--installer-file" => {
+                    "--upgrade-receipt" | "--candidate-dir" | "--installer-file" | "--installer-target" => {
                         options.next().ok_or("Missing installer handoff argument")?;
                     }
-                    _ => return Err("installer-apply accepts only an owner receipt, candidate directory and verified installer file".into()),
+                    _ => return Err("installer-apply accepts only an owner receipt, candidate directory, verified installer file and exact installer target".into()),
                 }
             }
             let receipt = absolute(
@@ -195,6 +204,13 @@ async fn run_inner(args: &[String]) -> Result<String, String> {
                     .take()
                     .ok_or("--installer-file is required")?,
             )?;
+            let target = webcodex_environment::unified_update::InstallerTarget::parse(
+                input
+                    .installer_target
+                    .as_deref()
+                    .ok_or("--installer-target is required")?,
+            )
+            .ok_or("invalid --installer-target")?;
             let emit = |notice: &InstallerLaunchNotice| {
                 if let Ok(mut bytes) = serde_json::to_vec(notice) {
                     bytes.push(b'\n');
@@ -206,11 +222,12 @@ async fn run_inner(args: &[String]) -> Result<String, String> {
                 }
             };
             let mut acknowledged = false;
-            let result = apply_verified_installer(&receipt, &candidate, &installer, |notice| {
-                acknowledged = true;
-                emit(&notice);
-            })
-            .await;
+            let result =
+                apply_verified_installer(&receipt, &candidate, &installer, target, |notice| {
+                    acknowledged = true;
+                    emit(&notice);
+                })
+                .await;
             if !acknowledged {
                 emit(&InstallerLaunchNotice::not_started(
                     result
@@ -667,19 +684,25 @@ async fn run_inner(args: &[String]) -> Result<String, String> {
         }
         "configure-tunnel" => {
             let profile = input.operand.as_deref().unwrap_or("default");
-            let credentials = if let Some(path) = input.credentials_file {
-                Some(read_tunnel_credentials(&absolute(&path)?)?)
-            } else if tunnel_profiles(&store)
+            let existing_provider = tunnel_profiles(&store)
                 .map_err(|e| e.to_string())?
-                .iter()
-                .any(|entry| entry.profile_id == profile)
-            {
+                .into_iter()
+                .find(|entry| entry.profile_id == profile)
+                .map(|entry| entry.provider);
+            let requested = input
+                .provider
+                .as_deref()
+                .map(str::parse::<TunnelProvider>)
+                .transpose()?;
+            let provider = resolve_tunnel_provider(profile, existing_provider, requested)?;
+            let credentials = if let Some(path) = input.credentials_file {
+                let credentials = read_tunnel_credentials(&absolute(&path)?)?;
+                check_credentials_provider(&credentials, requested)?;
+                Some(credentials)
+            } else if existing_provider.is_some() {
                 None
             } else if std::io::stdin().is_terminal() {
-                Some(TunnelCredentials {
-                    tunnel_id: Secret::new(secret_prompt("Existing ChatGPT Tunnel ID: ")?),
-                    api_key: Secret::new(secret_prompt("Existing Tunnel API credential: ")?),
-                })
+                Some(prompt_tunnel_credentials(provider)?)
             } else {
                 return Err(
                     "Supply the protected --credentials-file for this Tunnel profile".into(),
@@ -834,20 +857,104 @@ fn render(result: &SetupResult, json: bool) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+/// A profile's provider is part of its identity. Switching it would strand the
+/// saved credential under a service spec that can no longer start it, so it
+/// requires an explicit removal first.
+fn resolve_tunnel_provider(
+    profile: &str,
+    existing: Option<TunnelProvider>,
+    requested: Option<TunnelProvider>,
+) -> Result<TunnelProvider, String> {
+    if let (Some(existing), Some(requested)) = (existing, requested) {
+        if existing != requested {
+            return Err(format!(
+                "profile '{profile}' is already configured for the {} Tunnel provider; run remove-tunnel first to switch providers",
+                existing.as_str()
+            ));
+        }
+    }
+    Ok(requested.or(existing).unwrap_or_default())
+}
+
+/// A credential file is self-describing, so an explicit `--provider` has to
+/// agree with it rather than silently override it.
+fn check_credentials_provider(
+    credentials: &TunnelCredentials,
+    requested: Option<TunnelProvider>,
+) -> Result<(), String> {
+    match requested {
+        Some(requested) if credentials.provider != requested => Err(format!(
+            "--provider {} disagrees with the provider declared in --credentials-file",
+            requested.as_str()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Read a protected Tunnel credential file.
+///
+/// The file is self-describing so one format serves every provider:
+/// - OpenAI Secure MCP Tunnel: `{"tunnel_id": "tunnel_...", "api_key": "..."}`
+/// - Cloudflare named Tunnel: `{"provider": "cloudflare", "token": "..."}`,
+///   with an optional `tunnel_id` used only as a human-readable label.
+///
+/// `provider` defaults to `openai`, so every credential file written before the
+/// provider dimension existed stays valid unchanged.
 fn read_tunnel_credentials(path: &Path) -> Result<TunnelCredentials, String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct InputCredentials {
-        tunnel_id: String,
-        api_key: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        tunnel_id: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
     }
     let content = read_secret(path).map_err(|error| error.to_string())?;
-    let credentials: InputCredentials = serde_json::from_str(content.expose())
-        .map_err(|_| "Tunnel credential file must contain only tunnel_id and api_key strings")?;
+    let credentials: InputCredentials = serde_json::from_str(content.expose()).map_err(|_| {
+        "Tunnel credential file must contain tunnel_id and api_key, or provider plus token"
+    })?;
+    let provider = credentials
+        .provider
+        .as_deref()
+        .map(str::parse::<TunnelProvider>)
+        .transpose()?
+        .unwrap_or_default();
+    let api_key = match (credentials.token, credentials.api_key) {
+        (Some(_), Some(_)) => {
+            return Err("Tunnel credential file must not set both token and api_key".into())
+        }
+        (Some(token), None) => token,
+        (None, Some(api_key)) => api_key,
+        (None, None) => return Err("Tunnel credential file is missing token or api_key".into()),
+    };
     Ok(TunnelCredentials {
-        tunnel_id: Secret::new(credentials.tunnel_id),
-        api_key: Secret::new(credentials.api_key),
+        provider,
+        tunnel_id: Secret::new(credentials.tunnel_id.unwrap_or_default()),
+        api_key: Secret::new(api_key),
     })
+}
+
+/// Interactive credential entry. The prompts name the provider because the two
+/// providers' credentials are not interchangeable.
+fn prompt_tunnel_credentials(provider: TunnelProvider) -> Result<TunnelCredentials, String> {
+    match provider {
+        TunnelProvider::OpenAiSecure => Ok(TunnelCredentials {
+            provider,
+            tunnel_id: Secret::new(secret_prompt("Existing ChatGPT Tunnel ID: ")?),
+            api_key: Secret::new(secret_prompt("Existing Tunnel API credential: ")?),
+        }),
+        TunnelProvider::CloudflareNamed => Ok(TunnelCredentials {
+            provider,
+            // The token already identifies a remotely-managed tunnel; the label
+            // is optional and only used for human-readable status output.
+            tunnel_id: Secret::new(prompt("Cloudflare Tunnel name or ID (optional): ")?),
+            api_key: Secret::new(secret_prompt("Cloudflare Tunnel token: ")?),
+        }),
+    }
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, String> {

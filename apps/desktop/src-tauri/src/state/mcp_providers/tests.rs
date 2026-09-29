@@ -237,6 +237,7 @@ async fn tunnel_configuration_edit_does_not_change_runner_generation_or_mcp_desi
         .save_tunnel_profile(crate::tunnel_config::TunnelProfileRequest {
             id: None,
             name: "Personal".into(),
+            provider: webcodex_environment::TunnelProvider::OpenAiSecure,
             tunnel_id: format!("tunnel_{}", uuid::Uuid::new_v4().simple()),
             api_key: Some("independent-tunnel-fixture".into()),
             autostart: true,
@@ -248,6 +249,7 @@ async fn tunnel_configuration_edit_does_not_change_runner_generation_or_mcp_desi
     app.save_tunnel_profile(crate::tunnel_config::TunnelProfileRequest {
         id: Some(connection.id),
         name: "Work".into(),
+        provider: webcodex_environment::TunnelProvider::OpenAiSecure,
         tunnel_id: connection.tunnel_id.clone().unwrap(),
         api_key: Some("replacement-tunnel-fixture".into()),
         autostart: true,

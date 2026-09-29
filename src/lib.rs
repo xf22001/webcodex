@@ -89,7 +89,7 @@ pub(crate) use runner_http::{
 };
 pub use startup::{
     is_project_command, run_project_command, run_regular_server_tunnel, CliCommandOutput,
-    RegularServerTunnelOptions,
+    CloudflareNamedTunnelOptions, RegularServerTunnelOptions,
 };
 pub async fn run_regular_server_tunnel_with_stop(
     options: RegularServerTunnelOptions,
@@ -100,6 +100,28 @@ pub async fn run_regular_server_tunnel_with_stop(
         webcodex_environment::service::Component::Tunnel,
     )?;
     let result = startup::run_regular_server_tunnel_with_stop(options, stop).await;
+    #[cfg(target_os = "macos")]
+    if result.is_ok() {
+        if let Some(log) = service_log.as_mut() {
+            log.stopped()?;
+        }
+    }
+    result
+}
+pub async fn run_cloudflare_named_tunnel(
+    options: CloudflareNamedTunnelOptions,
+) -> Result<(), String> {
+    run_cloudflare_named_tunnel_with_stop(options, std::future::pending()).await
+}
+pub async fn run_cloudflare_named_tunnel_with_stop(
+    options: CloudflareNamedTunnelOptions,
+    stop: impl std::future::Future<Output = ()>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut service_log = webcodex_environment::service::ServiceLogGuard::from_managed_env(
+        webcodex_environment::service::Component::Tunnel,
+    )?;
+    let result = startup::run_cloudflare_named_tunnel_with_stop(options, stop).await;
     #[cfg(target_os = "macos")]
     if result.is_ok() {
         if let Some(log) = service_log.as_mut() {

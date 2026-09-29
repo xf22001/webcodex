@@ -1,9 +1,20 @@
 // Private values appear only in write-only requests, never in public snapshots.
 export type ConnectionLifecycle = "stopped" | "starting" | "running" | "stopping" | "error";
 export type ConnectionError = "start_failed" | "startup_timeout" | "process_exited" | "protocol_invalid" | "health_stale" | "tunnel_unavailable" | "local_mcp_unavailable" | "stop_failed";
+// The persistent Server transport a saved connection runs on.
+//
+// Deliberately NOT the same list as QuickShareProvider: `share --tunnel
+// cloudflare` is a Cloudflare *quick* tunnel whose hostname is assigned per
+// session, while a connection's `cloudflare` is a *named* tunnel the operator
+// created in the Cloudflare dashboard. Both are spelled "cloudflare" on the
+// command line, so the two lists must never be substituted for one another.
+// A share may also create no external connection ("none"); a saved connection
+// may not.
+export type TunnelProvider = "openai" | "cloudflare";
 export interface TunnelConnection {
   id: string;
   name: string;
+  provider: TunnelProvider;
   tunnel_id: string | null;
   credential_present: boolean;
   enabled: boolean;
@@ -37,6 +48,7 @@ export interface ConnectionsSnapshot {
 export interface TunnelProfileRequest {
   id: string | null;
   name: string;
+  provider: TunnelProvider;
   tunnel_id: string;
   api_key: string | null;
   autostart: boolean;

@@ -169,7 +169,11 @@ async fn report_regular_tunnel_health(
     }
 }
 
-async fn probe_local_mcp(client: &reqwest::Client, local_mcp_url: &str, bootstrap: &str) -> bool {
+pub(super) async fn probe_local_mcp(
+    client: &reqwest::Client,
+    local_mcp_url: &str,
+    bootstrap: &str,
+) -> bool {
     let Ok(mut response) = client
         .get(local_mcp_url)
         .bearer_auth(bootstrap.trim())
@@ -245,7 +249,7 @@ fn tunnel_failure_evidence(code: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn validate_local_server_url(value: &str) -> Result<String, ProductError> {
+pub(super) fn validate_local_server_url(value: &str) -> Result<String, ProductError> {
     let value = value.trim().trim_end_matches('/');
     let parsed = url::Url::parse(value).map_err(|_| {
         ProductError::new(
@@ -272,7 +276,7 @@ fn validate_local_server_url(value: &str) -> Result<String, ProductError> {
     Ok(value.to_string())
 }
 
-async fn wait_for_regular_tunnel_stop_signal(stop_on_stdin_eof: bool) {
+pub(super) async fn wait_for_regular_tunnel_stop_signal(stop_on_stdin_eof: bool) {
     wait_for_regular_tunnel_stop_signal_with(
         stop_on_stdin_eof,
         wait_for_platform_stop_signal(),
@@ -348,7 +352,7 @@ async fn wait_for_platform_stop_signal() {
     }
 }
 
-fn tunnel_auth_error(message: &str) -> ProductError {
+pub(super) fn tunnel_auth_error(message: &str) -> ProductError {
     ProductError::new(
         "tunnel_auth_invalid",
         message,

@@ -199,9 +199,23 @@ struct ServerInitOptions {
     json: bool,
 }
 
+/// Server Tunnel transport, as selected by `server tunnel --provider`.
+///
+/// This is the Server's persistent transport. It is not `share`'s transient
+/// project tunnel: `share --tunnel cloudflare` is a Cloudflare quick tunnel,
+/// whereas `--provider cloudflare` here is a Cloudflare named tunnel owned by
+/// the operator's dashboard. The variants are named after the actual product so
+/// the two `cloudflare` spellings are never treated as the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerTunnelProvider {
+    OpenAiSecure,
+    CloudflareNamed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerTunnelOptions {
     env_file: PathBuf,
+    provider: ServerTunnelProvider,
     stop_on_stdin_eof: bool,
 }
 
@@ -383,7 +397,8 @@ where
         ),
         "tokens" => parse_token_subcommand(&args[1..]),
         group if admin_cli::is_admin_group(group) => {
-            // users / tokens / Runner transport-token management: reuse admin_cli parser.
+            // users / tokens / Runner transport-token / OAuth client
+            // management: reuse admin_cli parser.
             match parse_admin_cli(&args) {
                 Ok(cmd) => CliAction::Admin(cmd),
                 Err(e) => CliAction::Exit {
@@ -1828,15 +1843,23 @@ fn parse_server_tunnel(args: &[String]) -> Result<ServerTunnelOptions, String> {
             other => return Err(format!("unknown server tunnel option: {other}")),
         }
     }
-    if provider.as_deref() != Some("openai") {
-        return Err("--provider openai is required for regular Server Tunnel".to_string());
-    }
+    let provider = match provider.as_deref() {
+        Some("openai") => ServerTunnelProvider::OpenAiSecure,
+        Some("cloudflare") => ServerTunnelProvider::CloudflareNamed,
+        Some(other) => {
+            return Err(format!(
+                "unknown server tunnel provider {other:?}; expected openai or cloudflare"
+            ))
+        }
+        None => return Err("--provider is required for server tunnel".to_string()),
+    };
     let env_file = env_file.ok_or_else(|| "--env-file is required".to_string())?;
     if !json {
         return Err("server tunnel currently requires --json".to_string());
     }
     Ok(ServerTunnelOptions {
         env_file,
+        provider,
         stop_on_stdin_eof,
     })
 }

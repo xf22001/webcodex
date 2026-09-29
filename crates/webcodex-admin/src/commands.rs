@@ -1,8 +1,8 @@
 use super::output::{format_error, sanitize};
 use super::{
     build_server_http_client, AdminCliCommand, AdminCliRequest, AdminOptions, CreateUserArgs,
-    RevokeTokenArgs, RunnerTokenCreateArgs, RunnerTokenRegisterHashArgs, TokenCreateArgs,
-    TokenRegisterHashArgs, UsernameArgs,
+    OAuthRedirectUriArgs, OAuthScopesArgs, RevokeTokenArgs, RunnerTokenCreateArgs,
+    RunnerTokenRegisterHashArgs, TokenCreateArgs, TokenRegisterHashArgs, UsernameArgs,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
@@ -52,7 +52,7 @@ impl FlagParser {
 }
 
 pub fn is_admin_group(arg: &str) -> bool {
-    matches!(arg, "users" | "tokens" | "runner-tokens")
+    matches!(arg, "users" | "tokens" | "runner-tokens" | "oauth")
 }
 
 pub fn usage() -> &'static str {
@@ -66,11 +66,18 @@ pub fn usage() -> &'static str {
       webcodex runner-tokens create --server-url URL [--token TOKEN|--token-file PATH] --username USER --client-id ID [--name NAME] [--scope SCOPE...]\n\
       webcodex runner-tokens register-hash --server-url URL --username USER --client-id ID --hash HASH --prefix PREFIX [--credential CRED] [--name NAME] [--scope SCOPE...]\n\
       webcodex runner-tokens list --server-url URL [--token TOKEN|--token-file PATH] --username USER\n\
-      webcodex runner-tokens revoke --server-url URL [--token TOKEN|--token-file PATH] --username USER --token-id ID\n\n\
+      webcodex runner-tokens revoke --server-url URL [--token TOKEN|--token-file PATH] --username USER --token-id ID\n\
+      webcodex oauth list --server-url URL [--token TOKEN|--token-file PATH]\n\
+      webcodex oauth add-redirect-uri --server-url URL [--token TOKEN|--token-file PATH] --client-id ID --redirect-uri URI\n\
+      webcodex oauth remove-redirect-uri --server-url URL [--token TOKEN|--token-file PATH] --client-id ID --redirect-uri URI\n\
+      webcodex oauth update-scopes --server-url URL [--token TOKEN|--token-file PATH] --client-id ID (--scope SCOPE... | --scopes A,B | --all-scopes)\n\n\
     Token fallback: WEBCODEX_TOKEN\n\
     Proxy: standard HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY environment by default;\n\
            --proxy http://HOST:PORT overrides it, --no-system-proxy forces direct.\n\
-    Output: JSON\n"
+    Output: JSON\n\
+    Note: `oauth` manages the Server-side OAuth client records used by MCP clients.\n\
+          Adding or removing a redirect_uri never revokes issued tokens; changing\n\
+          scopes does, and reports reauthorization_required.\n"
 }
 
 pub fn parse_admin_cli(args: &[String]) -> Result<AdminCliCommand, String> {
@@ -96,6 +103,10 @@ pub fn parse_admin_cli(args: &[String]) -> Result<AdminCliCommand, String> {
         ("runner-tokens", "register-hash") => parse_runner_tokens_register_hash(rest),
         ("runner-tokens", "list") => parse_runner_tokens_list(rest),
         ("runner-tokens", "revoke") => parse_runner_tokens_revoke(rest),
+        ("oauth", "list") => parse_oauth_list(rest),
+        ("oauth", "add-redirect-uri") => parse_oauth_redirect_uri(rest, true),
+        ("oauth", "remove-redirect-uri") => parse_oauth_redirect_uri(rest, false),
+        ("oauth", "update-scopes") => parse_oauth_update_scopes(rest),
         _ => Err(format!(
             "unknown admin command: {} {}\n{}",
             group,
@@ -351,6 +362,87 @@ fn parse_runner_tokens_revoke(args: &[String]) -> Result<AdminCliCommand, String
     Ok(AdminCliCommand::RunnerTokensRevoke(opts, revoke))
 }
 
+fn parse_oauth_list(args: &[String]) -> Result<AdminCliCommand, String> {
+    let mut opts = AdminOptions::default();
+    let mut p = FlagParser::new(args);
+    while let Some(flag) = p.next() {
+        if !parse_common_flag(&mut opts, &mut p, &flag)? {
+            return Err(format!("unknown oauth list flag: {}", flag));
+        }
+    }
+    p.finish()?;
+    require_common(&opts)?;
+    Ok(AdminCliCommand::OAuthClientsList(opts))
+}
+
+fn parse_oauth_redirect_uri(args: &[String], add: bool) -> Result<AdminCliCommand, String> {
+    let name = if add {
+        "oauth add-redirect-uri"
+    } else {
+        "oauth remove-redirect-uri"
+    };
+    let mut opts = AdminOptions::default();
+    let mut uri = OAuthRedirectUriArgs::default();
+    let mut p = FlagParser::new(args);
+    while let Some(flag) = p.next() {
+        if parse_common_flag(&mut opts, &mut p, &flag)? {
+            continue;
+        }
+        match flag.as_str() {
+            "--client-id" => uri.client_id = p.value(&flag)?,
+            "--redirect-uri" => uri.redirect_uri = p.value(&flag)?,
+            _ => return Err(format!("unknown {} flag: {}", name, flag)),
+        }
+    }
+    p.finish()?;
+    require_common(&opts)?;
+    require_non_empty("--client-id", &uri.client_id)?;
+    require_non_empty("--redirect-uri", &uri.redirect_uri)?;
+    Ok(if add {
+        AdminCliCommand::OAuthRedirectUriAdd(opts, uri)
+    } else {
+        AdminCliCommand::OAuthRedirectUriRemove(opts, uri)
+    })
+}
+
+fn parse_oauth_update_scopes(args: &[String]) -> Result<AdminCliCommand, String> {
+    let mut opts = AdminOptions::default();
+    let mut scopes = OAuthScopesArgs::default();
+    let mut p = FlagParser::new(args);
+    while let Some(flag) = p.next() {
+        if parse_common_flag(&mut opts, &mut p, &flag)? {
+            continue;
+        }
+        match flag.as_str() {
+            "--client-id" => scopes.client_id = p.value(&flag)?,
+            "--scope" => scopes.scopes.push(p.value(&flag)?),
+            "--scopes" => {
+                scopes.scopes.extend(
+                    p.value(&flag)?
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            "--all-scopes" => scopes.all_scopes = true,
+            _ => return Err(format!("unknown oauth update-scopes flag: {}", flag)),
+        }
+    }
+    p.finish()?;
+    require_common(&opts)?;
+    require_non_empty("--client-id", &scopes.client_id)?;
+    if scopes.all_scopes && !scopes.scopes.is_empty() {
+        return Err("use only one of --all-scopes or --scope/--scopes".to_string());
+    }
+    if !scopes.all_scopes && scopes.scopes.is_empty() {
+        return Err(
+            "oauth update-scopes requires --scope SCOPE, --scopes A,B, or --all-scopes".to_string(),
+        );
+    }
+    Ok(AdminCliCommand::OAuthScopesUpdate(opts, scopes))
+}
+
 fn parse_username_command(args: &[String], name: &str) -> Result<(AdminOptions, String), String> {
     let mut opts = AdminOptions::default();
     let mut username = String::new();
@@ -482,6 +574,22 @@ pub fn build_admin_request(cmd: &AdminCliCommand) -> Result<AdminCliRequest, Str
             "/api/agent-tokens/revoke",
             json!({ "username": t.username, "token_id": t.token_id }),
         ),
+        AdminCliCommand::OAuthClientsList(opts) => (opts, "/api/oauth/clients/list", json!({})),
+        AdminCliCommand::OAuthRedirectUriAdd(opts, t) => (
+            opts,
+            "/api/oauth/clients/add_redirect_uri",
+            json!({ "client_id": t.client_id, "redirect_uri": t.redirect_uri }),
+        ),
+        AdminCliCommand::OAuthRedirectUriRemove(opts, t) => (
+            opts,
+            "/api/oauth/clients/remove_redirect_uri",
+            json!({ "client_id": t.client_id, "redirect_uri": t.redirect_uri }),
+        ),
+        AdminCliCommand::OAuthScopesUpdate(opts, t) => (
+            opts,
+            "/api/oauth/clients/update_scopes",
+            json!({ "client_id": t.client_id, "allowed_scopes": t.scopes }),
+        ),
     };
     Ok(AdminCliRequest {
         server_url: opts.server_url.trim_end_matches('/').to_string(),
@@ -494,11 +602,71 @@ pub fn build_admin_request(cmd: &AdminCliCommand) -> Result<AdminCliRequest, Str
                     | AdminCliCommand::RunnerTokensRegisterHash(_, _)
                     | AdminCliCommand::TokensList(_, _)
                     | AdminCliCommand::TokensRevoke(_, _)
+                    | AdminCliCommand::OAuthClientsList(_)
+                    | AdminCliCommand::OAuthRedirectUriAdd(_, _)
+                    | AdminCliCommand::OAuthRedirectUriRemove(_, _)
+                    | AdminCliCommand::OAuthScopesUpdate(_, _)
             ),
         )?,
         path,
         body,
     })
+}
+
+/// Expand `oauth update-scopes --all-scopes` against the live Server's OAuth
+/// discovery document. The Server remains the single source of truth for the
+/// grantable scope registry; the CLI never ships a copy that could drift.
+async fn resolve_oauth_all_scopes(cmd: AdminCliCommand) -> Result<AdminCliCommand, String> {
+    let (opts, scopes) = match cmd {
+        AdminCliCommand::OAuthScopesUpdate(opts, scopes) => (opts, scopes),
+        other => return Ok(other),
+    };
+    if !scopes.all_scopes {
+        return Ok(AdminCliCommand::OAuthScopesUpdate(opts, scopes));
+    }
+    let url = format!(
+        "{}/.well-known/oauth-authorization-server",
+        opts.server_url.trim_end_matches('/')
+    );
+    let client = build_server_http_client(&opts.server_http)?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to read Server OAuth discovery document: {}", e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "failed to read Server OAuth discovery document: HTTP {}",
+            status.as_u16()
+        ));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Server OAuth discovery document is not valid JSON: {}", e))?;
+    let supported = value
+        .get("scopes_supported")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Server OAuth discovery document omitted scopes_supported".to_string())?;
+    // `scopes_supported` is the permission registry plus the `offline_access`
+    // protocol scope. Only the permission registry may be registered as a
+    // client's `allowed_scopes`, so the protocol scope is dropped here.
+    let mut resolved: Vec<String> = supported
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|scope| *scope != "offline_access")
+        .map(str::to_string)
+        .collect();
+    resolved.sort();
+    resolved.dedup();
+    if resolved.is_empty() {
+        return Err("Server OAuth discovery document advertised no grantable scopes".to_string());
+    }
+    let mut scopes = scopes;
+    scopes.scopes = resolved;
+    scopes.all_scopes = false;
+    Ok(AdminCliCommand::OAuthScopesUpdate(opts, scopes))
 }
 
 fn resolve_bearer_token(opts: &AdminOptions, prefer_credential: bool) -> Result<String, String> {
@@ -564,6 +732,7 @@ fn resolve_token(opts: &AdminOptions, env_key: &str) -> Result<String, String> {
 }
 
 pub async fn run_admin_command(cmd: AdminCliCommand) -> Result<String, String> {
+    let cmd = resolve_oauth_all_scopes(cmd).await?;
     let req = build_admin_request(&cmd)?;
     let url = format!("{}{}", req.server_url, req.path);
     let client = build_server_http_client(&req.server_http)?;
