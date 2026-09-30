@@ -684,12 +684,6 @@ pub fn build_admin_request(cmd: &AdminCliCommand) -> Result<AdminCliRequest, Str
                     | AdminCliCommand::RunnerTokensRegisterHash(_, _)
                     | AdminCliCommand::TokensList(_, _)
                     | AdminCliCommand::TokensRevoke(_, _)
-                    | AdminCliCommand::OAuthClientsList(_)
-                    | AdminCliCommand::OAuthCreate(_, _)
-                    | AdminCliCommand::OAuthShow(_, _)
-                    | AdminCliCommand::OAuthRedirectUriAdd(_, _)
-                    | AdminCliCommand::OAuthRedirectUriRemove(_, _)
-                    | AdminCliCommand::OAuthScopesUpdate(_, _)
             ),
         )?,
         path,
