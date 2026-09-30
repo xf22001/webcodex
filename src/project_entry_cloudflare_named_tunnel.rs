@@ -15,7 +15,7 @@
 use super::client_handoff_service::mcp_url;
 use super::regular_tunnel_service::{
     probe_local_mcp, tunnel_auth_error, validate_local_server_url,
-    wait_for_regular_tunnel_stop_signal,
+    wait_for_regular_tunnel_stop_signal, HealthEvents,
 };
 use super::setup_service::create_private_dir;
 use super::share_service::{configure_cloudflare_process_tree, terminate_cloudflare_process_tree};
@@ -35,7 +35,12 @@ use tokio::task::JoinHandle;
 /// remotely-managed named Tunnel publishes no local URL to discover, so the
 /// connection log is the readiness signal.
 const REGISTERED_CONNECTION_MARKER: &str = "Registered tunnel connection";
+/// Production startup allows a slow edge handshake. Tests keep the same code
+/// path but use a short deadline so timeout cases finish without sleeping.
+#[cfg(not(test))]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const STARTUP_TIMEOUT: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CloudflareNamedTunnelOptions {
@@ -188,7 +193,7 @@ async fn run_cloudflare_named_tunnel_inner(
         _ = wait_for_regular_tunnel_stop_signal(options.stop_on_stdin_eof) => Ok(()),
         _ = &mut stop => Ok(()),
         result = child.wait() => result.map(|_| ()).map_err(|_| tunnel_runtime_error()),
-        result = report_named_tunnel_health(&mcp_endpoint, &options.bootstrap_token, service_readiness.as_deref()) => result,
+        result = report_named_tunnel_health(&mcp_endpoint, &options.bootstrap_token, service_readiness.as_deref(), options.stop_on_stdin_eof) => result,
     };
     if let Some(path) = service_readiness {
         let _ = webcodex_environment::write_tunnel_health(&path, false, false);
@@ -216,10 +221,16 @@ where
 /// half stays true while this process is supervising a cloudflared that has
 /// registered: the outer `select!` ends the runtime the moment it exits. No
 /// response body, credential or network error text crosses the machine channel.
+///
+/// Sampling and the machine channel have different lifetimes: a parent-owned
+/// pipe keeps the 2s heartbeat (`stop_on_stdin_eof`), while a standalone
+/// service emits changes immediately and one 60s summary otherwise — the same
+/// `HealthEvents` policy the OpenAI regular Tunnel uses.
 async fn report_named_tunnel_health(
     local_mcp_url: &str,
     bootstrap: &str,
     service_readiness: Option<&Path>,
+    parent_heartbeat: bool,
 ) -> Result<(), ProductError> {
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -230,6 +241,7 @@ async fn report_named_tunnel_health(
         .map_err(|_| tunnel_auth_error("Local connection health monitoring is unavailable"))?;
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut events = HealthEvents::new(parent_heartbeat);
     loop {
         interval.tick().await;
         let local_mcp_ready = probe_local_mcp(&client, local_mcp_url, bootstrap).await;
@@ -237,15 +249,17 @@ async fn report_named_tunnel_health(
             webcodex_environment::write_tunnel_health(path, true, local_mcp_ready)
                 .map_err(|_| tunnel_auth_error("Could not persist service connection health"))?;
         }
-        println!(
-            "{}",
-            json!({
-                "event": "health",
-                "schema_version": 1,
-                "tunnel_ready": true,
-                "local_mcp_ready": local_mcp_ready,
-            })
-        );
+        if events.should_emit(std::time::Instant::now(), true, local_mcp_ready) {
+            println!(
+                "{}",
+                json!({
+                    "event": "health",
+                    "schema_version": 1,
+                    "tunnel_ready": true,
+                    "local_mcp_ready": local_mcp_ready,
+                })
+            );
+        }
     }
 }
 
@@ -454,5 +468,171 @@ mod tests {
         assert!(!encoded.contains("private recovery"), "{encoded}");
         assert!(!encoded.contains("Authorization"), "{encoded}");
         assert!(!encoded.contains("Bearer"), "{encoded}");
+    }
+
+    /// Same throttle policy the OpenAI regular Tunnel uses: a parent-owned
+    /// pipe heartbeats every tick; a standalone service emits changes and one
+    /// 60s summary. Named Tunnel must not spam the machine channel.
+    #[test]
+    fn named_tunnel_health_events_throttle_like_the_regular_tunnel() {
+        let start = std::time::Instant::now();
+        let mut events = HealthEvents::new(false);
+        assert!(events.should_emit(start, true, false));
+        assert!(!events.should_emit(start + Duration::from_secs(2), true, false));
+        assert!(events.should_emit(start + Duration::from_secs(4), true, true));
+        assert!(!events.should_emit(start + Duration::from_secs(6), true, true));
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// Process environment is process-wide. Share the crate-wide test env lock
+    /// so these cases cannot race `WEBCODEX_CLOUDFLARED_BIN` with other tests.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::admin_cli::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Point `WEBCODEX_CLOUDFLARED_BIN` at a disposable script so the runtime
+    /// code under test is the real spawn/supervise path, not a mock.
+    #[cfg(unix)]
+    fn fake_cloudflared(script: &str) -> (tempfile::TempDir, PathBuf, EnvGuard) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cloudflared");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guard = EnvGuard::set("WEBCODEX_CLOUDFLARED_BIN", path.as_os_str());
+        (temp, path, guard)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn named_tunnel_startup_deadline_is_reported_when_the_edge_never_registers() {
+        let _lock = env_lock();
+        // Never prints the registration marker: the only outcome is the
+        // startup deadline.
+        let (_bin_dir, _bin, _guard) = fake_cloudflared("#!/bin/sh\nsleep 30\n");
+        let temp = tempfile::tempdir().unwrap();
+        let error = run_cloudflare_named_tunnel_inner(
+            &options("http://127.0.0.1:8080", "cf-token", temp.path()),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "tunnel_not_ready");
+        assert!(
+            error.message.contains("did not register"),
+            "{:?}",
+            error.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn named_tunnel_reports_child_exit_before_the_edge_registers() {
+        let _lock = env_lock();
+        let (_bin_dir, _bin, _guard) = fake_cloudflared("#!/bin/sh\nexit 3\n");
+        let temp = tempfile::tempdir().unwrap();
+        let error = run_cloudflare_named_tunnel_inner(
+            &options("http://127.0.0.1:8080", "cf-token", temp.path()),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "tunnel_not_ready");
+        assert!(
+            error.message.contains("exited before registering"),
+            "{:?}",
+            error.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn named_tunnel_stop_signal_ends_the_runtime_without_waiting_out_startup() {
+        let _lock = env_lock();
+        let (_bin_dir, _bin, _guard) = fake_cloudflared("#!/bin/sh\nsleep 30\n");
+        let temp = tempfile::tempdir().unwrap();
+        // Stop is already ready: the readiness loop must return Ok and not
+        // wait out the startup deadline.
+        let result = run_cloudflare_named_tunnel_inner(
+            &options("http://127.0.0.1:8080", "cf-token", temp.path()),
+            std::future::ready(()),
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn named_tunnel_exit_clears_service_health_and_cleans_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = env_lock();
+        let (_bin_dir, _bin, _guard) = fake_cloudflared(
+            "#!/bin/sh\n\
+             echo 'INF Registered tunnel connection connIndex=0'\n\
+             sleep 30\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        // write_tunnel_health requires a regular owner-only file.
+        let readiness = temp.path().join("readiness.json");
+        std::fs::write(
+            &readiness,
+            "{\"tunnel_ready\":true,\"local_mcp_ready\":true}",
+        )
+        .unwrap();
+        std::fs::set_permissions(&readiness, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _profile = EnvGuard::set("WEBCODEX_TUNNEL_PROFILE_ID", "fixture".as_ref());
+
+        // Stop only after the registration marker has been seen and the ready
+        // event printed, so the run reaches the supervision select and the
+        // health-clear path below it.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let _ = tx.send(());
+        });
+        let result = run_cloudflare_named_tunnel_inner(
+            &options("http://127.0.0.1:8080", "cf-token", temp.path()),
+            async move {
+                let _ = rx.await;
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        let health = std::fs::read_to_string(&readiness).unwrap();
+        assert!(
+            health.contains("false"),
+            "service health must be cleared on exit: {health}"
+        );
+        let root = temp.path().join("cloudflare-tunnel-runtime");
+        if root.exists() {
+            let empty = std::fs::read_dir(&root)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            assert!(
+                empty,
+                "the named session directory must be removed when the runtime ends"
+            );
+        }
     }
 }

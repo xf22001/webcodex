@@ -22,7 +22,6 @@ fn create(name: &str, tunnel_id: &str, key: &str) -> TunnelProfileRequest {
     TunnelProfileRequest {
         id: None,
         name: name.into(),
-        provider: TunnelProvider::OpenAiSecure,
         tunnel_id: tunnel_id.into(),
         api_key: Some(key.into()),
         autostart: true,
@@ -38,7 +37,6 @@ fn edit(
     TunnelProfileRequest {
         id: Some(id),
         name: name.into(),
-        provider: TunnelProvider::OpenAiSecure,
         tunnel_id: tunnel_id.into(),
         api_key: key.map(str::to_owned),
         autostart: true,
@@ -409,155 +407,5 @@ async fn desktop_restart_and_activity_never_project_stored_keys() {
             .saved_tunnel_id
             .as_deref(),
         Some("tunnel_persisted")
-    );
-}
-
-fn command_env(store: &TunnelConfig, id: TunnelProfileId, key: &str) -> Option<String> {
-    let mut command = Command::new("unused");
-    store.apply_profile_to_command(id, &mut command).unwrap();
-    command
-        .get_envs()
-        .find(|(name, _)| *name == key)
-        .and_then(|(_, value)| value)
-        .map(|value| value.to_string_lossy().into_owned())
-}
-
-fn cloudflare(id: Option<TunnelProfileId>, tunnel_id: &str, token: &str) -> TunnelProfileRequest {
-    TunnelProfileRequest {
-        id,
-        name: "Named".into(),
-        provider: TunnelProvider::CloudflareNamed,
-        tunnel_id: tunnel_id.into(),
-        api_key: Some(token.into()),
-        autostart: true,
-        expected_revision: None,
-    }
-}
-
-#[test]
-fn cloudflare_named_tunnel_is_provider_bound_and_uses_its_own_credentials() {
-    let fixture = Fixture::new();
-    let path = fixture.path();
-    let mut store = TunnelConfig::load(&path, false);
-
-    // A remotely-managed named Tunnel is identified by its token alone, so the
-    // name/ID is only an optional label and an empty one must be accepted.
-    let id = store
-        .update_profile(&path, cloudflare(None, "", "cf-tunnel-token-fixture"))
-        .unwrap();
-    let snapshot = store
-        .profiles()
-        .into_iter()
-        .find(|profile| profile.id == id)
-        .unwrap();
-    assert_eq!(snapshot.provider, TunnelProvider::CloudflareNamed);
-    assert_eq!(snapshot.tunnel_id, None);
-    assert!(snapshot.credential_present);
-
-    // The launch environment carries the Cloudflare keys and never the OpenAI ones.
-    assert_eq!(
-        command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN").as_deref(),
-        Some("cf-tunnel-token-fixture")
-    );
-    assert_eq!(
-        command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_ID"),
-        None
-    );
-    assert_eq!(command_env(&store, id, "CONTROL_PLANE_API_KEY"), None);
-    assert_eq!(command_env(&store, id, "CONTROL_PLANE_TUNNEL_ID"), None);
-    assert_eq!(
-        command_env(&store, id, "WEBCODEX_TUNNEL_PROFILE_ID").as_deref(),
-        Some(id.to_string().as_str())
-    );
-    assert_eq!(
-        store.provider_for(id).unwrap(),
-        TunnelProvider::CloudflareNamed
-    );
-
-    // The provider is part of a profile's identity, so it cannot be swapped in place.
-    let error = store
-        .update_profile(
-            &path,
-            TunnelProfileRequest {
-                id: Some(id),
-                name: "Named".into(),
-                provider: TunnelProvider::OpenAiSecure,
-                tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".into(),
-                api_key: Some("restricted-key-fixture".into()),
-                autostart: true,
-                expected_revision: None,
-            },
-        )
-        .unwrap_err();
-    assert_eq!(error.code, "tunnel_profile_provider_fixed");
-    // The refused switch left the saved profile untouched.
-    assert_eq!(
-        store.provider_for(id).unwrap(),
-        TunnelProvider::CloudflareNamed
-    );
-
-    // A quote would corrupt the line-oriented profile file the token is written to.
-    assert!(store
-        .update_profile(&path, cloudflare(Some(id), "", "quoted\"token"))
-        .is_err());
-    // An explicitly supplied secret must be valid on its own. Whitespace is not
-    // a retain signal: only an omitted key keeps the saved credential.
-    for blank in ["", "   ", "\t"] {
-        assert!(
-            store
-                .update_profile(&path, cloudflare(Some(id), "", blank))
-                .is_err(),
-            "{blank:?} must not be accepted as a new token"
-        );
-    }
-    // An omitted key retains the exact saved credential.
-    let mut retain = cloudflare(Some(id), "", "");
-    retain.api_key = None;
-    store.update_profile(&path, retain).unwrap();
-    assert_eq!(
-        command_env(&store, id, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN").as_deref(),
-        Some("cf-tunnel-token-fixture")
-    );
-    // A new profile cannot be created without a usable secret either.
-    assert!(store
-        .update_profile(&path, cloudflare(None, "", "   "))
-        .is_err());
-    // A new OpenAI profile still needs the issued tunnel_<hex> ID shape.
-    assert!(store
-        .update_profile(
-            &path,
-            TunnelProfileRequest {
-                id: None,
-                name: "Secure".into(),
-                provider: TunnelProvider::OpenAiSecure,
-                tunnel_id: String::new(),
-                api_key: Some("restricted-key-fixture".into()),
-                autostart: true,
-                expected_revision: None,
-            },
-        )
-        .is_err());
-}
-
-#[test]
-fn saved_profiles_without_a_provider_field_stay_openai_secure_tunnels() {
-    let fixture = Fixture::new();
-    let path = fixture.path();
-    fs::write(
-        &path,
-        r#"{"schema_version":2,"profiles":[{"id":"11111111-1111-4111-8111-111111111111","name":"ChatGPT","credentials":{"tunnel_id":"tunnel_0123456789abcdef0123456789abcdef","api_key":"restricted-key-fixture"},"enabled":true,"autostart":true,"revision":1}]}"#,
-    )
-    .unwrap();
-    let store = TunnelConfig::load(&path, false);
-    assert!(!store.is_invalid());
-    let profile = store
-        .profiles()
-        .into_iter()
-        .find(|profile| profile.name == "ChatGPT")
-        .unwrap();
-    assert_eq!(profile.provider, TunnelProvider::OpenAiSecure);
-    assert_eq!(
-        store.provider_for(profile.id).unwrap(),
-        TunnelProvider::OpenAiSecure
     );
 }

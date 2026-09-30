@@ -309,12 +309,9 @@ impl DesktopCore {
         let proxy = effective_tunnel_proxy(&self.config.tunnel_proxy)?;
         let auto_proxy_used =
             self.config.tunnel_proxy.mode == TunnelProxyMode::Auto && proxy.url.is_some();
-        // The provider is read from the saved profile, so the launched command
-        // and the credentials applied below always describe the same transport.
-        let provider = self.tunnel_config.provider_for(id)?;
-        let mut command =
-            self.adapter
-                .regular_tunnel_command(&env_file, provider, proxy.url.as_deref())?;
+        let mut command = self
+            .adapter
+            .regular_tunnel_command(&env_file, proxy.url.as_deref())?;
         // Use the credential belonging to this exact Desktop-managed Server file,
         // not a bootstrap credential inherited from the shell that launched Desktop.
         command.env_remove("WEBCODEX_TOKEN");

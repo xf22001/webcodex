@@ -2102,6 +2102,41 @@ mod tests {
         assert_eq!(env.get("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"), Some(&None));
     }
 
+    /// An OpenAI Secure MCP Tunnel needs its issued pair; a Cloudflare named
+    /// Tunnel is managed remotely, so its token alone is the credential.
+    #[test]
+    fn tunnel_credentials_present_matches_each_provider_key_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let openai_env = temp.path().join("openai.env");
+        let cloudflare_env = temp.path().join("cloudflare.env");
+
+        assert!(!tunnel_credentials_present(&openai_env, "openai").unwrap());
+        std::fs::write(&openai_env, "CONTROL_PLANE_TUNNEL_ID=tunnel_aaa\n").unwrap();
+        assert!(!tunnel_credentials_present(&openai_env, "openai").unwrap());
+        std::fs::write(
+            &openai_env,
+            "CONTROL_PLANE_TUNNEL_ID=tunnel_aaa\nCONTROL_PLANE_API_KEY=secret\n",
+        )
+        .unwrap();
+        assert!(tunnel_credentials_present(&openai_env, "openai").unwrap());
+
+        assert!(!tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap());
+        std::fs::write(&cloudflare_env, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=\n").unwrap();
+        assert!(
+            !tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap(),
+            "a blank token is not a credential"
+        );
+        std::fs::write(
+            &cloudflare_env,
+            "WEBCODEX_CLOUDFLARE_TUNNEL_ID=label\nWEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=secret\n",
+        )
+        .unwrap();
+        assert!(
+            tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap(),
+            "the optional label is not required"
+        );
+    }
+
     #[tokio::test]
     async fn component_restart_rejects_disabled_component() {
         let cfg = ControllerConfig {

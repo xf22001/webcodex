@@ -8,7 +8,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 #[path = "project_entry_regular_tunnel/health_events.rs"]
-mod health_events;
+pub(super) mod health_events;
+pub(super) use health_events::HealthEvents;
 
 const REGULAR_TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
