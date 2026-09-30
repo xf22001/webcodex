@@ -972,12 +972,13 @@ fn oauth_rejects_unknown_flags() {
 }
 
 #[test]
-fn oauth_commands_require_an_operator_credential() {
-    // Redirect-URI management is operator authority: with no credential the
-    // request must fail to build rather than send an empty bearer token.
+fn oauth_commands_require_a_first_party_token_not_an_account_credential() {
+    // OAuth client-management routes are FirstPartyOnly on the Server:
+    // Bootstrap and personal API tokens are accepted, AccountCredential is not.
     let mut env = EnvGuard::new();
     env.remove("WEBCODEX_TOKEN");
-    env.remove("WEBCODEX_ACCOUNT_CREDENTIAL");
+    env.set("WEBCODEX_ACCOUNT_CREDENTIAL", "fake-account-credential");
+
     let cmd = parse_admin_cli(&args(&[
         "oauth",
         "list",
@@ -987,24 +988,21 @@ fn oauth_commands_require_an_operator_credential() {
     ]))
     .unwrap();
     let error = build_admin_request(&cmd).unwrap_err();
-    assert!(error.contains("WEBCODEX_TOKEN is required"), "{error}");
+    assert!(error.contains("WEBCODEX_TOKEN"), "{error}");
 
-    // The generated operator credential is accepted as the bearer for the
-    // oauth group, which is what lets an operator run this against their own
-    // Server without copying a token around.
-    env.set("WEBCODEX_ACCOUNT_CREDENTIAL", "fake-operator-credential");
-    let cmd = parse_admin_cli(&args(&[
+    // An explicit first-party token must win even when the unrelated account
+    // credential environment is present.
+    let req = request(&[
         "oauth",
         "list",
         "--server-url",
         "https://example.test",
         "--no-system-proxy",
-    ]))
-    .unwrap();
-    let req = build_admin_request(&cmd).unwrap();
-    assert_eq!(req.token, "fake-operator-credential");
+        "--token",
+        "fake-first-party-token",
+    ]);
+    assert_eq!(req.token, "fake-first-party-token");
 }
-
 #[test]
 fn oauth_create_builds_the_client_create_request() {
     let req = request(&[
