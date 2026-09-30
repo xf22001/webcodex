@@ -3,18 +3,18 @@
 //! persistent processes emit changes immediately and one 60s summary otherwise.
 use std::time::{Duration, Instant};
 
-pub(crate) struct HealthEvents {
+pub(super) struct HealthEvents {
     parent_heartbeat: bool,
     last: Option<(Instant, bool, bool)>,
 }
 impl HealthEvents {
-    pub(crate) fn new(parent_heartbeat: bool) -> Self {
+    pub(super) fn new(parent_heartbeat: bool) -> Self {
         Self {
             parent_heartbeat,
             last: None,
         }
     }
-    pub(crate) fn should_emit(&mut self, now: Instant, tunnel: bool, local: bool) -> bool {
+    pub(super) fn should_emit(&mut self, now: Instant, tunnel: bool, local: bool) -> bool {
         let emit = self.parent_heartbeat
             || self.last.is_none_or(|(at, old_tunnel, old_local)| {
                 old_tunnel != tunnel

@@ -6,8 +6,6 @@
 
 #[path = "project_entry_client_handoff.rs"]
 mod client_handoff_service;
-#[path = "project_entry_cloudflare_named_tunnel.rs"]
-mod cloudflare_named_tunnel_service;
 #[path = "project_entry_cloudflared.rs"]
 mod cloudflared_service;
 #[path = "project_entry_openai_tunnel.rs"]
@@ -22,9 +20,6 @@ mod share_service;
 #[path = "project_entry_windows.rs"]
 mod windows_private_state;
 
-pub(crate) use cloudflare_named_tunnel_service::{
-    run_cloudflare_named_tunnel_with_stop, CloudflareNamedTunnelOptions,
-};
 pub(crate) use regular_tunnel_service::{
     run_regular_server_tunnel_with_stop, RegularServerTunnelOptions,
 };

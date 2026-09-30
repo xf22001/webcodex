@@ -567,11 +567,8 @@ fn validate_config(cfg: &ControllerConfig) -> Result<(), String> {
     if cfg.runner.enabled && cfg.runner.config.as_os_str().is_empty() {
         return Err("runner.config is required when runner.enabled=true".to_string());
     }
-    if cfg.tunnel.enabled && !matches!(cfg.tunnel.provider.as_str(), "openai" | "cloudflare") {
-        return Err(format!(
-            "unknown controller.tunnel.provider {:?}; expected openai or cloudflare",
-            cfg.tunnel.provider
-        ));
+    if cfg.tunnel.enabled && cfg.tunnel.provider != "openai" {
+        return Err("Controller V0 supports only tunnel.provider=\"openai\"".to_string());
     }
     if cfg.controller.max_restart_attempts == 0 {
         return Err("controller.max_restart_attempts must be greater than zero".to_string());
@@ -715,37 +712,17 @@ fn controller_environment_value(path: &Path, key: &str) -> Result<Option<String>
     super::read_env_file_value(path, key)
 }
 
-fn tunnel_credentials_present(environment_file: &Path, provider: &str) -> Result<bool, String> {
-    // An OpenAI Secure MCP Tunnel needs its issued ID and restricted key. A
-    // Cloudflare named Tunnel is managed remotely, so its token alone is the
-    // credential and the optional ID is only a human-readable label.
-    let required: &[&str] = match provider {
-        "cloudflare" => &["WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"],
-        _ => &["CONTROL_PLANE_TUNNEL_ID", "CONTROL_PLANE_API_KEY"],
-    };
-    for key in required {
-        let present = controller_environment_value(environment_file, key)?
-            .is_some_and(|value| !value.trim().is_empty());
-        if !present {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn tunnel_credentials_present(environment_file: &Path) -> Result<bool, String> {
+    let tunnel_id = controller_environment_value(environment_file, "CONTROL_PLANE_TUNNEL_ID")?;
+    let api_key = controller_environment_value(environment_file, "CONTROL_PLANE_API_KEY")?;
+    Ok(tunnel_id.is_some_and(|value| !value.trim().is_empty())
+        && api_key.is_some_and(|value| !value.trim().is_empty()))
 }
 
-/// Server and Runner children must never inherit the Tunnel's control
-/// credential, whichever provider this Controller runs.
-fn remove_controller_tunnel_credentials(command: &mut Command, provider: &str) {
-    let keys: &[&str] = match provider {
-        "cloudflare" => &[
-            "WEBCODEX_CLOUDFLARE_TUNNEL_ID",
-            "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN",
-        ],
-        _ => &["CONTROL_PLANE_TUNNEL_ID", "CONTROL_PLANE_API_KEY"],
-    };
-    for key in keys {
-        command.env_remove(key);
-    }
+fn remove_controller_tunnel_credentials(command: &mut Command) {
+    command
+        .env_remove("CONTROL_PLANE_TUNNEL_ID")
+        .env_remove("CONTROL_PLANE_API_KEY");
 }
 fn log_line(log: &Arc<Mutex<VecDeque<String>>>, source: &str, line: impl AsRef<str>) {
     let mut guard = log.lock().unwrap_or_else(|p| p.into_inner());
@@ -920,7 +897,7 @@ impl ControllerRuntime {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
-                remove_controller_tunnel_credentials(&mut command, &self.config.tunnel.provider);
+                remove_controller_tunnel_credentials(&mut command);
                 self.server.process =
                     Some(spawn_process(command, "server", self.log.clone(), None)?);
                 self.wait_server_ready().await?;
@@ -944,7 +921,7 @@ impl ControllerRuntime {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
-                remove_controller_tunnel_credentials(&mut command, &self.config.tunnel.provider);
+                remove_controller_tunnel_credentials(&mut command);
                 self.runner.process =
                     Some(spawn_process(command, "runner", self.log.clone(), None)?);
                 let online_verified = self.wait_runner_startup(&view, &server_url).await?;
@@ -965,12 +942,9 @@ impl ControllerRuntime {
                     .server_env_file
                     .as_deref()
                     .unwrap_or(default_env);
-                let provider = self.config.tunnel.provider.clone();
                 let mut command = Command::new(exe);
                 command
-                    .args(["server", "tunnel", "--provider"])
-                    .arg(&provider)
-                    .arg("--env-file")
+                    .args(["server", "tunnel", "--provider", "openai", "--env-file"])
                     .arg(env_file)
                     .args(["--json", "--stop-on-stdin-eof"])
                     .stdin(Stdio::piped())
@@ -1218,8 +1192,8 @@ fn doctor_report(config: &ControllerConfig, environment_file: &Path) -> Result<V
     } else {
         None
     };
-    let tunnel_credentials = !config.tunnel.enabled
-        || tunnel_credentials_present(environment_file, &config.tunnel.provider)?;
+    let tunnel_credentials =
+        !config.tunnel.enabled || tunnel_credentials_present(environment_file)?;
     let service_conflicts = existing_service_conflicts(config);
     let server_ok = match config.server.mode {
         ServerMode::Local => server_env && server_url.is_some() && server_bin == Some(true),
@@ -1900,7 +1874,7 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target"));
     }
     #[test]
-    fn config_rejects_unknown_tunnel_provider() {
+    fn config_rejects_non_openai_tunnel() {
         let cfg = ControllerConfig {
             version: 1,
             controller: ControllerSettings::default(),
@@ -1916,38 +1890,11 @@ mod tests {
             },
             tunnel: TunnelSettings {
                 enabled: true,
-                provider: "quick".into(),
+                provider: "cloudflare".into(),
                 server_env_file: None,
             },
         };
-        assert!(validate_config(&cfg)
-            .unwrap_err()
-            .contains("openai or cloudflare"));
-    }
-
-    #[test]
-    fn config_accepts_both_tunnel_providers() {
-        let config = |provider: &str| ControllerConfig {
-            version: 1,
-            controller: ControllerSettings::default(),
-            server: ServerSettings {
-                mode: ServerMode::Local,
-                env_file: Some("/tmp/server.env".into()),
-                url: None,
-                enabled: None,
-            },
-            runner: RunnerSettings {
-                enabled: false,
-                config: PathBuf::new(),
-            },
-            tunnel: TunnelSettings {
-                enabled: true,
-                provider: provider.into(),
-                server_env_file: None,
-            },
-        };
-        assert!(validate_config(&config("openai")).is_ok());
-        assert!(validate_config(&config("cloudflare")).is_ok());
+        assert!(validate_config(&cfg).unwrap_err().contains("openai"));
     }
 
     #[test]
@@ -2070,71 +2017,23 @@ mod tests {
 
     #[test]
     fn server_and_runner_children_drop_tunnel_control_credentials() {
-        fn env_of(command: &Command) -> std::collections::BTreeMap<String, Option<String>> {
-            command
-                .as_std()
-                .get_envs()
-                .map(|(key, value)| {
-                    (
-                        key.to_string_lossy().to_string(),
-                        value.map(|value| value.to_string_lossy().to_string()),
-                    )
-                })
-                .collect()
-        }
-
-        let mut openai = Command::new("webcodex-child");
-        openai
+        let mut command = Command::new("webcodex-child");
+        command
             .env("CONTROL_PLANE_TUNNEL_ID", "tunnel_fixture")
             .env("CONTROL_PLANE_API_KEY", "secret-fixture");
-        remove_controller_tunnel_credentials(&mut openai, "openai");
-        let env = env_of(&openai);
+        remove_controller_tunnel_credentials(&mut command);
+        let env = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|value| value.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(env.get("CONTROL_PLANE_TUNNEL_ID"), Some(&None));
         assert_eq!(env.get("CONTROL_PLANE_API_KEY"), Some(&None));
-
-        let mut cloudflare = Command::new("webcodex-child");
-        cloudflare
-            .env("WEBCODEX_CLOUDFLARE_TUNNEL_ID", "named_fixture")
-            .env("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN", "secret-fixture");
-        remove_controller_tunnel_credentials(&mut cloudflare, "cloudflare");
-        let env = env_of(&cloudflare);
-        assert_eq!(env.get("WEBCODEX_CLOUDFLARE_TUNNEL_ID"), Some(&None));
-        assert_eq!(env.get("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"), Some(&None));
-    }
-
-    /// An OpenAI Secure MCP Tunnel needs its issued pair; a Cloudflare named
-    /// Tunnel is managed remotely, so its token alone is the credential.
-    #[test]
-    fn tunnel_credentials_present_matches_each_provider_key_set() {
-        let temp = tempfile::tempdir().unwrap();
-        let openai_env = temp.path().join("openai.env");
-        let cloudflare_env = temp.path().join("cloudflare.env");
-
-        assert!(!tunnel_credentials_present(&openai_env, "openai").unwrap());
-        std::fs::write(&openai_env, "CONTROL_PLANE_TUNNEL_ID=tunnel_aaa\n").unwrap();
-        assert!(!tunnel_credentials_present(&openai_env, "openai").unwrap());
-        std::fs::write(
-            &openai_env,
-            "CONTROL_PLANE_TUNNEL_ID=tunnel_aaa\nCONTROL_PLANE_API_KEY=secret\n",
-        )
-        .unwrap();
-        assert!(tunnel_credentials_present(&openai_env, "openai").unwrap());
-
-        assert!(!tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap());
-        std::fs::write(&cloudflare_env, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=\n").unwrap();
-        assert!(
-            !tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap(),
-            "a blank token is not a credential"
-        );
-        std::fs::write(
-            &cloudflare_env,
-            "WEBCODEX_CLOUDFLARE_TUNNEL_ID=label\nWEBCODEX_CLOUDFLARE_TUNNEL_TOKEN=secret\n",
-        )
-        .unwrap();
-        assert!(
-            tunnel_credentials_present(&cloudflare_env, "cloudflare").unwrap(),
-            "the optional label is not required"
-        );
     }
 
     #[tokio::test]

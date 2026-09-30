@@ -29,16 +29,6 @@ const TUNNEL_LOG_LINES: usize = 8;
 const TUNNEL_LOG_LINE_BYTES: usize = 512;
 const TUNNEL_LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Transport for a **temporary, project-scoped** share session.
-///
-/// Distinct from the persistent Server transport in
-/// `webcodex_environment::TunnelProvider`: `CloudflareQuick` is a Cloudflare
-/// quick tunnel whose hostname Cloudflare assigns per session, while the
-/// persistent provider's `CloudflareNamed` is an operator-owned tunnel created
-/// in the dashboard. Both spell `cloudflare` on the command line, so the
-/// variants are named after the actual product and the two lists must never be
-/// substituted for one another. `None` exists only here: a share may create no
-/// external connection at all, a persistent profile may not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TunnelProvider {
     CloudflareQuick,
@@ -554,13 +544,13 @@ impl Drop for CloudflareTunnel {
 /// (including backgrounded descendants and the npm wrapper's children) can be
 /// reaped as a group. `process_group(0)` makes the child's pid its group id.
 #[cfg(unix)]
-pub(super) fn configure_cloudflare_process_tree(command: &mut Command) {
+fn configure_cloudflare_process_tree(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.as_std_mut().process_group(0);
 }
 
 #[cfg(not(unix))]
-pub(super) fn configure_cloudflare_process_tree(_command: &mut Command) {}
+fn configure_cloudflare_process_tree(_command: &mut Command) {}
 
 /// Best-effort SIGKILL of the tunnel's whole process group (`kill(-pgid,
 /// SIGKILL)`; a negative target signals every process in the group). Reaps
@@ -588,10 +578,7 @@ fn signal_cloudflare_process_group(process_group_id: Option<u32>) {
 /// Tear down the tunnel process tree: on Unix signal the whole group (covering
 /// any background descendants a direct kill would miss), then reap the child.
 /// On non-Unix targets fall back to a direct child kill.
-pub(super) async fn terminate_cloudflare_process_tree(
-    child: &mut Child,
-    process_group_id: Option<u32>,
-) {
+async fn terminate_cloudflare_process_tree(child: &mut Child, process_group_id: Option<u32>) {
     #[cfg(unix)]
     signal_cloudflare_process_group(process_group_id);
     #[cfg(not(unix))]

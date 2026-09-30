@@ -30,36 +30,6 @@ pub async fn run_regular_server_tunnel_with_stop(
     .map_err(|error| project_entry::render_error(&error, true))
 }
 
-/// A persistent Cloudflare named Tunnel. Unlike a share, its public hostname
-/// and ingress belong to the operator's Cloudflare dashboard, so the only local
-/// input is the tunnel token.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudflareNamedTunnelOptions {
-    pub local_server_url: String,
-    pub bootstrap_token: String,
-    pub tunnel_token: String,
-    pub runtime_parent: PathBuf,
-    pub stop_on_stdin_eof: bool,
-}
-
-pub async fn run_cloudflare_named_tunnel_with_stop(
-    options: CloudflareNamedTunnelOptions,
-    stop: impl std::future::Future<Output = ()>,
-) -> Result<(), String> {
-    project_entry::run_cloudflare_named_tunnel_with_stop(
-        &project_entry::CloudflareNamedTunnelOptions {
-            local_server_url: options.local_server_url,
-            bootstrap_token: options.bootstrap_token,
-            tunnel_token: options.tunnel_token,
-            runtime_parent: options.runtime_parent,
-            stop_on_stdin_eof: options.stop_on_stdin_eof,
-        },
-        stop,
-    )
-    .await
-    .map_err(|error| project_entry::render_error(&error, true))
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ProjectCliAction {
     Setup(project_entry::ProjectCommandOptions),

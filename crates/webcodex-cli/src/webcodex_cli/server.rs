@@ -5,8 +5,8 @@ use webcodex::SERVER_SYSTEMD_TIMEOUT_STOP_SECS;
 use webcodex_admin::ServerHttpOptions;
 
 use crate::{
-    ServerInitOptions, ServerInstallServiceOptions, ServerTunnelOptions, ServerTunnelProvider,
-    ServiceActionKind, ServiceActionOptions,
+    ServerInitOptions, ServerInstallServiceOptions, ServerTunnelOptions, ServiceActionKind,
+    ServiceActionOptions,
 };
 
 use super::{
@@ -47,34 +47,16 @@ pub(crate) async fn run_server_tunnel_with_stop(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    match opts.provider {
-        ServerTunnelProvider::OpenAiSecure => {
-            webcodex::run_regular_server_tunnel_with_stop(
-                webcodex::RegularServerTunnelOptions {
-                    local_server_url,
-                    bootstrap_token,
-                    runtime_parent,
-                    stop_on_stdin_eof: opts.stop_on_stdin_eof,
-                },
-                stop,
-            )
-            .await
-        }
-        ServerTunnelProvider::CloudflareNamed => {
-            let tunnel_token = derive_cloudflare_tunnel_token(&opts.env_file)?;
-            webcodex::run_cloudflare_named_tunnel_with_stop(
-                webcodex::CloudflareNamedTunnelOptions {
-                    local_server_url,
-                    bootstrap_token,
-                    tunnel_token,
-                    runtime_parent,
-                    stop_on_stdin_eof: opts.stop_on_stdin_eof,
-                },
-                stop,
-            )
-            .await
-        }
-    }
+    webcodex::run_regular_server_tunnel_with_stop(
+        webcodex::RegularServerTunnelOptions {
+            local_server_url,
+            bootstrap_token,
+            runtime_parent,
+            stop_on_stdin_eof: opts.stop_on_stdin_eof,
+        },
+        stop,
+    )
+    .await
 }
 
 pub(crate) fn derive_regular_tunnel_bootstrap_token(env_file: &Path) -> Result<String, String> {
@@ -90,28 +72,6 @@ pub(crate) fn derive_regular_tunnel_bootstrap_token(env_file: &Path) -> Result<S
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             "regular Server Tunnel requires the effective local Server WEBCODEX_TOKEN".to_string()
-        })
-}
-
-/// The Cloudflare named Tunnel token for this profile. The process environment
-/// wins over the profile env file so an operator can override it for a single
-/// run without rewriting the saved profile.
-pub(crate) fn derive_cloudflare_tunnel_token(env_file: &Path) -> Result<String, String> {
-    let value = match std::env::var("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => {
-            read_env_file_value(env_file, "WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN")?
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN is not valid UTF-8".to_string())
-        }
-    };
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "the Cloudflare Tunnel profile does not define WEBCODEX_CLOUDFLARE_TUNNEL_TOKEN"
-                .to_string()
         })
 }
 
