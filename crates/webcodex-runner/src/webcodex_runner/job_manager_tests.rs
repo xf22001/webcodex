@@ -19,6 +19,11 @@ use std::sync::OnceLock;
 use tempfile::TempDir;
 use webcodex_core::runner_protocol::{RunnerEnvelope, VALIDATION_STEP_WAIT_FAILED_CODE};
 
+#[path = "job_manager_tests/project_build.rs"]
+mod project_build;
+#[path = "job_manager_tests/project_validation.rs"]
+mod project_validation;
+
 fn retained_terminal_job(job_id: &str, ended_at: i64) -> RunningJob {
     let mut snapshot = test_job_snapshot(job_id);
     snapshot.status = "completed".to_string();
@@ -5591,6 +5596,19 @@ fn runner_recovery_context_accepts_compact_session_base64url_alphabet() {
     let context = request.job_context.as_mut().unwrap();
     context.runtime_project_id = Some("agent:ws-client:demo".to_string());
     context.workflow_session_id = Some("wc_sess_AAAAAAAA-AAAAAA_".to_string());
+    let context = context.clone();
+
+    validate_runner_job_context(&context, &request, "ws-client").unwrap();
+}
+
+#[test]
+fn runner_recovery_context_accepts_bash_login_shell() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut request = shell_job_request(temp.path(), "printf ok");
+    request.login = true;
+    request.shell = Some(webcodex_core::workflow_session_contract::ExecutionShell::Bash);
+    let context = request.job_context.as_mut().unwrap();
+    context.shell = Some("bash_login".to_string());
     let context = context.clone();
 
     validate_runner_job_context(&context, &request, "ws-client").unwrap();

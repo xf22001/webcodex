@@ -89,6 +89,49 @@ describe("Connections + Tools control surfaces", () => {
     expect(alert).toHaveTextContent("does not identify the root cause");
   });
 
+  it("shows proxy recovery for asynchronous readiness failure without a rejected start call", () => {
+    const initial = state();
+    initial.tunnel_proxy = { mode: "auto", custom_url: null, effective_source: "system", effective_proxy_present: true, system_proxy_detected: true };
+    initial.connections = connectionSnapshot(connectionFixture({ id: "work", name: "ChatGPT Work", lifecycle: "error", pid: null, ready: false, last_error: "tunnel_unavailable", failure_stage: "tunnel_daemon_readiness", reason_code: "tunnel_daemon_not_ready", auto_proxy_used: true }));
+    render(<Harness mode="connections" initial={initial} />);
+    const card = screen.getByRole("article", { name: "ChatGPT Work" });
+    expect(within(card).getByText(/Auto is using a detected proxy/)).toHaveTextContent("try Direct mode");
+    expect(api.tunnelProfileAction).not.toHaveBeenCalled();
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tunnel_client_download_failed", "tunnel_client_download", "could not be downloaded", true],
+    ["tunnel_client_install_failed", "tunnel_client_install", "could not be installed", false],
+    ["tunnel_client_verification_failed", "tunnel_client_verification", "failed integrity verification", false],
+  ] as const)("shows specific recovery for %s instead of blaming credentials", (reason_code, failure_stage, message, proxyHint) => {
+    const initial = state();
+    initial.tunnel_proxy = { mode: "auto", custom_url: null, effective_source: "system", effective_proxy_present: true, system_proxy_detected: true };
+    initial.connections = connectionSnapshot(connectionFixture({ id: "work", name: "ChatGPT Work", lifecycle: "error", ready: false, last_error: "tunnel_unavailable", reason_code, failure_stage, auto_proxy_used: true }));
+    render(<Harness mode="connections" initial={initial} />);
+    const card = screen.getByRole("article", { name: "ChatGPT Work" });
+    expect(card).toHaveTextContent(message);
+    expect(card).not.toHaveTextContent("Check this connection’s credentials");
+    expect(within(card).queryByText(/Auto is using a detected proxy/) !== null).toBe(proxyHint);
+    expect(api.tunnelProfileAction).not.toHaveBeenCalled();
+  });
+
+  it("uses the failed attempt's proxy evidence rather than the current global setting", () => {
+    const afterAutoFailure = state();
+    afterAutoFailure.tunnel_proxy = { mode: "direct", custom_url: null, effective_source: "direct", effective_proxy_present: false, system_proxy_detected: true };
+    afterAutoFailure.connections = connectionSnapshot(connectionFixture({ lifecycle: "error", ready: false, last_error: "tunnel_unavailable", failure_stage: "tunnel_daemon_readiness", reason_code: "tunnel_daemon_not_ready", auto_proxy_used: true }));
+    const { unmount } = render(<Harness mode="connections" initial={afterAutoFailure} />);
+    expect(screen.getByText(/Auto is using a detected proxy/)).toHaveTextContent("try Direct mode");
+    unmount();
+
+    const afterDirectFailure = state();
+    afterDirectFailure.tunnel_proxy = { mode: "auto", custom_url: null, effective_source: "system", effective_proxy_present: true, system_proxy_detected: true };
+    afterDirectFailure.connections = connectionSnapshot(connectionFixture({ lifecycle: "error", ready: false, last_error: "tunnel_unavailable", failure_stage: "tunnel_daemon_readiness", reason_code: "tunnel_daemon_not_ready", auto_proxy_used: false }));
+    render(<Harness mode="connections" initial={afterDirectFailure} />);
+    expect(screen.queryByText(/Auto is using a detected proxy/)).not.toBeInTheDocument();
+    expect(api.tunnelProfileAction).not.toHaveBeenCalled();
+  });
+
   it("does not attribute unrelated Tunnel failures to Clash or proxy detection", async () => {
     const initial = state();
     initial.tunnel_proxy = { mode: "auto", custom_url: null, effective_source: "system", effective_proxy_present: true, system_proxy_detected: true };

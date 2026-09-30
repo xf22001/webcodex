@@ -269,6 +269,83 @@ fn list_project_files_paging_schema_keeps_cardinality_bounded() {
 }
 
 #[test]
+fn project_validate_test_options_schema_is_closed_and_bounded() {
+    let schema = input_schema_for_tool("project_validate");
+    let base = json!({"project":"demo","action":"test"});
+    for options in [
+        json!({}),
+        json!({"filter":"^Test/Sub$","require_tests":false,"min_tests":3}),
+        json!({"filter":"selected"}),
+    ] {
+        let mut value = base.clone();
+        value["test"] = options;
+        assert!(
+            test_support::validate_schema_instance(&value, &schema).is_ok(),
+            "{value}"
+        );
+        assert!(ToolCall::from_tool_name("project_validate", value).is_ok());
+    }
+    for options in [
+        json!({"argv":["--release"]}),
+        json!({"min_tests":0}),
+        json!({"min_tests":1_000_001}),
+        json!({"filter":"x".repeat(201)}),
+        json!({"require_tests":"yes"}),
+    ] {
+        let mut value = base.clone();
+        value["test"] = options;
+        assert!(
+            test_support::validate_schema_instance(&value, &schema).is_err(),
+            "{value}"
+        );
+    }
+    assert!(test_support::validate_schema_instance(&base, &schema).is_ok());
+    // No command strings or feature flags enter the top-level gateway.
+    let mut command = base;
+    command["args"] = json!(["--release"]);
+    assert!(ToolCall::from_tool_name("project_validate", command).is_err());
+}
+
+#[test]
+fn project_build_schema_is_closed_bounded_and_has_no_raw_execution_fields() {
+    let schema = input_schema_for_tool("project_build");
+    let valid = serde_json::json!({
+        "project": "demo",
+        "adapter": "rust",
+        "scope": {"packages": ["package-a", "package-b"]},
+        "timeout_secs": 1800
+    });
+    assert!(test_support::validate_schema_instance(&valid, &schema).is_ok());
+
+    for forbidden in [
+        "executable",
+        "args",
+        "shell",
+        "script",
+        "sync_wait_secs",
+        "release",
+        "target",
+    ] {
+        assert!(
+            schema["properties"].get(forbidden).is_none(),
+            "project_build exposed {forbidden}"
+        );
+    }
+    for invalid in [
+        serde_json::json!({"project":"demo","scope":{"packages":[]}}),
+        serde_json::json!({"project":"demo","scope":{"packages":(0..9).map(|i| format!("p-{i}")).collect::<Vec<_>>()}}),
+        serde_json::json!({"project":"demo","scope":{"packages":["x".repeat(257)]}}),
+        serde_json::json!({"project":"demo","scope":{"packages":["a"],"unknown":true}}),
+        serde_json::json!({"project":"demo","unknown":true}),
+    ] {
+        assert!(
+            test_support::validate_schema_instance(&invalid, &schema).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn project_validate_package_scope_schema_is_closed_and_bounded() {
     let schema = input_schema_for_tool("project_validate");
     let valid = serde_json::json!({

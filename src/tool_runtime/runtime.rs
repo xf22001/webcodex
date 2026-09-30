@@ -110,9 +110,14 @@ pub struct ToolRuntime {
     pub(crate) ssh_resource_gateway: Arc<crate::ssh_resource_gateway::SshResourceGatewayRuntime>,
     pub(crate) coding_agent_runs: Arc<super::coding_agent::CodingAgentServerState>,
     pub runtime_info: Arc<RuntimeInfo>,
-    /// Server-side MCP Host timing policy. This adapts MCP waiting only and is
-    /// never forwarded to Runner execution.
+    /// Effective MCP Host timing/guidance policy for this runtime view. The
+    /// shared deployment runtime uses the deployment policy; request-local MCP
+    /// clones may narrow or switch this preference without changing authority or
+    /// execution lifetime.
     pub(crate) mcp_host_policy: crate::mcp_host::McpHostRuntimePolicy,
+    /// Immutable deployment snapshot reported by runtime diagnostics. Request-local
+    /// views must never rewrite this operator-facing configuration evidence.
+    pub(crate) deployment_mcp_host_policy: crate::mcp_host::McpHostRuntimePolicy,
     /// Immutable deployment recommendation/interaction snapshot; never admission.
     pub(crate) model_workflow_policy: crate::model_workflow::ModelWorkflowPolicy,
     #[cfg(feature = "workspace-checkpoints")]
@@ -230,6 +235,7 @@ impl ToolRuntime {
             coding_agent_runs: Arc::new(super::coding_agent::CodingAgentServerState::default()),
             runtime_info,
             mcp_host_policy: crate::mcp_host::McpHostRuntimePolicy::default(),
+            deployment_mcp_host_policy: crate::mcp_host::McpHostRuntimePolicy::default(),
             model_workflow_policy: crate::model_workflow::ModelWorkflowPolicy::default(),
             #[cfg(feature = "workspace-checkpoints")]
             checkpoint_store: checkpoint::CheckpointStore::default(),
@@ -299,6 +305,15 @@ impl ToolRuntime {
     }
 
     pub(crate) fn with_mcp_host_policy(
+        mut self,
+        policy: crate::mcp_host::McpHostRuntimePolicy,
+    ) -> Self {
+        self.mcp_host_policy = policy;
+        self.deployment_mcp_host_policy = policy;
+        self
+    }
+
+    pub(crate) fn with_request_mcp_host_policy(
         mut self,
         policy: crate::mcp_host::McpHostRuntimePolicy,
     ) -> Self {

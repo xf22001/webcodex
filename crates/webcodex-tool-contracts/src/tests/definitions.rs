@@ -1128,7 +1128,7 @@ fn turn_economy_descriptors_stay_converged_and_bounded() {
         for phrase in [
             "continue independent work",
             "observe_jobs only for",
-            "wait_for_job_terminal only when",
+            "bounded wait_for_job_readiness",
         ] {
             assert!(spec.description.contains(phrase), "{name}: {phrase}");
         }
@@ -1188,10 +1188,12 @@ fn turn_economy_descriptors_stay_converged_and_bounded() {
     let wait = spec_named(&specs, "wait_for_job_terminal");
     assert!(wait
         .description
-        .contains("only when no independent work remains"));
+        .contains("explicitly selected continuation workflow"));
+    assert!(wait.description.contains("not a blocking wait"));
+    assert!(wait.description.contains("never starts a model turn"));
     assert!(wait
         .description
-        .contains("explicit logs/details or recovery"));
+        .contains("wait_for_job_readiness in the current turn"));
     let list = spec_named(&specs, "list_jobs");
     assert!(list
         .description
@@ -1521,7 +1523,8 @@ fn readiness_tool_is_sequential_outer_only_and_does_not_expand_legacy() {
         "do not mechanically repeat the same-set wait",
         "largest safe remaining Host activation budget",
         "no fixed 10/15/20s slice",
-        "logs/details/recovery use observe_jobs",
+        "Logs/details/recovery use observe_jobs",
+        "No automatic next turn",
     ] {
         assert!(description.contains(phrase), "{phrase}: {description}");
     }
@@ -1586,4 +1589,33 @@ fn readiness_tool_is_sequential_outer_only_and_does_not_expand_legacy() {
             "nested {forbidden}"
         );
     }
+}
+
+#[test]
+fn project_build_is_gateway_visible_but_not_adaptive_direct() {
+    let definition = lookup_tool_definition("project_build").expect("project_build definition");
+    assert!(definition.visibility.is_model_visible());
+    assert_eq!(definition.category, TOOL_CATEGORY_EXECUTION);
+    assert_eq!(definition.adaptive_runtime_direct_rank(), None);
+    assert!(!is_adaptive_runtime_direct_tool("project_build"));
+    let requirement = runtime_tool_runner_capability("project_build")
+        .expect("project_build must require its typed Runner capability");
+    assert_eq!(requirement, RunnerCapabilityRequirement::ProjectBuild);
+    assert_eq!(requirement.label(), "project_build_v1");
+    assert_eq!(requirement.registry_capabilities(), &["project_build_v1"]);
+    assert_eq!(
+        runtime_tool_execution_contract("project_build").map(|contract| contract.form),
+        Some(ToolExecutionForm::ProjectBuild)
+    );
+    assert_eq!(
+        definition.audit_policy().execution,
+        ToolAuditExecutionPolicy::DIRECT_ARGV_TEXT
+    );
+    #[cfg(feature = "legacy-gpt-actions")]
+    assert!(
+        !gpt_action_direct_tool_definitions()
+            .iter()
+            .any(|definition| definition.name == "project_build"),
+        "project_build must remain gateway-only on the legacy GPT Actions surface"
+    );
 }

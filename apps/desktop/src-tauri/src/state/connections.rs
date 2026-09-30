@@ -307,6 +307,8 @@ impl DesktopCore {
         let local_mcp_url = format!("{}/mcp", runtime.server_url.trim_end_matches('/'));
         self.adapter.ensure_binaries(cancellation).await?;
         let proxy = effective_tunnel_proxy(&self.config.tunnel_proxy)?;
+        let auto_proxy_used =
+            self.config.tunnel_proxy.mode == TunnelProxyMode::Auto && proxy.url.is_some();
         // The provider is read from the saved profile, so the launched command
         // and the credentials applied below always describe the same transport.
         let provider = self.tunnel_config.provider_for(id)?;
@@ -332,6 +334,7 @@ impl DesktopCore {
             events,
             expected_root,
             local_mcp_url,
+            auto_proxy_used,
             self.supervisor.clone(),
             self.activity.clone(),
         );

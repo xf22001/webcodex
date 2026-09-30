@@ -432,7 +432,11 @@ fn trace_reader_is_stateless_protocol_extension_admin_scoped_and_schema_static()
         .iter()
         .find(|tool| tool["name"] == "read_tool_trace")
         .expect("admin Stateless MCP 2026 trace reader");
-    assert_eq!(tool["inputSchema"]["required"], json!(["trace_ref"]));
+    // An omitted trace selects the bounded ActionAudit query; exact trace and
+    // query remain mutually exclusive at the shared reader boundary.
+    assert_eq!(tool["inputSchema"]["required"], json!([]));
+    assert!(tool["inputSchema"]["properties"]["query"].is_object());
+    assert!(tool["inputSchema"]["properties"]["trace_ref"].is_object());
     assert_eq!(tool["inputSchema"]["additionalProperties"], false);
     assert!(tool["inputSchema"]["properties"]["payload_index"].is_object());
     assert!(tool["outputSchema"]["properties"]["output"]["properties"]["payload"].is_object());
@@ -1876,10 +1880,10 @@ async fn mcp_compact_preserves_safety_patterns_and_wrapper_bounds() {
         schema("run_skill_resource")["properties"]["expected_definition_revision"]["pattern"],
         "^[0-9a-f]{64}$"
     );
-    // The identical opaque Session pattern remains on business Session inputs.
+    // Business Session selectors retain the canonical-or-ref pattern in compact schemas.
     assert_eq!(
         schema("work_on_project")["properties"]["session_id"]["pattern"],
-        "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$"
+        "^(wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})|~s[1-9][0-9]{0,18})$"
     );
     let properties = &schema("run_process")["properties"];
     let envelope = &properties["_wc"];
@@ -2204,15 +2208,15 @@ fn mcp_compact_descriptions_preserve_selection_and_schema_literals() {
             vec![
                 "observation_token",
                 "after_observation_token",
-                "never redispatches",
+                "Never redispatch",
             ],
         ),
         (
             "wait_for_job_terminal",
             vec![
-                "exact existing Job",
-                "returned continuation",
-                "Host continuation",
+                "Optional durable terminal attention",
+                "Not a blocking wait",
+                "current turn",
             ],
         ),
         (
@@ -3848,8 +3852,7 @@ async fn mcp_2026_control_sidecars_gateway_strip_and_closed_schema() {
 #[test]
 fn compact_bootstrap_description_teaches_explicit_context_and_reuse() {
     use crate::mcp::discovery::compact_tool;
-    let mut tool =
-        json!({"name": "work_on_project", "description": "placeholder", "inputSchema": {}});
+    let mut tool = json!({"name": "work_on_project", "description": "placeholder", "inputSchema": {"properties":{"_wc":{}}}});
     compact_tool(&mut tool);
     let description = tool["description"].as_str().unwrap();
     for phrase in [
@@ -3870,6 +3873,38 @@ fn compact_bootstrap_description_teaches_explicit_context_and_reuse() {
     }
     assert!(!description.contains("Defaults return"));
     assert!(!description.contains("context_request"));
+}
+
+#[tokio::test]
+async fn compact_bootstrap_guidance_matches_advertised_context_capability() {
+    let runtime = test_runtime_with_mcp_settings(true, false);
+    for modern in [false, true] {
+        let params = if modern {
+            mcp_2026_params(json!({}))
+        } else {
+            json!({})
+        };
+        let McpOutcome::Ok(body) =
+            handle_mcp_request(&runtime, rpc("tools/list", Some(json!(8000)), params), None).await
+        else {
+            panic!("tools/list");
+        };
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "work_on_project")
+            .unwrap();
+        assert_eq!(
+            tool.pointer("/inputSchema/properties/_wc").is_some(),
+            modern
+        );
+        let description = tool["description"].as_str().unwrap();
+        assert_eq!(description.contains("_wc.context"), modern);
+        if !modern {
+            assert!(description.contains("read_files"));
+        }
+    }
 }
 
 #[tokio::test]

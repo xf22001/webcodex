@@ -193,6 +193,14 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
         ],
     },
     ToolRecommendedFlow {
+        name: "build",
+        summary:
+            "Build: prefer project_build for portable Rust/Go builds; use native execution only outside the canonical gateway.",
+        manifest_purpose:
+            "Use project_build for canonical Rust cargo build and Go go build with optional bounded package scope. It preserves Runner-owned recipe resolution, provenance, and same-execution Job admission. Use run_process only when the required build is outside this closed contract.",
+        tools: &["project_build", "observe_jobs", "run_process"],
+    },
+    ToolRecommendedFlow {
         name: "validate",
         summary:
             "Validate: use structured validators when their canonical diagnostics, evidence/test-count, validation identity, or same-execution Job semantics help; native execution is first-class when the command is outside or awkward for that contract.",
@@ -214,7 +222,7 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     ToolRecommendedFlow {
         name: "browser",
         summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, use adaptive semantic snapshots and diagnostic deltas, act only through opaque identities, then re-observe after navigation or uncertain effects.",
-        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot/diagnostics and browser_act for launch/new_page/navigate/reload/click/input_text/select_option/set_value/upload_file/key/clear_diagnostics/close. Call an element effect only when that snapshot node lists it in actions. Snapshot auto mode reduces large pages to admitted controls and semantic choices such as native select options; diagnostics since_cursor returns only later events. Successful page effects include bounded stability observation but still require a fresh snapshot before reusing element authority. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
+        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot/diagnostics and browser_act for Browser effects. Use batch for 1..32 ordered input_text/select_option/set_value/click/upload_file operations admitted by one current snapshot on one Browser/page. Ordinary field effects preserve sibling element ids; navigation, document replacement and new snapshots stale prior authority. Batch checks freshness between effects, settles once, and stops on rejection, document change or uncertainty. Read completion counts and stopped certainty before observing recovery; never blindly retry outcome_unknown. Take a fresh verification snapshot after filling and after structural/page changes. Snapshot auto mode compacts large pages to admitted controls and semantic choices; diagnostics since_cursor returns only later events.",
         tools: &["browser_observe", "browser_act"],
     },
     ToolRecommendedFlow {
@@ -294,7 +302,8 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
     "edit_project_files",
     #[cfg(feature = "experimental-code-mode")]
     "code_mode_exec_mutating",
-    // Ordinary execution plus program-like multi-stage specialist.
+    // Portable project build plus ordinary execution specialists.
+    "project_build",
     "run_process",
     "run_script",
     "run_shell",

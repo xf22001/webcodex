@@ -269,6 +269,9 @@ pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     };
+    if let Some(tool) = body.get("tool").and_then(Value::as_str) {
+        guard.capture_request_diagnostic(tool, body.get("params").unwrap_or(&body));
+    }
     let (tool, params) = match extract_tool_call(&body) {
         Ok(pair) => pair,
         Err(msg) => {

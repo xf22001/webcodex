@@ -29,6 +29,7 @@ import { useWindowWorkspace } from "../state/useWindowWorkspace.js";
 import { WorkSurfaceSwitch, type WorkSurface } from "./GoalWorkbench.js";
 import { WindowCollaboration } from "./WindowCollaboration.js";
 import { WindowActivityFeed } from "./WindowActivityFeed.js";
+import { TraceSearch } from "./TraceSearch.js";
 
 
 type Props = {
@@ -305,6 +306,7 @@ export function WindowWorkbench({
           />
         </div>
         <div className="work-list-scroll" ref={listRef}>
+          <TraceSearch client={client} language={language} onSelectWindow={windows.select} />
           {selectedIsPinned && <div className="window-current-selection">
             <div className="window-list-summary"><span>{t("Current Window")}</span></div>
             {selectedNavigationRow ? renderWindow(selectedNavigationRow) : (
@@ -436,6 +438,7 @@ export function WindowWorkbench({
               )}
               {detail ? (
                 <WindowActivityFeed
+                  client={client}
                   key={detail.client_window_key}
                   detail={detail}
                   projects={projects}

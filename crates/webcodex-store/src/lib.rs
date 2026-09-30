@@ -17,6 +17,8 @@ mod agent_task;
 mod agent_wait;
 mod agent_wake;
 mod audit;
+mod trace_query;
+pub use trace_query::{ToolTraceCallRecord, ToolTraceQueryFilter};
 mod communication;
 mod connection_observation;
 mod external_observations;

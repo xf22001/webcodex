@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 use webcodex_core::runner_protocol::{normalize_rust_test_filter, ShellJobValidationStep};
 use webcodex_workspace::project_recipe::{
-    digest_project_recipe_files, read_project_recipe_file, resolve_project_recipe_root,
-    ProjectRecipeResolutionError,
+    digest_project_recipe_files, project_recipe_dependency_state_files, read_project_recipe_file,
+    resolve_project_recipe_root, ProjectRecipeResolutionError,
 };
 
 pub use webcodex_workspace::project_recipe::ProjectRecipeId as RecipeId;
@@ -212,7 +212,7 @@ fn canonical_adapter_steps(
 ) -> Result<(Vec<ShellJobValidationStep>, Vec<&'static str>), RecipeError> {
     let mut steps = Vec::with_capacity(checks.len());
     for check in checks {
-        let mut operation = crate::project_validation_operation(
+        let operation = crate::project_validation_operation(
             recipe.as_str(),
             *check,
             package_scope.map(<[String]>::to_vec),
@@ -224,12 +224,13 @@ fn canonical_adapter_steps(
                 RecipeError::new(code)
             }
         })?;
-        if let crate::ReadOnlyValidationOperation::Cargo(
-            crate::CargoReadOnlyValidationOperation::Test(options),
-        ) = &mut operation
-        {
-            options.filter = test_filter.map(str::to_string);
-        }
+        let operation = operation
+            .with_test_filter(
+                (*check == SemanticCheck::Test)
+                    .then_some(test_filter)
+                    .flatten(),
+            )
+            .map_err(RecipeError::new)?;
         let plan = operation.build_readonly_plan().map_err(|_| {
             if package_scope.is_some() {
                 RecipeError::new("validation_scope_invalid")
@@ -239,11 +240,9 @@ fn canonical_adapter_steps(
         })?;
         steps.push(plan.structured_step);
     }
-    let extra_digest_files = match recipe {
-        RecipeId::Rust => vec!["Cargo.lock"],
-        RecipeId::Go => vec!["go.sum"],
-        RecipeId::Node | RecipeId::Python => unreachable!("canonical project adapters are Rust/Go"),
-    };
+    let extra_digest_files = project_recipe_dependency_state_files(recipe)
+        .expect("canonical project validation adapters are Rust/Go")
+        .to_vec();
     Ok((steps, extra_digest_files))
 }
 
@@ -414,6 +413,11 @@ fn normalize_test_filter(
 ) -> Result<Option<String>, RecipeError> {
     match recipe {
         RecipeId::Rust => safe_rust_filter(filter),
+        RecipeId::Go => filter
+            .map(webcodex_core::runner_protocol::normalize_go_test_filter)
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|_| filter_unsupported()),
         _ => {
             reject_filter(filter)?;
             Ok(None)

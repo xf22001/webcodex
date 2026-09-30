@@ -79,9 +79,22 @@ Workflow Session lifecycle is independent from the durable `wc_goal_*` Goal doma
 
 A `session_ref` is only a short model selector. The Server owns a durable mapping scoped to the authenticated principal and pins the ref to one exact canonical Workflow Session incarnation. Resolving it produces the canonical `wc_sess_*` before business authorization/dispatch; the ordinary Project visibility, Session authority, lifecycle, and guard checks then run unchanged. The ref is not a credential, bearer capability, recorder identity, or "current/recent Session" inference. If the pinned Session disappears or its exact incarnation cannot be proven, the old ref fails closed and is never recycled or silently retargeted. Canonical Session ids remain authoritative for persistence, audit, diagnostics, internal joins, and explicit API/CLI consumers.
 
+Model-facing `session_id` input schemas must admit `~sN` wherever the kernel accepts a Session selector, including exact resume and card presentation. Canonical-id-only input regexes would let a strict Host reject the ref before resolution. This does not widen output `session_id`, persisted IDs, or other identity domains: outputs retain canonical identity, and the separate `session_ref` field carries the selector. Unknown, malformed, foreign, or stale refs still fail in the existing resolver and authorization path. A retained Closed Session follows the same lifecycle rules as its canonical id: historical reads may succeed, but a selector never reopens it or permits a mutation denied to the canonical id.
+
 Canonical Session identity/retention is separate from in-memory residency. `Active` and `Closed` are business lifecycle states; hot/cold residency and LRU ordering are implementation details and never lifecycle transitions. Active canonical Sessions currently remain materialized hot. The configured `hot_session_capacity_target` is therefore an observability target rather than destructive authority: when Active Session count exceeds it, the store retains those Active identities instead of deleting them or turning later exact resume into `unknown_session_id`. Restart restore follows the same rule and never trims Active rows merely to satisfy that target.
 
 Closed historical rows use an independent bounded retention policy. Closed Sessions are coldified to compact durable JSON and remain queryable while retained; mutation remains denied and retention never reopens them. `historical_session_retention_limit` bounds retained Closed history only. When that explicit historical policy expires an old Closed row, the current v2 ledger has no tombstone shape, so a later lookup can no longer distinguish retention expiry from an identity that was never present. Adding explicit retention-expired tombstones is a separate follow-up and must not be approximated by deleting Active identities. The compatibility `max_sessions` status field now aliases the hot capacity target and must not be interpreted as permission to delete durable Active Sessions.
+
+Access recency is maintained by a store-owned ordered index with separate Closed
+eligibility; it is not business lifecycle or activity. Exact reads update that
+index without appending ledger events or scheduling a write. The background
+whole-ledger writer coalesces ordinary asynchronous dirty marks for at most a
+fixed 20 ms scheduling window from the first pending mark. Progress never resets
+that deadline. Explicit generation flushes and shutdown bypass coalescing, while
+preserving existing write ordering and persistence-error reporting. I/O can take
+longer; this is neither a fsync nor a power-loss guarantee. Ledger version 2 and
+its per-cycle full snapshot format are unchanged. Implementation evidence and
+tradeoffs: [SessionStore access and writes](../implementation/session-store-access-and-write-scheduling.md).
 
 Per-Session event and message tails remain independently bounded (`DEFAULT_MAX_EVENTS_PER_SESSION` and `DEFAULT_MAX_MESSAGES_PER_SESSION`); preserving a canonical Active identity does not turn its event/message history into an unbounded archive. The persistence wire shape remains ledger version 2 because this change alters retention/restore policy, not the serialized Session row schema. Existing Session rows already deleted by an older Server cannot be reconstructed by upgrading: the fix prevents future destructive capacity loss from the first upgraded snapshot onward.
 
@@ -478,8 +491,10 @@ retention state. `include_extension_catalog` remains a separate caller-explicit
 selection-metadata preference.
 
 `guidance_profile` is a request-local presentation enum. Explicit selection wins;
-when omitted on MCP, `McpHostRuntimePolicy.profile` (configured by
-`WEBCODEX_MCP_HOST_PROFILE`) supplies the default, while non-MCP/internal omission
+when omitted on MCP, the current request's `McpHostRuntimePolicy.profile` supplies
+the default (`X-WebCodex-MCP-Profile`, otherwise deployment `WEBCODEX_MCP_HOST_PROFILE`).
+The MCP adapter creates an immutable runtime view; it never stores this preference
+in the Session or changes shared execution ownership. Non-MCP/internal omission
 falls back to `direct`. Available explicit values are `direct`, `host_code_mode` for
 Host-supplied native orchestration in every build, or `code_mode` for WebCodex nested
 orchestration only in Experimental Code Mode builds. Host-native guidance favors canonical batches and `search_and_read`,

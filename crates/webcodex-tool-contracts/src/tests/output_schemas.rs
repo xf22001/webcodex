@@ -64,6 +64,28 @@ fn structured_execution_output(
 }
 
 #[test]
+fn project_build_schema_accepts_same_job_queued_handoff() {
+    let schema = output_schema_for_tool("project_build");
+    let mut pending = structured_execution_output(
+        "project_build",
+        "queued",
+        false,
+        false,
+        true,
+        false,
+        Some("job-1"),
+        Some("agent_queued"),
+    );
+    pending["output"]["backend"] = serde_json::json!("rust");
+    pending["output"]["purpose"] = serde_json::json!("build");
+    pending["output"]["process_summary"] = serde_json::json!("cargo build");
+    pending["output"]["cwd"] = serde_json::json!(".");
+    pending["output"]["executor"] = serde_json::json!("agent");
+    test_support::validate_schema_instance(&pending, &schema)
+        .expect("project_build queued handoff must remain the same typed Job");
+}
+
+#[test]
 fn suggested_tool_call_schema_recognizer_is_strict_and_structural() {
     let valid_generated = json!({
         "follow_up_kind": "mechanically_followable",
@@ -3482,6 +3504,68 @@ fn browser_observation_schema_accepts_canonical_runner_output_and_rejects_privat
     let mut leaked_endpoint = effect;
     leaked_endpoint["debug_endpoint"] = json!("ws://127.0.0.1/devtools");
     assert!(act_ok(leaked_endpoint).is_err());
+}
+
+#[test]
+fn browser_batch_schema_is_closed_bounded_and_reports_partial_certainty() {
+    let schema = crate::input_schema_for_tool("browser_act");
+    let request = json!({
+        "action": "batch", "client_id": "mini",
+        "browser_id": "browser_abcdefghijklmnop", "page_id": "page_abcdefghijklmnop",
+        "operations": [
+            {"action": "input_text", "element_id": "element_abcdefghijklmnop", "text": "Alice"},
+            {"action": "select_option", "element_id": "element_abcdefghijklmnop", "option": "Bachelor"},
+            {"action": "set_value", "element_id": "element_abcdefghijklmnop", "value": "2027-06"},
+            {"action": "click", "element_id": "element_abcdefghijklmnop"},
+            {"action": "upload_file", "element_id": "element_abcdefghijklmnop", "project": "agent:mini:resume", "path": "resume.pdf"}
+        ]
+    });
+    test_support::validate_schema_instance(&request, &schema).unwrap();
+    let call: crate::tool_call::BrowserActToolCall =
+        serde_json::from_value(request.clone()).unwrap();
+    assert_eq!(call.action_name(), "batch");
+    for field in [
+        "page_id",
+        "browser_id",
+        "selector",
+        "xpath",
+        "backend_node_id",
+        "script",
+        "method",
+    ] {
+        let mut invalid = request.clone();
+        invalid["operations"][0][field] = json!("forbidden");
+        assert!(
+            test_support::validate_schema_instance(&invalid, &schema).is_err(),
+            "{field}"
+        );
+        assert!(serde_json::from_value::<crate::tool_call::BrowserActToolCall>(invalid).is_err());
+    }
+    for operations in [
+        vec![],
+        vec![request["operations"][0].clone(); 33],
+        vec![json!({"action": "navigate", "url": "https://example.test"})],
+    ] {
+        let mut invalid = request.clone();
+        invalid["operations"] = json!(operations);
+        assert!(test_support::validate_schema_instance(&invalid, &schema).is_err());
+    }
+    let output = crate::output_schema_for_tool("browser_act");
+    for (state, stopped_state, remaining) in [
+        ("completed", "not_started", 2),
+        ("outcome_unknown", "outcome_unknown", 1),
+        ("completed", "completed", 2),
+    ] {
+        test_support::validate_schema_instance(
+            &json!({"success": false, "error": "stopped", "output": {
+                "execution_state": state, "state_changed": true, "requested_count": 3,
+                "completed_count": 1, "stopped_at_index": 1, "remaining_count": remaining,
+                "stopped_execution_state": stopped_state, "needs_snapshot": true
+            }}),
+            &output,
+        )
+        .unwrap();
+    }
 }
 
 #[test]

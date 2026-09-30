@@ -70,7 +70,7 @@ fn input_normalization_schema() -> Value {
         "type": "object", "additionalProperties": false,
         "description": "Known lossless input normalization used to avoid a mechanical retry. No raw payload is repeated.",
         "properties": {
-            "code": {"type": "string", "enum": ["argv_to_args", "run_process_sh_c_to_run_shell", "run_process_bash_c_to_run_shell", "run_process_bash_lc_to_login_run_shell"]},
+            "code": {"type": "string", "enum": crate::ToolInputNormalizationCode::all()},
             "hint": {"type": "string", "maxLength": 80}
         },
         "required": ["code", "hint"]
@@ -966,6 +966,46 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                         }
                     }));
             }
+            Some(schema)
+        }
+        "project_build" => {
+            let mut schema = output_schema_for_tool("run_process")
+                .expect("run_process output schema must exist");
+            let properties = schema["properties"]["output"]["properties"]
+                .as_object_mut()
+                .expect("run_process output properties");
+            for inherited_only in [
+                "suggested_call",
+                "requested_surface",
+                "input_normalization",
+                "expectation_satisfied",
+            ] {
+                properties.remove(inherited_only);
+            }
+            properties.insert(
+                "backend".to_string(),
+                json!({
+                    "type": "string",
+                    "enum": ["rust", "go"],
+                    "description": "Runner-resolved canonical build backend."
+                }),
+            );
+            properties.insert(
+                "detected_backend".to_string(),
+                json!({
+                    "type": ["string", "null"],
+                    "enum": ["rust", "go", "node", "python", null],
+                    "description": "Detected recipe backend on a build-unavailable response."
+                }),
+            );
+            if let Some(source) = properties.get_mut("execution_source") {
+                source.as_object_mut().expect("execution_source schema").remove("enum");
+                source["const"] = json!("project_build");
+                source["description"] = json!("Canonical execution source is project_build.");
+            }
+            schema["properties"]["output"]["allOf"] =
+                structured_execution_lifecycle_constraints("project_build");
+            require_success_output_field(&mut schema, "backend");
             Some(schema)
         }
         "run_process" => {

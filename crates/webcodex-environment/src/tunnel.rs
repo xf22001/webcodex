@@ -242,10 +242,10 @@ fn tunnel_service_spec_for(
         provider.as_str().into(),
         "--json".into(),
     ];
-    if cfg!(windows) {
+    if cfg!(windows) && record.request.service_scope.is_system() {
         args.splice(0..0, ["--windows-service".into(), id.clone()]);
     }
-    let account = if cfg!(windows) {
+    let account = if cfg!(windows) && record.request.service_scope.is_system() {
         ServiceAccount::WindowsVirtual {
             name: format!("NT SERVICE\\{id}"),
         }
@@ -266,6 +266,7 @@ fn tunnel_service_spec_for(
         BTreeMap::new()
     };
     Ok(ServiceSpec {
+        scope: record.request.service_scope,
         id,
         component: Component::Tunnel,
         program: record.request.binaries.cli.clone(),
@@ -655,7 +656,7 @@ pub(crate) async fn wait_tunnel_readiness(spec: &ServiceSpec) -> SetupResultValu
         .await;
     }
 }
-fn read_health(path: &std::path::Path) -> SetupResultValue<(bool, bool)> {
+pub(crate) fn read_health(path: &std::path::Path) -> SetupResultValue<(bool, bool)> {
     use std::io::Read;
     let meta = std::fs::symlink_metadata(path).map_err(|_| SetupDiagnostic::io())?;
     if !meta.is_file() || meta.is_symlink() || meta.len() > 4096 {

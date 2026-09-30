@@ -3,6 +3,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod trace;
+pub use trace::ToolTraceQuery;
+
 pub use webcodex_core::workflow_session_contract::{ExecutionPurpose, ExecutionShell, SessionMode};
 
 /// Serde default helper: `true`. Used by `ToolCall` variants whose `allow_patch`

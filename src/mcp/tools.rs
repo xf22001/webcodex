@@ -2027,6 +2027,13 @@ pub(super) async fn handle_call(
     mut correlation_out: Option<&mut crate::tool_runtime::ToolCallCorrelation>,
 ) -> McpOutcome {
     let result_presentation = McpToolResultPresentation::from_request_params(&request_params);
+    if let (Some(lc), Some(name), Some(arguments)) = (
+        lifecycle.as_deref(),
+        request_params.get("name").and_then(Value::as_str),
+        request_params.get("arguments"),
+    ) {
+        lc.capture_request_diagnostic(name, arguments);
+    }
     let mut params: McpToolCallParams = match serde_json::from_value(request_params) {
         Ok(params) => params,
         Err(e) => {

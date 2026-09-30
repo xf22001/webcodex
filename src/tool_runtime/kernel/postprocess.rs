@@ -43,6 +43,7 @@ impl PostRecordResponse<'_> {
         if let Some(telemetry) = telemetry {
             telemetry.capture_canonical_result(&result);
         }
+        crate::tool_request_trace::capture_execution_evidence(self.tool_name, &result.output);
         let canonical_audit_output = canonical_audit_output(self.tool_name, &result.output);
         plan.project(&mut result);
         self.add_recorder_gap_hint(&mut result);
@@ -158,8 +159,8 @@ impl PostRecordResponse<'_> {
 
 fn canonical_audit_output(tool_name: &str, output: &Value) -> Option<Value> {
     match tool_name {
-        "run_process" | "run_script" | "run_skill_resource" | "run_shell" | "project_validate"
-        | "cargo_fmt" | "cargo_check" | "cargo_test" | "go_test" => Some(
+        "project_build" | "run_process" | "run_script" | "run_skill_resource" | "run_shell"
+        | "project_validate" | "cargo_fmt" | "cargo_check" | "cargo_test" | "go_test" => Some(
             crate::tool_runtime::tool_audit::canonical_execution_audit_result_for_tool(
                 tool_name, output,
             ),

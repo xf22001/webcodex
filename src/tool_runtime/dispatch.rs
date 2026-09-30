@@ -64,6 +64,7 @@ fn canonical_execution_project_binding(
         | ToolCall::CargoFmt { project, .. }
         | ToolCall::CargoCheck { project, .. }
         | ToolCall::CargoTest { project, .. }
+        | ToolCall::ProjectBuild { project, .. }
         | ToolCall::ProjectValidate { project, .. }
         | ToolCall::GoTest { project, .. }
         | ToolCall::ListProjectFiles { project, .. }
@@ -751,6 +752,7 @@ impl ToolRuntime {
                             | ToolCall::CargoFmt { .. }
                             | ToolCall::CargoCheck { .. }
                             | ToolCall::CargoTest { .. }
+                            | ToolCall::ProjectBuild { .. }
                             | ToolCall::ProjectValidate { .. }
                             | ToolCall::GoTest { .. }
                     ) {
@@ -811,13 +813,13 @@ impl ToolRuntime {
             }
             session_contract = super::sessions::session_tool_contract("run_shell");
             shell_normalization = Some(if login {
-                "run_process_bash_lc_to_login_run_shell"
+                webcodex_tool_contracts::ToolInputNormalizationCode::RunProcessBashLcToLoginRunShell
             } else {
                 match &call {
                     ToolCall::RunShell {
                         shell: Some(shell), ..
-                    } if shell.as_str() == "sh" => "run_process_sh_c_to_run_shell",
-                    _ => "run_process_bash_c_to_run_shell",
+                    } if shell.as_str() == "sh" => webcodex_tool_contracts::ToolInputNormalizationCode::RunProcessShCToRunShell,
+                    _ => webcodex_tool_contracts::ToolInputNormalizationCode::RunProcessBashCToRunShell,
                 }
             });
         }
@@ -1039,6 +1041,7 @@ impl ToolRuntime {
                     trusted_recording_session_id,
                     trusted_recording_session_project,
                     logical_invocation_id,
+                    effective_return_timing.max_handoff_secs(),
                     protocol_capabilities,
                     correlation,
                     &mut bootstrap_context,
@@ -1057,15 +1060,8 @@ impl ToolRuntime {
             result.output["requested_surface"] = serde_json::json!("run_process");
             result.output["execution_source"] = serde_json::json!("run_shell");
             if result.success {
-                let hint = match code {
-                    "run_process_bash_lc_to_login_run_shell" => {
-                        "normalized run_process bash -lc → run_shell(login=true)"
-                    }
-                    "run_process_sh_c_to_run_shell" => "normalized run_process sh -c → run_shell",
-                    _ => "normalized run_process bash -c → run_shell",
-                };
                 result.output["input_normalization"] =
-                    serde_json::json!({"code": code, "hint": hint});
+                    serde_json::json!({"code": code, "hint": code.model_hint()});
             }
         }
         let permission = permission.filter(|_| {
@@ -1162,6 +1158,7 @@ impl ToolRuntime {
         trusted_recording_session_id: Option<&str>,
         trusted_recording_session_project: Option<&str>,
         _logical_invocation_id: Option<&str>,
+        structured_handoff_max_secs: Option<u64>,
         protocol_capabilities: super::kernel::ToolProtocolCapabilities,
         correlation: &mut super::window_activity::ToolCallCorrelation,
         bootstrap_context: &mut Option<super::coding_task::BootstrapContext>,
@@ -1472,6 +1469,28 @@ impl ToolRuntime {
             | ToolCall::RunShell { .. }) => {
                 self.dispatch_shell_tool(call, ssh_resource, validation_assertion_name, auth)
                     .await
+            }
+
+            ToolCall::ProjectBuild {
+                project,
+                session_id,
+                cwd,
+                adapter,
+                scope,
+                timeout_secs,
+            } => {
+                self.project_build(
+                    project,
+                    session_id,
+                    cwd,
+                    adapter,
+                    scope,
+                    timeout_secs,
+                    structured_handoff_max_secs,
+                    ssh_resource.as_deref(),
+                    auth,
+                )
+                .await
             }
 
             call @ (ToolCall::OpenSessionShell { .. }
@@ -1885,6 +1904,7 @@ impl ToolRuntime {
 
             ToolCall::StartAgentTaskCodingRun {
                 project,
+                attempt_ref,
                 task_id,
                 attempt_id,
                 assignee_agent_id,
@@ -1896,9 +1916,10 @@ impl ToolRuntime {
             } => {
                 // Keep this relatively large orchestration future off the shared dispatch
                 // future's inline state so unrelated tool calls do not inherit its stack cost.
-                Box::pin(self.start_agent_task_coding_run(
+                Box::pin(self.start_agent_task_coding_run_with_selector(
                     auth,
                     project,
+                    attempt_ref,
                     task_id,
                     attempt_id,
                     assignee_agent_id,

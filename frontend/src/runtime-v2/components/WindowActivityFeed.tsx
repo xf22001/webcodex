@@ -1,3 +1,5 @@
+import type { RuntimeV2Client } from "../api/client.js";
+import { TraceCallDetails } from "./TraceCallDetails.js";
 import { CopyIdentity } from "./ui/CopyIdentity.js";
 import { displayProjectPath } from "../../ui/projectPresentation.js";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
@@ -10,6 +12,7 @@ import {
 } from "../model/windowSessions.js";
 
 type Props = {
+  client?: RuntimeV2Client;
   detail: WindowDetail;
   projects: ProjectRow[];
   language: RuntimeLanguage;
@@ -19,6 +22,7 @@ type Props = {
 };
 
 export function WindowActivityFeed({
+  client,
   detail,
   projects,
   language,
@@ -38,6 +42,7 @@ export function WindowActivityFeed({
   const calls = [
     ...detail.activity.map((row, index) => ({
       key: row.server_trace_id || `completed-${row.started_at_ms}-${index}`,
+      traceRef: row.server_trace_id,
       tool: row.tool_name || row.method,
       project: row.project,
       startedAt: row.started_at_ms,
@@ -53,6 +58,7 @@ export function WindowActivityFeed({
     })),
     ...detail.active_requests.filter((row) => !completedTraces.has(row.server_trace_id)).map((row) => ({
       key: row.server_trace_id,
+      traceRef: row.server_trace_id,
       tool: row.tool_name || row.method,
       project: row.project,
       startedAt: row.started_at_ms,
@@ -192,6 +198,7 @@ export function WindowActivityFeed({
                   </>
                 )}
               </div>
+              {client && call.traceRef && <TraceCallDetails client={client} traceRef={call.traceRef} language={language} />}
             </article>
           );
         })}

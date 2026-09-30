@@ -2,6 +2,7 @@ mod coding_agents;
 mod connections;
 mod diagnostics;
 mod environment;
+mod managed_instructions;
 mod mcp_providers;
 #[cfg(test)]
 mod projectless_tests;
@@ -73,6 +74,7 @@ struct ChatGptActivityProbe {
 pub struct AppState {
     core: Mutex<Option<DesktopCore>>,
     desktop_data_dir: crate::desktop_data_dir::DesktopDataDir,
+    managed_instructions: Arc<crate::managed_instructions::ManagedInstructions>,
     ssh_resources: Mutex<crate::ssh_resources::SshResourcesManager>,
     published: Arc<RwLock<DesktopStateSnapshot>>,
     supervisor: SharedSupervisor,
@@ -100,6 +102,9 @@ impl AppState {
         resource_dir: PathBuf,
     ) -> DesktopResult<Self> {
         let data_dir = desktop_data_dir.effective.clone();
+        let managed_instructions = Arc::new(crate::managed_instructions::ManagedInstructions::new(
+            data_dir.clone(),
+        ));
         let updates = crate::updates::UpdateManager::new(data_dir.clone());
         let core = DesktopCore::new(data_dir, resource_dir)?;
         let published = Arc::clone(&core.published);
@@ -109,6 +114,7 @@ impl AppState {
         Ok(Self {
             core: Mutex::new(Some(core)),
             desktop_data_dir,
+            managed_instructions,
             ssh_resources: Mutex::new(crate::ssh_resources::SshResourcesManager::default()),
             published,
             supervisor,
@@ -280,6 +286,7 @@ impl AppState {
         project_path: Option<&str>,
     ) -> DesktopResult<DesktopStateSnapshot> {
         self.configure_environment(crate::models::EnvironmentInput {
+            service_scope: None,
             mode: "create".into(),
             server_url: None,
             project_path: project_path.map(str::to_owned),
@@ -343,6 +350,7 @@ impl AppState {
         project_path: &str,
     ) -> DesktopResult<DesktopStateSnapshot> {
         self.configure_environment(crate::models::EnvironmentInput {
+            service_scope: None,
             mode: "join".into(),
             server_url: Some(server_url.to_owned()),
             project_path: Some(project_path.to_owned()),
@@ -3308,7 +3316,10 @@ fn preferred_connection(config: &StoredDesktopConfig) -> RegularConnectionPrefer
 fn apply_config_projection(snapshot: &mut DesktopStateSnapshot, config: &StoredDesktopConfig) {
     snapshot.persistent_environment = config.persistent_environment.clone();
     snapshot.can_repair_runner_credential = cfg!(windows)
-        && config.persistent_environment.is_some()
+        && config
+            .persistent_environment
+            .as_deref()
+            .is_some_and(environment::runner_uses_system_service)
         && config
             .topology
             .as_ref()

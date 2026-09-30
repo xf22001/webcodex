@@ -938,6 +938,10 @@ impl ToolRuntime {
         // pre-execution audit projection and later dispatch. Malformed input is
         // recorded with an empty request projection rather than reparsed through
         // a schema-filter fallback.
+        crate::tool_request_trace::capture_effective_arguments(
+            &request.tool_name,
+            &concrete_arguments,
+        );
         let parsed_call =
             ToolCall::from_tool_name_with_normalization(&request.tool_name, concrete_arguments);
         let session_log_arguments = parsed_call
@@ -1112,12 +1116,8 @@ impl ToolRuntime {
             .await;
         if result.success {
             if let Some(code) = input_normalization {
-                let hint = match code {
-                    "argv_to_args" => "normalized argv→args",
-                    _ => unreachable!("parser returns only stable known normalization codes"),
-                };
                 result.output["input_normalization"] =
-                    serde_json::json!({"code": code, "hint": hint});
+                    serde_json::json!({"code": code, "hint": code.model_hint()});
             }
         }
         if let Some(control) = control.as_mut() {

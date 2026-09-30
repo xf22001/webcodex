@@ -999,10 +999,20 @@ fn runner_job_is_active(status: &str) -> bool {
 fn job_prestart_lifecycle(operation: &RunnerJobOperation) -> Option<ShellCommandExecutionState> {
     match operation {
         RunnerJobOperation::StartShell(_)
+        | RunnerJobOperation::StartBuild(_)
         | RunnerJobOperation::StartProcess(_)
         | RunnerJobOperation::StartDetachedProcess(_)
         | RunnerJobOperation::StartScript(_)
         | RunnerJobOperation::StartSkillResource(_) => Some(ShellCommandExecutionState::NotStarted),
+        RunnerJobOperation::StartValidation(operation)
+            if operation
+                .context
+                .validation
+                .as_ref()
+                .is_some_and(|metadata| metadata.project_validation.is_some()) =>
+        {
+            Some(ShellCommandExecutionState::NotStarted)
+        }
         RunnerJobOperation::StartValidation(_) | RunnerJobOperation::Stop { .. } => None,
     }
 }
@@ -1016,6 +1026,7 @@ pub(crate) fn decode_failure_prestart_lifecycle(
     matches!(
         request.kind.as_str(),
         "start_job"
+            | "start_build_job"
             | "start_process_job"
             | "start_detached_process_job"
             | "start_script_job"
@@ -1374,6 +1385,7 @@ fn validate_runner_job_context_operation(
         !matches!(
             shell,
             "sh" | "bash"
+                | "bash_login"
                 | "powershell"
                 | "python"
                 | "javascript"
@@ -1446,6 +1458,32 @@ fn validate_runner_job_context_operation(
     match operation {
         RunnerJobOperation::StartShell(operation) => {
             runner_protocol::validate_raw_shell_wire_command(&operation.command)?;
+        }
+        RunnerJobOperation::StartBuild(operation) => {
+            if context.ssh_resource.is_some() {
+                return Err("typed project build Job request shape is invalid".to_string());
+            }
+            runner_protocol::validate_process_argv(&operation.process)?;
+            validate_runner_structured_common(
+                operation.cwd.as_deref(),
+                None,
+                operation.timeout_secs,
+                runner_protocol::PROCESS_TIMEOUT_MAX_SECS,
+            )?;
+            if !operation.provenance.is_valid() {
+                return Err("project build Job provenance is invalid".to_string());
+            }
+            let canonical = webcodex_core::project_build::canonical_project_build_process(
+                &operation.provenance.backend,
+                &operation.provenance.request,
+            )
+            .map_err(str::to_string)?;
+            if canonical != operation.process
+                || webcodex_core::project_build::project_build_invocation_digest(&operation.process)
+                    != operation.provenance.invocation_digest
+            {
+                return Err("project build Job process does not match provenance".to_string());
+            }
         }
         RunnerJobOperation::StartProcess(operation)
         | RunnerJobOperation::StartDetachedProcess(operation) => {
@@ -2336,6 +2374,13 @@ impl JobManager {
                 &start.project_registry_dir,
                 &start.operation,
             )
+            .and_then(|_| {
+                super::project_build::fence(
+                    &start.policy,
+                    &start.project_registry_dir,
+                    &start.operation,
+                )
+            })
             .err();
             let immediate_failure = if let Some(error) = admission_failure {
                 Some(error)
@@ -2420,7 +2465,8 @@ impl JobManager {
         }
         match &start.operation {
             RunnerJobOperation::StartDetachedProcess(_) => self.start_detached_process_job(start),
-            RunnerJobOperation::StartProcess(_)
+            RunnerJobOperation::StartBuild(_)
+            | RunnerJobOperation::StartProcess(_)
             | RunnerJobOperation::StartScript(_)
             | RunnerJobOperation::StartSkillResource(_) => self.start_structured_job(start),
             RunnerJobOperation::StartShell(_) | RunnerJobOperation::StartValidation(_) => {
@@ -2651,7 +2697,8 @@ impl JobManager {
         let job_id = operation.job_id().to_string();
         if !matches!(
             operation,
-            RunnerJobOperation::StartProcess(_)
+            RunnerJobOperation::StartBuild(_)
+                | RunnerJobOperation::StartProcess(_)
                 | RunnerJobOperation::StartScript(_)
                 | RunnerJobOperation::StartSkillResource(_)
         ) {
@@ -2678,6 +2725,15 @@ impl JobManager {
         let worker_guard = self.workers.enter();
         std::thread::spawn(move || {
             let _worker_guard = worker_guard;
+            // An admitted build can wait in the local queue while its recipe,
+            // lockfile or registered root changes. Recheck on the worker before
+            // entering the native process path, not only when enqueueing it.
+            if let Err(error) =
+                super::project_build::fence(&policy, &project_registry_dir, &operation)
+            {
+                manager.fail_job(&operation, error, None);
+                return;
+            }
             let started_manager = manager.clone_for_worker();
             let started_job_id = job_id.clone();
             let on_started = || {
@@ -2691,6 +2747,22 @@ impl JobManager {
                 );
             };
             let result = match &operation {
+                RunnerJobOperation::StartBuild(request) => {
+                    run_process_with_profiles_and_execution_state_with_start_hook(
+                        generation,
+                        &policy,
+                        &shell,
+                        &project_registry_dir,
+                        &manager.prepared_profiles,
+                        request.cwd.as_deref(),
+                        &request.process.executable,
+                        &request.process.args,
+                        None,
+                        request.timeout_secs,
+                        Some(stop_requested.as_ref()),
+                        Some(&on_started),
+                    )
+                }
                 RunnerJobOperation::StartProcess(request) => {
                     run_process_with_profiles_and_execution_state_with_start_hook(
                         generation,
@@ -2820,6 +2892,17 @@ impl JobManager {
             ),
             _ => unreachable!("shell Job starter received non shell/validation operation"),
         };
+        if validation {
+            // A project validation can wait in the local queue after its
+            // admission fence. Recheck the retained project plan after that
+            // wait and before entering the native validation process path.
+            if let Err(error) =
+                super::validation::project::fence(&policy, &project_registry_dir, &operation)
+            {
+                self.fail_job(&operation, error, None);
+                return;
+            }
+        }
         let capture_cargo_test_count = context.validation.as_ref().is_some_and(|metadata| {
             metadata.adapter == "cargo_test"
                 && metadata.kind == "test"

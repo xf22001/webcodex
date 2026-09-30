@@ -38,6 +38,7 @@ mod git;
 mod runner_authorization;
 mod runner_config;
 mod runner_instructions;
+mod trace_diagnostics;
 #[cfg(test)]
 pub(crate) use git::{framed_clean_show_changes_test_stdout, framed_show_changes_test_block};
 mod git_committed;
@@ -71,6 +72,7 @@ mod patch_tools;
 pub(crate) mod peer_collaboration;
 pub(crate) mod permissions;
 mod process;
+mod project_build;
 mod project_resolution;
 pub(crate) mod window_collaboration;
 pub(crate) use project_resolution::ResolvedProject;

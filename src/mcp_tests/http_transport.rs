@@ -1,4 +1,6 @@
 use super::*;
+#[path = "http_transport/metadata_trace.rs"]
+mod metadata_trace;
 
 fn with_mcp_recording_session(mut arguments: Value, session_id: &str) -> Value {
     arguments
@@ -674,7 +676,7 @@ async fn mcp_tools_call_writes_a_summary_action_audit_row() {
         "summary must not embed tool output: {summary}"
     );
     let telemetry = &summary["model_ergonomics"];
-    assert_eq!(telemetry["schema_version"], 12);
+    assert_eq!(telemetry["schema_version"], 13);
     assert_eq!(telemetry["tool_name"], "runtime_status");
     assert_eq!(telemetry["tool_category"], "runtime");
     assert_eq!(telemetry["success"], true);
