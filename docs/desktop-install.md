@@ -2,6 +2,8 @@
 
 [English](desktop-install.md) | [简体中文](desktop-install.zh-CN.md)
 
+Desktop supports Simplified Chinese, Traditional Chinese (`zh-TW`), English, Japanese, Korean, German, and French. Change language in Settings; the selection persists and controls activity time formatting. Traditional Chinese uses dedicated catalogs. Raw backend diagnostics and tray menus remain English; file dialogs follow the operating system language.
+
 For normal Windows or macOS personal use, **WebCodex Desktop + the official
 OpenAI Secure Tunnel is the recommended path**. WebCodex Desktop runs the local
 Server and Runner; you send coding requests from **ChatGPT Web**. You do not
@@ -214,6 +216,8 @@ change project access or Runner configuration to work around a network error.
 After saving any required change, continue to step 6.
 
 ## 6. Start the official OpenAI Secure Tunnel
+
+**Start automatically** in each connection controls restoration when Desktop opens. For a Desktop-managed local Runtime, enabled connections with autostart resume after Runtime becomes ready, including when Runtime autostart is off but Runtime is already running. **Stop** disables that connection, so reopening does not restart it. Persistent environments delegate Tunnel lifecycle to system services; opening Desktop observes their actual status without restarting stopped services.
 
 Open **Connection**, select **OpenAI Secure Tunnel**, then click **Start secure tunnel**. Selection alone does not start or stop processes. If an existing tunnel reports an error, stop it before starting again; failures remain visible with a retry path. When local handoff is ready, Desktop should show wording such as:
 

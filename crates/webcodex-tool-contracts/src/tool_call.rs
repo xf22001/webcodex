@@ -8,8 +8,8 @@
 use super::tool_inputs::CheckpointValidationInput;
 use super::tool_inputs::{
     default_true, deserialize_optional_coding_guidance_profile, ApplyFileChangeInput,
-    CodingGuidanceProfile, ExecutionPurpose, ExecutionShell, GoalLifecycleInput, SessionMode,
-    WorkOnProjectMode,
+    CodingGuidanceProfile, ExecutionPurpose, ExecutionShell, GoalLifecycleInput,
+    SessionLifecycleInput, SessionMode, WorkOnProjectMode,
 };
 use crate::{lookup_tool_definition, model_visible_tool_names_csv};
 use schemars::JsonSchema;
@@ -438,13 +438,7 @@ fn deserialize_optional_read_revision<'de, D>(deserializer: D) -> Result<Option<
 where
     D: serde::Deserializer<'de>,
 {
-    let revision = u64::deserialize(deserializer)?;
-    if !(1..=9_007_199_254_740_991_u64).contains(&revision) {
-        return Err(serde::de::Error::custom(
-            "expected_read_revision must be a positive JSON-safe integer",
-        ));
-    }
-    Ok(Some(revision))
+    crate::read_revision::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_non_empty_job_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -1669,6 +1663,22 @@ pub enum ToolCall {
         path: String,
     },
 
+    /// Discover retained caller-authorized Workflow Sessions in one exact Project.
+    /// Discovery never selects, resumes, creates, or records into a Session implicitly.
+    ListSessions {
+        #[schemars(length(min = 1))]
+        project: String,
+        /// Omit to list both active and retained closed Sessions.
+        #[serde(default)]
+        lifecycle: Option<SessionLifecycleInput>,
+        /// Inventory offset; concurrent Session changes can change page membership.
+        #[serde(default)]
+        offset: Option<usize>,
+        /// Defaults to 10; the Server normalizes values to 1..20.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+
     /// Return a bounded structured summary of recorded session ledger data for
     /// an explicit session id.
     SessionSummary {
@@ -2107,12 +2117,17 @@ pub enum ToolCall {
         timeout_ms: Option<u64>,
     },
 
-    /// Execute one native process directly from a structured executable and
-    /// argv. No shell parser, environment mutation, PTY, or durable handoff is
-    /// part of this synchronous v1 contract.
+    /// Execute native argv. Ordinary calls use bounded synchronous handoff;
+    /// explicit interactive pipes return one public Job and retain stdin.
     RunProcess {
         /// Configured project id.
         project: String,
+        /// Keep a pipe open for subsequent job_write_input calls. No PTY or shell
+        /// Session. Returns the same public Job without waiting for input-dependent
+        /// completion. Requires job_process_input_v1; incompatible with initial stdin.
+        /// Send required input before waiting for terminal completion.
+        #[serde(default)]
+        interactive: bool,
         /// Executable name or path, resolved through the Runner execution environment. Native executables
         /// use literal argv. Windows .cmd/.bat shims use Runner-owned cmd.exe conversion with AutoRun and
         /// delayed expansion disabled; no model shell string. Batch paths/arguments reject quotes, %, !, ^,
@@ -2236,6 +2251,14 @@ pub enum ToolCall {
         /// telemetry bodies.
         #[schemars(length(min = 1, max = 65536))]
         instruction: String,
+        /// Optional exact authorized Workflow Session or session_ref to quote as bounded recovery
+        /// context for this Run. Requires runtime:read and matching Project/Session authority;
+        /// does not resume the source Session, select a recorder, or grant execution authority.
+        /// The resulting snapshot is part of the initiation intent; if it changes under the same
+        /// idempotency_key, observe the original Run rather than dispatching a replacement.
+        #[serde(default)]
+        #[schemars(regex(pattern = "^(wc_sess_[A-Za-z0-9_.-]+|~s[1-9][0-9]*)$"))]
+        context_session_id: Option<String>,
         /// Optional explicit run-level ACP config overrides. Omission or {} sends no caller-requested
         /// set_config_option calls; Runner-owned forced_config policy may still apply its own values.
         /// Every caller key/value must be live-advertised and operator-allowed before prompt dispatch.
@@ -2860,6 +2883,10 @@ pub enum ToolCall {
         /// Optional bounded Cargo package selectors or project-relative Go package patterns.
         #[serde(default)]
         scope: Option<webcodex_core::project_build::ProjectBuildScope>,
+        /// Optional portable dependency-resolution policy. locked forbids adapters from
+        /// repairing dependency selection state; it does not imply offline execution.
+        #[serde(default)]
+        dependency_policy: Option<webcodex_core::project_build::ProjectDependencyPolicy>,
         /// Total build execution budget, default 1800 seconds, clamped to 7 days.
         /// Host handoff timing never extends this budget or starts a second build.
         #[serde(default)]
@@ -2886,6 +2913,10 @@ pub enum ToolCall {
         /// scope is not supported.
         #[serde(default)]
         scope: Option<webcodex_core::project_validation::ProjectValidationScope>,
+        /// Optional portable dependency-resolution policy. locked forbids adapters from
+        /// repairing dependency selection state; it does not imply offline execution.
+        #[serde(default)]
+        dependency_policy: Option<webcodex_core::project_validation::ProjectDependencyPolicy>,
         /// Test-only selector and count postconditions. Rust uses a libtest substring;
         /// Go uses native -run regexp. Omission preserves unfiltered positive-test proof.
         #[serde(default)]
@@ -4234,6 +4265,28 @@ pub enum ToolCall {
         /// selection.
         #[serde(default)]
         shell: Option<ExecutionShell>,
+    },
+
+    /// Send exact keyed bytes or EOF to an existing interactive Job.
+    JobWriteInput {
+        /// Exact authorized Project selector of the existing Job.
+        project: String,
+        /// Existing public interactive Job; never a process name or PID.
+        #[schemars(length(min = 1, max = 160))]
+        job_id: String,
+        /// Stable per-Job identity for this exact input and EOF choice. Reuse with
+        /// identical bytes to reconcile; changing bytes conflicts. Never choose a
+        /// new key merely because delivery is pending or unknown.
+        #[schemars(length(min = 1, max = 128))]
+        input_id: String,
+        /// UTF-8 bytes written literally to the pipe, at most 65536. Omit only for EOF.
+        #[serde(default)]
+        #[schemars(length(max = 65536))]
+        data: String,
+        /// Close stdin after these bytes. Empty data without close is rejected;
+        /// use observe_jobs for observation, not this effectful tool.
+        #[serde(default)]
+        close: bool,
     },
 
     /// Stop a bounded runtime job after explicit confirmation.
@@ -5776,6 +5829,7 @@ impl ToolCall {
             Self::WorkResultActivityDetail { .. } => "work_result_activity_detail",
             Self::WorkResultSendMessage { .. } => "work_result_send_message",
             Self::ChangesFileDiff { .. } => "changes_file_diff",
+            Self::ListSessions { .. } => "list_sessions",
             Self::SessionSummary { .. } => "session_summary",
             Self::UpdateSessionContext { .. } => "update_session_context",
             Self::CloseSession { .. } => "close_session",
@@ -5902,6 +5956,7 @@ impl ToolCall {
             Self::MemoryScopePurge { .. } => "memory_scope_purge",
             Self::RunJob { .. } => "run_job",
             Self::StopJob { .. } => "stop_job",
+            Self::JobWriteInput { .. } => "job_write_input",
             Self::ObserveJobs { .. } => "observe_jobs",
             Self::WaitForJobReadiness { .. } => "wait_for_job_readiness",
             Self::WaitForJobTerminal { .. } => "wait_for_job_terminal",
@@ -6113,7 +6168,8 @@ impl ToolCall {
 
     pub fn project(&self) -> Option<&str> {
         match self {
-            Self::RecordExternalObservation { project, .. }
+            Self::ListSessions { project, .. }
+            | Self::RecordExternalObservation { project, .. }
             | Self::ListExternalObservations { project, .. } => Some(project),
             #[cfg(feature = "experimental-code-mode")]
             Self::CodeModeExec { project, .. }
@@ -6161,6 +6217,7 @@ impl ToolCall {
             | Self::MemoryDelete { project, .. }
             | Self::RunJob { project, .. }
             | Self::StopJob { project, .. }
+            | Self::JobWriteInput { project, .. }
             | Self::ListProjectFiles { project, .. }
             | Self::ListProjectTrackedFiles { project, .. }
             | Self::ProjectOverview { project, .. }

@@ -92,6 +92,18 @@ export function useDesktopWorkspace() {
     setState(next);
   }, []);
 
+  const observeFailedOperation = useCallback(async (value: unknown, current: () => boolean = () => true) => {
+    if (!current()) return;
+    setError(normalizeDesktopError(value));
+    const observedVersion = stateVersionRef.current;
+    try {
+      const terminal = await desktopApi.getState();
+      if (current() && stateVersionRef.current === observedVersion) commitState(terminal);
+    } catch {
+      // Preserve the original failure if this best-effort observation fails.
+    }
+  }, [commitState]);
+
   const commitChatgptActivity = useCallback((next: DesktopState) => {
     stateVersionRef.current += 1;
     setState((current) => {
@@ -139,16 +151,24 @@ export function useDesktopWorkspace() {
           initial.runtime_autostart
           && initial.topology.experience === "full",
         );
-        if (!resumeExisting) return;
+        const resumeConnections = !resumeExisting
+          && initial.topology.experience === "full"
+          && initial.topology.server.kind === "local"
+          && initial.readiness.runtime_ready
+          && !initial.quick_share
+          && initial.connections?.profiles.some(profile => profile.enabled && profile.autostart && !profile.process_started);
+        if (!resumeExisting && !resumeConnections) return;
 
         setRefreshing(true);
         try {
-          const next = await desktopApi.resumeSavedRuntime();
+          const next = resumeExisting
+            ? await desktopApi.resumeSavedRuntime()
+            : await desktopApi.resumeSavedConnections();
           if (cancelled) return;
           // Backend reconciliation owns every profile's autostart policy.
           commitState(next);
         } catch (value) {
-          if (!cancelled) setError(normalizeDesktopError(value));
+          await observeFailedOperation(value, () => !cancelled);
         } finally {
           if (!cancelled) setRefreshing(false);
         }
@@ -159,7 +179,7 @@ export function useDesktopWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [commitState, startupAttempt]);
+  }, [commitState, observeFailedOperation, startupAttempt]);
 
   useEffect(() => {
     if (!hasLoadedState) return;
@@ -243,7 +263,7 @@ export function useDesktopWorkspace() {
     try {
       commitState(await operation());
     } catch (value) {
-      setError(normalizeDesktopError(value));
+      await observeFailedOperation(value);
     }
   };
 
@@ -262,7 +282,7 @@ export function useDesktopWorkspace() {
     try {
       commitState(await desktopApi.resumeSavedRuntime());
     } catch (value) {
-      setError(normalizeDesktopError(value));
+      await observeFailedOperation(value);
     } finally {
       setRefreshing(false);
     }

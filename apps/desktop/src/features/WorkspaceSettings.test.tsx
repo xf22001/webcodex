@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,7 +106,6 @@ describe("workspace configuration boundaries", () => {
   it("applies exact-target instruction and Skill paths without Runner restart", async () => {
     render(wrap(<ExtensionsPanel state={state} onState={onState} />));
     fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Manage" }));
     const input = await screen.findByLabelText("Global instruction files");
     fireEvent.change(input, { target: { value: "/fixture/new.md" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -116,11 +115,42 @@ describe("workspace configuration boundaries", () => {
     expect(api.restartOwnedRunner).not.toHaveBeenCalled();
   });
 
+  it("stages picked Skill folders before an explicit exact-target save", async () => {
+    const observed = structuredClone(settings.paths);
+    dialog.open.mockResolvedValueOnce("/fixture/picked-skills");
+    render(wrap(<ExtensionsPanel state={state} onState={onState} />));
+    fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
+    await screen.findByLabelText("Configured Skill roots");
+    fireEvent.click(screen.getByRole("button", { name: "Add Skill Folder" }));
+    await waitFor(() => expect(screen.getByLabelText("Configured Skill roots 2")).toHaveValue("/fixture/picked-skills"));
+    expect(dialog.open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }));
+    expect(api.updateRunnerSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.updateRunnerSettings).toHaveBeenCalledExactlyOnceWith(target, observed, { ...observed, skill_roots: [...observed.skill_roots, "/fixture/picked-skills"] }));
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
+  it("keeps path drafts visible through a failed settings refresh and permits recovery", async () => {
+    render(wrap(<ExtensionsPanel state={state} onState={onState} />));
+    fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
+    const input = await screen.findByLabelText("Configured Skill roots");
+    fireEvent.change(input, { target: { value: "/fixture/unsaved-skills" } });
+    api.runnerSettings.mockRejectedValueOnce(new Error("fixture settings unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Runner settings could not be read");
+    expect(input).toHaveValue("/fixture/unsaved-skills");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.click(within(alert).getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(input).toHaveValue("/fixture/unsaved-skills");
+    expect(api.updateRunnerSettings).not.toHaveBeenCalled();
+  });
+
   it("validates native Plugin arguments and writes only a new explicit registration", async () => {
     render(wrap(<ExtensionsPanel state={state} onState={onState} />));
-    fireEvent.click(screen.getByRole("tab", { name: "MCP Providers" }));
-    fireEvent.click(screen.getByText("Advanced: Native Tool Plugins", { selector: "summary" }));
-    fireEvent.click(await screen.findByText("Add a native Tool Plugin"));
+    fireEvent.click(screen.getByRole("tab", { name: "Native Plugins" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add a native Tool Plugin" }));
     fireEvent.change(screen.getByLabelText("Plugin ID"), { target: { value: "new-plugin" } });
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "New plugin" } });
     fireEvent.change(screen.getByLabelText("Executable"), { target: { value: "node" } });
@@ -133,6 +163,23 @@ describe("workspace configuration boundaries", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save registration" }));
     await waitFor(() => expect(api.addRunnerPlugin).toHaveBeenCalledWith(target, { id: "new-plugin", name: "New plugin", command: "node", args: ["/fixture/plugin.js"], cwd: null }));
     expect(args).toHaveValue("[]");
+  });
+
+  it("keeps registration failure feedback inside the Plugin editor and clears write-only arguments", async () => {
+    api.addRunnerPlugin.mockRejectedValueOnce({ code: "runner_settings_changed", message: "Settings changed", next_action: "Refresh" });
+    render(wrap(<ExtensionsPanel state={state} onState={onState} />));
+    fireEvent.click(screen.getByRole("tab", { name: "Native Plugins" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add a native Tool Plugin" }));
+    const editor = await screen.findByRole("dialog", { name: "Add a native Tool Plugin" });
+    fireEvent.change(within(editor).getByLabelText("Plugin ID"), { target: { value: "new-plugin" } });
+    fireEvent.change(within(editor).getByLabelText("Display name"), { target: { value: "New plugin" } });
+    fireEvent.change(within(editor).getByLabelText("Executable"), { target: { value: "node" } });
+    fireEvent.change(within(editor).getByLabelText("Arguments (JSON array)"), { target: { value: '["fixture-argument"]' } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save registration" }));
+    expect(await within(editor).findByRole("alert")).toHaveTextContent("Refresh");
+    expect(within(editor).getByLabelText("Arguments (JSON array)")).toHaveValue("[]");
+    expect(api.addRunnerPlugin).toHaveBeenCalledTimes(1);
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
   });
 
   it("identifies WebCodex Runner as the Computer Use execution owner and keeps Runner TCC status tri-state", async () => {
@@ -154,6 +201,10 @@ describe("workspace configuration boundaries", () => {
     await waitFor(() => expect(api.computerPermissions).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByText("WebCodex Runner")).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Show Runner in Finder" })).not.toBeInTheDocument();
+    expect(await screen.findByText("Desktop cannot check system permissions on this platform. This does not establish whether desktop tools are available.")).toBeInTheDocument();
+    expect(screen.getByText(/confirm that this device is signed in to a desktop/)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(api.requestComputerPermission).not.toHaveBeenCalled();
   });
 
   it("opens the permission explanation only after foreground observation, never auto-grants", async () => {
@@ -186,7 +237,7 @@ describe("workspace configuration boundaries", () => {
 it("preserves capability-first tabs and Coding-only authorization after the shared UI merge", async () => {
   api.runnerCapabilityAuthorization.mockResolvedValue({ target, can_authorize: true, coding_agents: false, ssh_resources: false });
   render(wrap(<ExtensionsPanel state={state} onState={onState} />));
-  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Coding Agents", "SSH Resources", "MCP Providers", "Skills", "Instructions"]);
+  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Coding Agents", "SSH Resources", "MCP servers", "Native Plugins", "Skills", "Instructions"]);
   expect(screen.getByRole("tab", { name: "Coding Agents" })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("button", { name: /^Projects:/ })).not.toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "Authorize Runner Capabilities" }));

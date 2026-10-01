@@ -145,7 +145,18 @@ impl ToolCallAuditProjection for ToolCall {
                 "source_bytes": source.len(),
                 "timeout_ms": timeout_ms,
             }),
+            Self::JobWriteInput {
+                project,
+                job_id,
+                input_id,
+                data,
+                close,
+            } => serde_json::json!({
+                "project":project,"job_id":job_id,"input_id_present":!input_id.is_empty(),
+                "input_bytes":data.len(),"close":close,
+            }),
             Self::RunProcess {
+                interactive,
                 project,
                 executable,
                 args,
@@ -156,16 +167,21 @@ impl ToolCallAuditProjection for ToolCall {
                 purpose,
                 ..
             } => {
-                let identity = run_process_validation_identity(
-                    executable,
-                    args,
-                    stdin.as_deref(),
-                    cwd.as_deref(),
-                    purpose.as_ref().map(|purpose| purpose.as_str()),
-                );
+                let identity = if *interactive {
+                    None
+                } else {
+                    run_process_validation_identity(
+                        executable,
+                        args,
+                        stdin.as_deref(),
+                        cwd.as_deref(),
+                        purpose.as_ref().map(|purpose| purpose.as_str()),
+                    )
+                };
                 let mut value = serde_json::json!({
                     "project": project,
                     "executable_present": true,
+                    "interactive": interactive,
                     "arg_count": args.len(),
                     "stdin_present": stdin.is_some(),
                     "process_summary": process_preview(
@@ -191,6 +207,7 @@ impl ToolCallAuditProjection for ToolCall {
                 provider_id,
                 idempotency_key,
                 instruction,
+                context_session_id,
                 config,
                 timeout_secs,
                 recording_session_id: _,
@@ -199,6 +216,7 @@ impl ToolCallAuditProjection for ToolCall {
                 "provider_id": provider_id,
                 "idempotency_key_present": !idempotency_key.is_empty(),
                 "instruction_bytes": instruction.len(),
+                "context_session_present": context_session_id.is_some(),
                 "config_count": config.as_ref().map(std::collections::BTreeMap::len).unwrap_or_default(),
                 "timeout_secs": timeout_secs,
             }),
@@ -2187,6 +2205,17 @@ impl ToolCallAuditProjection for ToolCall {
                 "category": category,
                 "features": features,
                 "summary_only": summary_only,
+                "limit": limit,
+            }),
+            Self::ListSessions {
+                project,
+                lifecycle,
+                offset,
+                limit,
+            } => serde_json::json!({
+                "project": project,
+                "lifecycle": lifecycle,
+                "offset": offset,
                 "limit": limit,
             }),
             Self::SessionSummary { session_id, limit } => serde_json::json!({

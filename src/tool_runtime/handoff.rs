@@ -215,7 +215,13 @@ impl ToolRuntime {
         // --- session basic info + display-bounded events ---
         let summary = match self.sessions.summary(&session_id, Some(limit)) {
             Some(summary) => summary,
-            None => return super::unknown_session_result(&session_id),
+            None => {
+                return super::session_context::absent_workflow_session_result(
+                    &self.sessions,
+                    &session_id,
+                    auth,
+                );
+            }
         };
         // Canonical closeout evidence must not depend on the caller's display
         // limit. Reuse one fixed bounded Session snapshot for validation,
@@ -498,6 +504,7 @@ impl ToolRuntime {
         }
         output["handoff_brief"] = build_handoff_brief(HandoffBriefInput {
             session_summary: &projection_closeout_session,
+            discussion: guidance_available.then_some(&discussion),
             continuation_feedback: output.get("continuation_feedback").unwrap_or(&Value::Null),
             workspace_requested: include_workspace,
             workspace: output.get("workspace"),

@@ -640,6 +640,7 @@ pub struct ShellJobStartMetadata {
 pub enum StructuredJobExecution {
     ProjectBuild(webcodex_core::project_build::ProjectBuildPlan),
     Process(ShellProcessArgv),
+    InteractiveProcess(ShellProcessArgv),
     DetachedProcess(ShellProcessArgv),
     Script(ShellScriptPayload),
     SkillResource(RunnerSkillExecutionRequest),
@@ -832,6 +833,22 @@ impl RunnerRegistry {
             structured_execution.as_ref(),
             Some(StructuredJobExecution::ProjectBuild(_))
         );
+        let project_dependency_policy_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::ProjectBuild(plan))
+                if plan.provenance.request.dependency_policy.is_some()
+        ) || validation
+            .as_ref()
+            .and_then(|metadata| metadata.project_validation.as_ref())
+            .is_some_and(|provenance| provenance.request.dependency_policy.is_some());
+        let project_go_single_module_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::ProjectBuild(plan))
+                if plan.provenance.backend == "go"
+        ) || validation
+            .as_ref()
+            .and_then(|metadata| metadata.project_validation.as_ref())
+            .is_some_and(|provenance| provenance.backend == "go");
         if explicit_shell.is_some()
             && (structured_execution.is_some()
                 || !validation_steps.is_empty()
@@ -918,6 +935,37 @@ impl RunnerRegistry {
                     assertion_name: assertion_name.clone(),
                 };
                 (preview, Some(safe), "run_process")
+            }
+            Some(StructuredJobExecution::InteractiveProcess(process)) => {
+                validate_process_argv(process)?;
+                validate_structured_job_common(
+                    normalized_job_cwd.as_deref(),
+                    None,
+                    timeout_secs,
+                    PROCESS_TIMEOUT_MAX_SECS,
+                )?;
+                if structured_stdin.is_some()
+                    || validation_identity.is_some()
+                    || validation_tool.is_some()
+                    || assertion_name.is_some()
+                {
+                    return Err("interactive process requires subsequent keyed input and is not validation evidence".into());
+                }
+                let safe = ShellJobStructuredExecutionMetadata {
+                    execution_source: "run_process_interactive".into(),
+                    language: None,
+                    script_bytes: None,
+                    arg_count: process.args.len(),
+                    stdin_present: false,
+                    validation_identity: None,
+                    validation_tool: None,
+                    assertion_name: None,
+                };
+                (
+                    format!("interactive process ({} args)", process.args.len()),
+                    Some(safe),
+                    "run_process",
+                )
             }
             Some(StructuredJobExecution::DetachedProcess(process)) => {
                 validate_process_argv(process)?;
@@ -1074,6 +1122,10 @@ impl RunnerRegistry {
             validation: validation.clone(),
             structured_execution: structured_metadata.clone(),
         };
+        let interactive_request = matches!(
+            &structured_execution,
+            Some(StructuredJobExecution::InteractiveProcess(_))
+        );
         let job_operation = match structured_execution {
             Some(StructuredJobExecution::ProjectBuild(plan)) => {
                 RunnerJobOperation::StartBuild(RunnerJobBuildOperation {
@@ -1091,6 +1143,16 @@ impl RunnerRegistry {
                     cwd: normalized_job_cwd.clone(),
                     process,
                     stdin: structured_stdin.clone(),
+                    timeout_secs,
+                    context: job_context,
+                })
+            }
+            Some(StructuredJobExecution::InteractiveProcess(process)) => {
+                RunnerJobOperation::StartInteractiveProcess(RunnerJobProcessOperation {
+                    job_id: job_id.clone(),
+                    cwd: normalized_job_cwd.clone(),
+                    process,
+                    stdin: None,
                     timeout_secs,
                     context: job_context,
                 })
@@ -1201,6 +1263,26 @@ impl RunnerRegistry {
                 "capability_unavailable: upgrade target Runner for project_build_v1".to_string(),
             );
         }
+        if project_dependency_policy_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::ProjectDependencyPolicy)
+        {
+            return Err(
+                "capability_unavailable: upgrade target Runner for project_dependency_policy_v1"
+                    .to_string(),
+            );
+        }
+        if project_go_single_module_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::ProjectGoSingleModule)
+        {
+            return Err(
+                "capability_unavailable: upgrade target Runner for project_go_single_module_v1"
+                    .to_string(),
+            );
+        }
         if javascript_script_request
             && !runner
                 .runner_features
@@ -1236,6 +1318,15 @@ impl RunnerRegistry {
             return Err(format!(
                 "capability_unavailable: runner {client_id} does not support skill_resource_execution"
             ));
+        }
+        if interactive_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::JobProcessInput)
+        {
+            return Err(
+                "capability_unavailable: upgrade target Runner for job_process_input_v1".into(),
+            );
         }
         if detached_request
             && !runner

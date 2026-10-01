@@ -8,7 +8,7 @@ use crate::json_digest::update_sha256_with_json;
 
 use super::handoff::review_evidence_summary_for_session;
 use super::session_context::{
-    session_project_mismatch_result, unknown_session_result, SessionProjectMismatch,
+    absent_workflow_session_result, session_project_mismatch_result, SessionProjectMismatch,
 };
 use super::validation_events::{
     current_validation_evidence_for_session, validation_summary_from_events,
@@ -185,7 +185,7 @@ impl ToolRuntime {
         .await
     }
 
-    async fn authorize_work_result_project(
+    pub(super) async fn authorize_work_result_project(
         &self,
         project: &str,
         auth: Option<&AuthContext>,
@@ -194,9 +194,18 @@ impl ToolRuntime {
             .resolve_project_input_for_auth(project, auth)
             .await
             .map_err(|error| error.into_tool_result())?;
-        if project.trim() != resolved.resolved_id {
+        let issued_ref = matches!(
+            webcodex_core::model_reference::parse_model_reference(
+                project.trim(),
+                webcodex_core::model_reference::ModelReferenceKind::Project,
+            ),
+            Some(Ok(_))
+        );
+        // Resolution already checked principal, exact root fingerprint and
+        // current authority. Never generalize this to ambiguous friendly names.
+        if project.trim() != resolved.resolved_id && !issued_ref {
             return Err(ToolResult::err_with_output(
-                "Work Result requires the exact complete runtime project id",
+                "Work Result requires an exact runtime project id or issued project_ref",
                 json!({
                     "error_kind": "work_result_project_not_exact",
                     "failure_kind": "invalid_arguments",
@@ -225,7 +234,11 @@ impl ToolRuntime {
             .sessions
             .summary(session_id, Some(WORK_RESULT_SESSION_EVENT_LIMIT))
         else {
-            return Err(unknown_session_result(session_id));
+            return Err(absent_workflow_session_result(
+                &self.sessions,
+                session_id,
+                auth,
+            ));
         };
         if summary.project.as_deref() != Some(resolved_project.as_str()) {
             let mismatch = SessionProjectMismatch {

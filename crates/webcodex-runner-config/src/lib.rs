@@ -280,6 +280,10 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             structured_go_test_json: false,
             project_validation_v1: false,
             project_build_v1: false,
+            project_dependency_policy_v1: false,
+            // Go project single-module semantics are implemented and advertised
+            // by the running binary, never inferred from generated static config.
+            project_go_single_module_v1: false,
             project_validation_package_scope_v1: false,
             project_validation_test_options_v1: false,
             // Like JSON parsing, first-class durable go_test support is
@@ -302,6 +306,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // capability and must fail closed across mixed-version rollout.
             internal_posix_script: false,
             structured_execution_jobs: true,
+            job_process_input: false, // Advertised only by an implementing binary.
             // Detached process authority is advertised only by a running binary
             // after its durable ownership-transfer backend is installed.
             detached_process_jobs: false,

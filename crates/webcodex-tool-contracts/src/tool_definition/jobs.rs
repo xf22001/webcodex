@@ -16,6 +16,18 @@ use crate::metadata::{
 use webcodex_core::authority::SCOPE_JOB_DETACH;
 
 pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
+    adaptive_runtime_direct(
+        model_spec(
+        def("job_write_input", super::ToolAuditPolicy::TYPED_CANONICAL,
+            ModelVisible, TOOL_CATEGORY_JOB, Some(StructuredProcess), TOOL_PROVIDER_RUNNER,
+            super::ToolSemanticContract { effect:super::ToolEffect::Execute, risk:JobRun,
+                approval:super::ToolApprovalPolicy::Standard, idempotency:super::ToolIdempotency::Keyed },
+            Some(JOB_RUN), true, NoPath, false, true, super::ToolSessionEvidencePolicy::NONE),
+        "Write bounded UTF-8 data or EOF to an existing run_process(interactive=true) Job. No new process, PTY, signal, stdin polling or automatic restart. Use one stable input_id per payload; exact same-id/same-data/close replay reconciles the retained receipt without resending, changed payload conflicts. Pending or uncertain delivery requires same-input reconciliation or observation, never a new id to retry. Written means OS pipe acceptance, not program consumption. At most 128 data writes per Job plus one empty EOF. New input is rejected while a write is pending or after closure; receipts are process-local and do not survive Runner replacement. Rechecks Job visibility, Project, Runner incarnation and capability; observe_jobs reads output and stop_job controls the process.",
+        ),
+        71,
+        super::ToolDirectReason::CoreWorkflow,
+    ),
     model_spec(
         def(
             "project_build",
@@ -38,7 +50,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Preferred portable project build gateway. Runner resolves the nearest unambiguous Rust/Go recipe and executes canonical cargo build or go build argv. Optional scope.packages narrows Cargo with repeated -p selectors or Go with bounded project-relative patterns. Long builds remain the same durable Job; pending never authorizes retry.",
+        "Preferred portable project build gateway. Runner resolves the nearest unambiguous Rust/Go recipe and executes canonical cargo build or go build argv. Go project builds run in Runner-owned single-module mode (GO111MODULE=on, GOWORK=off), so ambient module/workspace mode cannot change the planned graph. Optional scope.packages narrows Cargo with repeated -p selectors or Go with bounded project-relative patterns. dependency_policy.mode=locked forbids adapters from repairing dependency selection state (Cargo --locked; Go -mod=readonly); it does not imply offline execution. Long builds remain the same durable Job; pending never authorizes retry.",
     )
     .with_execution(super::ToolExecutionContract::new(
         super::ToolExecutionForm::ProjectBuild,
@@ -75,8 +87,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 true,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Run one native executable with structured literal argv; prefer this over run_shell unless shell grammar or a short related command chain is required. Windows batch shims use the bounded Runner-owned quoting contract. Persistent shell is only for retained same-process or named-SSH state, not command count. Long work stays the same execution and remains Runner-owned; timeout_secs defaults to 60s and clamps at 7 days. If the result is execution_state=pending, keep its exact continuation as fallback and continue independent work. Same-Window/Project/Session results may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; use bounded wait_for_job_readiness when terminal outcome blocks progress in the current turn. No automatic next turn. Use run_detached_process only when the native child must survive Runner restart/upgrade/stop/replacement; duration alone is not a reason to detach.",
-        ).with_gpt_action_description("Run literal argv. If pending, keep the continuation and continue independent work; later ordinary same-scope results may carry terminal attention. Observe only for details/recovery; wait only when terminal outcome blocks progress. Detach only for Runner-lifetime independence.")
+            "Run one native executable with structured literal argv. Use run_shell for shell grammar/short chains and run_script for program text. interactive=true retains piped stdin and returns a public Job for keyed job_write_input bytes/EOF; no PTY, initial stdin, named SSH or structured validation evidence. Otherwise stdin is a bounded payload then EOF. Windows batch shims use Runner-owned quoting. timeout_secs defaults to 60s and clamps at 7 days. Pending stays the same execution, owned by Runner: retain its exact continuation as fallback and continue independent work. Same-Window/Project/Session calls may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; bounded wait_for_job_readiness when terminal outcome blocks progress. No automatic next turn or redispatch. Persistent shell is only for retained same-process or repeated named-SSH state. Use run_detached_process only when the child must survive Runner restart/upgrade/stop/replacement, never for duration alone.",        ).with_gpt_action_description("Run literal argv. If pending, keep the continuation and continue independent work; later ordinary same-scope results may carry terminal attention. Observe only for details/recovery; wait only when terminal outcome blocks progress. Detach only for Runner-lifetime independence.")
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::NativeArgv,
             super::ToolExecutionLifetime::Runner,
