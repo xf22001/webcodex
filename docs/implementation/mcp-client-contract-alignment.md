@@ -15,7 +15,7 @@ There are three independent observations in an end-to-end client investigation:
 | Codex through Apps | The Apps descriptor plus Codex's loading/Code Mode representation |
 | Agent configured with MCP | MCP discovery plus that client's schema conversion and result delivery |
 
-A `tool_manifest` is Server discovery, not Host tool registration. Prefer a
+A `read_tool_manifest` is Server discovery, not Host tool registration. Prefer a
 loaded direct callable; use Host-native discovery when that Host has deferred
 it; use the declared gateway fallback when the callable is genuinely unavailable.
 Never manufacture Host-prefixed names from a canonical name. A generic gateway
@@ -202,3 +202,11 @@ read continuation before drawing performance conclusions. This patch does not
 start paid Agents, alter real client settings or claim that a private Apps cache
 has refreshed. Native PTY/stdin parity is a separate test scenario, not implied
 by durable Jobs.
+
+## Projects & Resources
+
+The readonly Workbench, stable resource URI, MCP read parity, and optional OpenAI
+entrypoints/mentions contracts are documented in
+[workbench-resource-references.md](workbench-resource-references.md). Resource tools
+remain available with Apps disabled; live Host acceptance is recorded separately
+from source validation.

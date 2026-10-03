@@ -15,17 +15,17 @@ use super::{
     CommandResult, HotRunnerConfig, PersistentShellManager, ReloadableRunnerConfig, RunnerSink,
     ShellCommandResult, SubmitResultError,
 };
-use crate::handle_file_operation_with_artifact_store;
-use crate::runner_protocol::{
-    PersistentShellResult, RunnerConfigAction, RunnerConfigOperationRequest,
-    RunnerJobUpdateRequest, RunnerRequest, EXTERNAL_SEARCH_REQUEST_PREFIX,
-    RUNNER_CONFIG_RESPONSE_MAX_BYTES,
-};
+use crate::webcodex_runner::file_dispatch::handle_file_operation_with_artifact_store;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use webcodex_core::runner_operation::{
     RunnerFileOperation, RunnerJobOperation, RunnerOperation, RunnerProjectOperation,
     RunnerProjectOperationKind, RunnerShellOperation,
+};
+use webcodex_core::runner_protocol::{
+    PersistentShellResult, RunnerConfigAction, RunnerConfigOperationRequest,
+    RunnerJobUpdateRequest, RunnerRequest, EXTERNAL_SEARCH_REQUEST_PREFIX,
+    RUNNER_CONFIG_RESPONSE_MAX_BYTES,
 };
 
 fn internal_search_script(command: &str) -> Option<&str> {
@@ -268,8 +268,8 @@ fn submit_decode_failure(
         "mcp_gateway" => sink
             .submit_mcp_gateway_result(
                 request_id,
-                crate::mcp_gateway::McpGatewayResponse::error(
-                    crate::mcp_gateway::McpGatewayDispatchState::NotStarted,
+                webcodex_core::mcp_gateway::McpGatewayResponse::error(
+                    webcodex_core::mcp_gateway::McpGatewayDispatchState::NotStarted,
                     "invalid_bridge_request",
                     error,
                 ),
@@ -420,7 +420,9 @@ pub(crate) fn dispatch_request_with_outcome(
                         .plugins()
                         .handle_project_catalog(&project_id, project_registry_dir)
                 }
-                operation => runtime.plugins().handle(operation),
+                operation => runtime
+                    .plugins()
+                    .handle_with_project_registry(operation, project_registry_dir),
             };
             sink.submit_plugin_gateway_result(request_id, response)
                 .map(|_| true)

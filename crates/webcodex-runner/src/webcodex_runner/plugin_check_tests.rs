@@ -219,6 +219,7 @@ fn check_observes_edited_v2_without_replacing_current_v1() {
     assert_eq!(provider_state(&fixture.manager), state_before_check);
 
     let v1_call = fixture.manager.handle(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_id: "fake".to_string(),
         provider_instance_id: dynamic_v1.clone(),
         name: "echo".to_string(),
@@ -247,6 +248,7 @@ fn check_observes_edited_v2_without_replacing_current_v1() {
 
     let calls_before_stale = fixture.marker_count("call");
     let stale_v1 = fixture.manager.handle(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_id: "fake".to_string(),
         provider_instance_id: dynamic_v1,
         name: "echo".to_string(),
@@ -548,6 +550,7 @@ fn candidate_gate_serializes_check_and_reload_without_blocking_current_providers
     assert_eq!(reload.error.as_ref().unwrap().code, "plugin_reload_busy");
 
     let current_call = fixture.manager.handle(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_id: "fake".to_string(),
         provider_instance_id: dynamic_v1.clone(),
         name: "echo".to_string(),
@@ -628,7 +631,6 @@ fn runner_config(
         hostname: None,
         host_context: None,
         project_registry_dir: Some(project_registry_dir.to_path_buf()),
-        legacy_projects_dir: None,
         poll_interval_ms: 1000,
         capabilities: None,
         max_concurrent_jobs: None,

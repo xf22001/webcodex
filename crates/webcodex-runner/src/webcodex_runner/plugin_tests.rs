@@ -12,6 +12,9 @@ use webcodex_core::plugin::{
     PLUGIN_MAX_MESSAGE_BYTES, PLUGIN_MAX_RESULT_BYTES,
 };
 
+#[path = "plugin_project_tests.rs"]
+mod project_binding;
+
 static FAKE_PLUGIN: OnceLock<Mutex<Weak<FakeBinary>>> = OnceLock::new();
 
 struct FakeBinary {
@@ -113,6 +116,7 @@ impl Fixture {
 
     fn call_with_arguments(&self, arguments: Value) -> PluginGatewayResponse {
         self.manager.handle(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             provider_id: self.provider.provider_id.clone(),
             provider_instance_id: self.provider.provider_instance_id.clone(),
             name: "echo".to_string(),
@@ -198,7 +202,6 @@ fn runner_config(
         hostname: None,
         host_context: None,
         project_registry_dir: Some(project_registry_dir.to_path_buf()),
-        legacy_projects_dir: None,
         poll_interval_ms: 1000,
         capabilities: None,
         max_concurrent_jobs: None,
@@ -215,6 +218,97 @@ fn runner_config(
         plugins,
         acp: AcpConfig::default(),
     }
+}
+
+// Keep this example-specific smoke outside runner_real_process_ so the shared
+// lifecycle group does not require a Python interpreter.
+#[test]
+#[cfg(feature = "runner-real-process-tests")]
+#[ignore = "explicit Python raw example smoke: requires WEBCODEX_TEST_PYTHON absolute executable path"]
+fn python_raw_plugin_admission_and_call() {
+    let python = PathBuf::from(
+        env::var_os("WEBCODEX_TEST_PYTHON")
+            .expect("set WEBCODEX_TEST_PYTHON to the absolute Python 3.12 executable path"),
+    );
+    assert!(
+        python.is_absolute() && python.is_file(),
+        "invalid Python executable path"
+    );
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/examples/python-raw/plugin.py")
+        .canonicalize()
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let config = runner_config(
+        PluginConfig {
+            request_timeout_secs: 10,
+            providers: vec![PluginProviderConfig {
+                id: "python-raw".into(),
+                name: "Python Raw Example".into(),
+                command: python.to_string_lossy().into_owned(),
+                args: vec!["-B".into(), script.to_string_lossy().into_owned()],
+                cwd: Some(temp.path().to_string_lossy().into_owned()),
+                profile: None,
+                timeout_secs: Some(10),
+            }],
+        },
+        ShellConfig::default(),
+        temp.path(),
+    );
+    // PluginManager owns this isolated child. No Server, live config, or reload.
+    let manager = PluginManager::new(&config, temp.path().join("runner.toml"));
+    let providers = current_providers(&manager);
+    assert_eq!(providers.len(), 1);
+    let provider = &providers[0];
+    assert_eq!(provider.status, "ready", "{:?}", provider.error_code);
+    let tools = current_tools(&manager, provider);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "echo");
+    assert!(tools[0].output_schema.is_some());
+    let call = |arguments| {
+        manager.handle(PluginGatewayRequest::ToolsCall {
+            provider_id: provider.provider_id.clone(),
+            provider_instance_id: provider.provider_instance_id.clone(),
+            name: "echo".into(),
+            arguments,
+            expected_schema: tools[0].schema_observation(),
+            project_target: None,
+        })
+    };
+    for text in ["hello", "中文😀\n", &"😀".repeat(4096)] {
+        let response = call(json!({"text": text}));
+        assert_eq!(response.dispatch_state, PluginDispatchState::Completed);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let Some(PluginGatewayResponsePayload::ToolResult { result }) = response.payload else {
+            panic!("missing Python echo result");
+        };
+        assert_eq!(
+            result.content,
+            vec![PluginContent::Text { text: text.into() }]
+        );
+        assert_eq!(result.structured_content, Some(json!({"text": text})));
+        assert!(!result.is_error);
+    }
+    for arguments in [
+        json!({"text": ""}),
+        json!({"text": 1}),
+        json!({"text": "ok", "extra": true}),
+    ] {
+        let response = call(arguments);
+        assert_eq!(response.dispatch_state, PluginDispatchState::NotStarted);
+        assert_eq!(
+            response.error.unwrap().code,
+            "plugin_arguments_schema_invalid"
+        );
+    }
+    let response = call(json!({"text": "still ready"}));
+    assert_eq!(response.dispatch_state, PluginDispatchState::Completed);
+    assert!(response.error.is_none(), "{:?}", response.error);
+    assert_eq!(
+        current_providers(&manager)[0].provider_instance_id,
+        provider.provider_instance_id
+    );
+    manager.shutdown();
 }
 
 #[test]
@@ -652,6 +746,7 @@ fn runner_real_process_plugin_shutdown_terminates_process_tree_while_effectful_s
     let (sender, receiver) = mpsc::channel();
     let request = std::thread::spawn(move || {
         let response = manager.handle(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             provider_id: provider.provider_id.clone(),
             provider_instance_id: provider.provider_instance_id.clone(),
             name: "echo".to_string(),
@@ -797,6 +892,7 @@ fn provider_busy_is_not_started() {
     let schema = fixture.schema.clone().unwrap();
     let first = std::thread::spawn(move || {
         manager.handle(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             provider_id: provider.provider_id.clone(),
             provider_instance_id: provider.provider_instance_id.clone(),
             name: "echo".to_string(),
@@ -1124,6 +1220,7 @@ fn concurrent_reload_is_busy_while_existing_calls_continue_and_later_reload_wins
     };
     assert_eq!(providers[0].provider_instance_id, dynamic_v1);
     let call_while_reloading = manager.handle(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_id: "fake".to_string(),
         provider_instance_id: dynamic_v1.clone(),
         name: "echo".to_string(),

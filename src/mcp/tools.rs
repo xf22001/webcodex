@@ -29,6 +29,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub(super) const WORK_RESULT_APP_RESULT_META_KEY: &str = "webcodex/workResult";
+pub(super) const WORK_RESULT_THREAD_CONTEXT_META_KEY: &str = "webcodex/workResultThread";
+const WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME: &str = "work_result_thread_panel";
 
 fn filter_specs_for_oauth(mut specs: Vec<ToolSpec>, auth: Option<&AuthContext>) -> Vec<ToolSpec> {
     let oauth_scope_projection = auth.is_some_and(AuthContext::is_oauth_token);
@@ -45,6 +47,24 @@ fn filter_specs_for_oauth(mut specs: Vec<ToolSpec>, auth: Option<&AuthContext>) 
         })
     });
     specs
+}
+
+fn work_result_thread_entrypoint_tool_spec() -> ToolSpec {
+    let state = crate::tool_runtime::work_result_app_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "get_work_result_state")
+        .expect("Work Result state App tool must exist");
+    ToolSpec {
+        name: WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME.to_string(),
+        description: "User-opened conversation thread panel for the Work Result already presented in this exact Host Window. The Host invokes this entrypoint with an empty object; WebCodex resolves only a prior successful present_work_result binding from the same authenticated Window and then reuses the normal work_result_state authorization and projection path.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        output_schema: state.output_schema,
+        annotations: state.annotations,
+    }
 }
 
 // Discovery projection only. Canonical operator-extension specs still own
@@ -307,6 +327,43 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
         })
         .collect::<Vec<_>>();
     if app_enabled && stateless_2026 {
+        // The View uses the existing authorized Session discovery implementation.
+        if !tools.iter().any(|tool| tool["name"] == "list_sessions") {
+            if let Some(definition) =
+                crate::tool_runtime::tool_definition::lookup_tool_definition("list_sessions")
+            {
+                let description = if compact {
+                    "List authorized Sessions for an explicitly selected Project. Page with offset/limit and select an exact session_id before browsing recorded outputs."
+                } else {
+                    definition
+                        .model_spec
+                        .expect("public Session descriptor")
+                        .description
+                };
+                let spec = crate::tool_runtime::registry::ToolDescriptor {
+                    name: "list_sessions".into(),
+                    description: description.into(),
+                }
+                .into_spec();
+                for spec in filter_specs_for_oauth(vec![spec], auth) {
+                    let mut value = mcp_tool_spec_json(spec, compact, false);
+                    attach_app_visibility(&mut value);
+                    tools.push(value);
+                }
+            }
+        }
+        if check_runtime_tool_scope(auth, "get_work_result_state").is_ok() {
+            let mut thread_entrypoint =
+                mcp_tool_spec_json(work_result_thread_entrypoint_tool_spec(), compact, false);
+            // A user-opened launcher renders a View, so it must remain public.
+            // ChatGPT rejects private/App-only tools with rendering resources.
+            attach_app_metadata(
+                &mut thread_entrypoint,
+                resources::MCP_WORK_RESULT_UI_RESOURCE_URI,
+            );
+            attach_openai_thread_entrypoint(&mut thread_entrypoint);
+            tools.push(thread_entrypoint);
+        }
         let mut app_specs = filter_specs_for_oauth(
             crate::tool_runtime::goal_plan_app_tool_specs()
                 .into_iter()
@@ -323,28 +380,35 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
                 is_job_terminal_continuation_app_tool_name(&spec.name);
             let mut value = mcp_tool_spec_json(spec, compact, false);
             attach_app_visibility(&mut value);
-            if agent_continuation_tool {
-                // Keep the app-only tools associated with the same continuation
-                // resource for compatibility with Hosts that use that hint. The
-                // association is not authority; visibility remains app-only and
-                // every call is re-authorized by the normal communication kernel.
-                attach_app_metadata(
-                    &mut value,
-                    resources::MCP_AGENT_CONTINUATION_UI_RESOURCE_URI,
-                );
-                attach_agent_continuation_app_diagnostic_schema(&mut value);
-            }
-            if job_terminal_continuation_tool {
-                attach_app_metadata(
-                    &mut value,
-                    resources::MCP_JOB_TERMINAL_CONTINUATION_UI_RESOURCE_URI,
-                );
+            if agent_continuation_tool || job_terminal_continuation_tool {
+                // Bridge helpers return data to an existing View; they never
+                // render another widget. Private rendering tools are rejected
+                // by ChatGPT during discovery/refresh.
                 attach_agent_continuation_app_diagnostic_schema(&mut value);
             }
             value
         })
         .collect::<Vec<_>>();
         tools.append(&mut app_specs);
+        if ["list_projects", "list_goals"]
+            .iter()
+            .any(|tool| crate::tool_runtime::kernel::check_runtime_tool_scope(auth, tool).is_ok())
+        {
+            let mut mention = json!({
+                "name":"search_mentions","description":"Search authorized WebCodex Projects and owned Goals for resource references. Files and artifacts require explicit Workbench selection.",
+                "inputSchema":{"type":"object","properties":{"query":{"type":"string","maxLength":200}},"required":["query"],"additionalProperties":false},
+                "outputSchema":{"type":"object","properties":{"items":{"type":"array","maxItems":20,"items":{"type":"object","required":["type","uri","name"],"properties":{"type":{"const":"resource_link"},"uri":{"type":"string"},"name":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"mimeType":{"type":"string"},"_meta":{"type":"object"}},"additionalProperties":false}}},"required":["items"],"additionalProperties":false},
+                "annotations":{"readOnlyHint":true},"_meta":{"openai/extensions":{"mentions/search":{}},"ui":{"visibility":["app"]}}
+            });
+            if compact {
+                mention
+                    .as_object_mut()
+                    .expect("mention descriptor")
+                    .remove("outputSchema");
+                super::discovery::compact_tool(&mut mention);
+            }
+            tools.push(mention);
+        }
     }
     json!({ "tools": tools })
 }
@@ -354,7 +418,7 @@ fn adapt_native_image_output_schema_for_mcp(spec: &mut ToolSpec) {
         .output_schema
         .pointer_mut("/properties/output/properties")
         .and_then(Value::as_object_mut)
-        .expect("computer_observe output schema properties");
+        .expect("observe_computer output schema properties");
     properties.remove("content_base64");
     properties.insert(
         "content_delivery".to_string(),
@@ -691,8 +755,14 @@ pub(super) fn add_stateless_workflow_recorder_metadata(payload: &mut Value) {
         let tool_name = tool_name_owned.as_deref();
         if matches!(
             tool_name,
-            Some("goal_plan_sync" | "work_result_state" | "changes_file_diff")
-        ) || tool_name.is_some_and(is_host_continuation_app_tool_name)
+            Some(
+                "sync_goal_plan"
+                    | "get_work_result_state"
+                    | "read_changed_file_diff"
+                    | "search_mentions"
+            )
+        ) || tool_name == Some(WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME)
+            || tool_name.is_some_and(is_host_continuation_app_tool_name)
         {
             continue;
         }
@@ -761,6 +831,86 @@ pub(super) fn attach_app_metadata(value: &mut Value, resource_uri: &str) {
     );
 }
 
+fn attach_openai_thread_entrypoint(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "title".to_string(),
+        Value::String("WebCodex review".to_string()),
+    );
+    let Some(meta) = tool_meta_object(value) else {
+        return;
+    };
+    meta.insert(
+        "openai/ui".to_string(),
+        json!({
+            "entrypoints": [
+                {"type": "thread"}
+            ]
+        }),
+    );
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkResultThreadBinding {
+    project: String,
+    session_id: Option<String>,
+}
+
+fn work_result_thread_binding(
+    runtime: &ToolRuntime,
+    auth: Option<&AuthContext>,
+    window: Option<&crate::client_window::ClientWindow>,
+) -> Result<WorkResultThreadBinding, String> {
+    let window = window.ok_or_else(|| {
+        "Work Result thread panel requires a stable Host Window identity".to_string()
+    })?;
+    let auth = auth
+        .filter(|auth| !auth.is_open_anonymous())
+        .ok_or_else(|| {
+            "Work Result thread panel requires a stable authenticated principal".to_string()
+        })?;
+    let (principal_kind, principal_id) =
+        crate::tool_runtime::runtime_observation_principal(Some(auth)).map_err(|_| {
+            "Work Result thread panel principal identity is unavailable".to_string()
+        })?;
+    let db = runtime
+        .window_activity_db
+        .as_ref()
+        .ok_or_else(|| "Work Result thread panel activity store is unavailable".to_string())?;
+    let event = db
+        .latest_successful_window_action(
+            window.key(),
+            (principal_kind.as_str(), principal_id.as_str()),
+            "present_work_result",
+        )
+        .map_err(|_| "Work Result thread panel activity lookup failed".to_string())?;
+    event
+        .into_iter()
+        .find_map(|event| {
+            event.project.map(|project| WorkResultThreadBinding {
+                project,
+                // This comes from the exact selected present_work_result event's
+                // canonical ActionAudit correlation. Never substitute Window
+                // affinity from another action or Session.
+                session_id: event.business_session_id,
+            })
+        })
+        .ok_or_else(|| {
+            "No presented Work Result is bound to this conversation Window yet".to_string()
+        })
+}
+
+#[cfg(test)]
+pub(super) fn work_result_thread_binding_for_test(
+    runtime: &ToolRuntime,
+    auth: Option<&AuthContext>,
+    window: Option<&crate::client_window::ClientWindow>,
+) -> Result<(String, Option<String>), String> {
+    work_result_thread_binding(runtime, auth, window)
+        .map(|binding| (binding.project, binding.session_id))
+}
+
 fn attach_app_visibility(value: &mut Value) {
     let Some(meta) = tool_meta_object(value) else {
         return;
@@ -775,25 +925,25 @@ fn attach_app_visibility(value: &mut Value) {
 fn is_agent_continuation_app_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "agent_continuation_bind"
-            | "agent_continuation_recover_endpoint"
-            | "agent_continuation_state"
-            | "agent_continuation_wake_acquire"
-            | "agent_continuation_wake_prepare"
-            | "agent_continuation_wake_finish"
-            | "agent_continuation_unbind"
-            | "agent_wait_state"
+        "bind_agent_continuation"
+            | "recover_agent_continuation_endpoint"
+            | "get_agent_continuation_state"
+            | "acquire_agent_continuation_wake"
+            | "prepare_agent_continuation_wake"
+            | "finish_agent_continuation_wake"
+            | "unbind_agent_continuation"
+            | "get_agent_wait_state"
     )
 }
 
 fn is_job_terminal_continuation_app_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "job_terminal_continuation_bind"
-            | "job_terminal_continuation_state"
-            | "job_terminal_continuation_prepare"
-            | "job_terminal_continuation_finish"
-            | "job_terminal_continuation_unbind"
+        "bind_job_terminal_continuation"
+            | "get_job_terminal_continuation_state"
+            | "prepare_job_terminal_continuation"
+            | "finish_job_terminal_continuation"
+            | "unbind_job_terminal_continuation"
     )
 }
 
@@ -1075,27 +1225,68 @@ fn project_mcp_runtime_status_input_schema(input_schema: &mut Value) {
     );
 }
 
-fn project_mcp_runtime_status_manifest_defaults(result: &mut ToolResult) {
-    if !result.success || result.output["name"].as_str() != Some("runtime_status") {
+fn project_mcp_model_default_input_schema(tool_name: &str, input_schema: &mut Value) {
+    match tool_name {
+        "get_runtime_status" => project_mcp_runtime_status_input_schema(input_schema),
+        "observe_jobs" => {
+            if let Some(summary) = input_schema
+                .pointer_mut("/properties/summary_only")
+                .and_then(Value::as_object_mut)
+            {
+                summary.insert("default".to_string(), json!(true));
+                summary.insert("description".to_string(), json!("MCP defaults to compact proven-success validation logs. Set false to expand retained logs from the original cursor. Failures, unknown results and ordinary commands keep full evidence."));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn project_mcp_model_manifest_defaults(result: &mut ToolResult) {
+    if !result.success {
         return;
     }
+    let tool_name = result.output["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     if let Some(input_schema) = result.output.get_mut("input_schema") {
-        project_mcp_runtime_status_input_schema(input_schema);
+        project_mcp_model_default_input_schema(&tool_name, input_schema);
+    }
+}
+
+/// MCP-only omission defaults, after direct/gateway admission resolves the same
+/// canonical tool identity. Explicit values and canonical HTTP defaults survive.
+pub(super) fn project_mcp_model_argument_defaults(tool_name: &str, arguments: &mut Value) {
+    let field = match tool_name {
+        "get_runtime_status" => "compact",
+        "observe_jobs" => "summary_only",
+        _ => return,
+    };
+    if arguments.is_null() {
+        *arguments = json!({});
+    }
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments.entry(field).or_insert(json!(true));
     }
 }
 
 fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> Value {
     let tool_name = spec.name.clone();
-    if tool_name == "runtime_status" {
-        project_mcp_runtime_status_input_schema(&mut spec.input_schema);
+    project_mcp_model_default_input_schema(&tool_name, &mut spec.input_schema);
+    if tool_name == "get_runtime_status" {
         spec.description
             .push_str(" MCP defaults to sparse status; compact=false opts into full diagnostics.");
     }
 
-    if matches!(tool_name.as_str(), "computer_observe" | "browser_observe") {
+    if tool_name == "observe_jobs" {
+        spec.description
+            .push_str(" MCP defaults summary_only=true; set false for full retained logs.");
+    }
+
+    if matches!(tool_name.as_str(), "observe_computer" | "observe_browser") {
         adapt_native_image_output_schema_for_mcp(&mut spec);
     }
-    if tool_name == "read_project_artifact" {
+    if tool_name == "read_project_artifact_chunk" {
         if let Some(properties) = spec.input_schema["properties"].as_object_mut() {
             properties.insert(
                 "as_image".to_string(),
@@ -1143,7 +1334,7 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
             );
         }
     }
-    if tool_name == "import_conversation_files_to_project" {
+    if tool_name == "import_host_files" {
         if let Some(required) =
             value.pointer_mut("/inputSchema/properties/openaiFileIdRefs/items/required")
         {
@@ -1151,6 +1342,16 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
         }
         if let Some(meta) = tool_meta_object(&mut value) {
             meta.insert("openai/fileParams".to_string(), json!(["openaiFileIdRefs"]));
+        }
+    }
+    if app_enabled && tool_name == "open_webcodex_workbench" {
+        attach_app_metadata(&mut value, resources::MCP_WORKBENCH_UI_RESOURCE_URI);
+        value["title"] = json!("Projects & Resources");
+        if let Some(meta) = tool_meta_object(&mut value) {
+            meta.insert(
+                "openai/ui".into(),
+                json!({"entrypoints":[{"type":"global"},{"type":"thread"}]}),
+            );
         }
     }
     if app_enabled && presentation::tool_supports_result_app(&tool_name) {
@@ -1497,7 +1698,7 @@ pub(super) fn host_file_import_trust_for_call(
     config: Option<&crate::Config>,
     db: Option<&crate::Database>,
 ) -> HostFileImportTrust {
-    if tool_name != Some("import_conversation_files_to_project") {
+    if tool_name != Some("import_host_files") {
         return HostFileImportTrust::Untrusted;
     }
     let decision = match config {
@@ -1848,10 +2049,17 @@ pub(super) struct McpInvocationEnvelope {
 fn mcp_invocation_envelope_supported_fields(tool: &str) -> Vec<&'static str> {
     if matches!(
         tool,
-        "goal_plan_sync" | "work_result_state" | "changes_file_diff"
-    ) || is_host_continuation_app_tool_name(tool)
+        "sync_goal_plan" | "get_work_result_state" | "read_changed_file_diff" | "search_mentions"
+    ) || tool == WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME
+        || is_host_continuation_app_tool_name(tool)
     {
         return Vec::new();
+    }
+    if matches!(
+        tool,
+        "open_webcodex_workbench" | "search_webcodex_resources" | "read_webcodex_resource"
+    ) {
+        return vec!["ack", "ack_ref", "context"];
     }
     if matches!(
         tool,
@@ -2044,6 +2252,79 @@ pub(super) async fn handle_call(
             return McpOutcome::BadRequest(rpc_error(id, -32602, format!("Invalid params: {}", e)));
         }
     };
+    // OpenAI's search contract is a host-only adapter. It composes the ordinary
+    // authorized resource service and never becomes a generic runtime gateway.
+    if params.name == "search_mentions" {
+        if !server_mcp_apps_enabled || !stateless_2026 {
+            return McpOutcome::BadRequest(rpc_error(
+                id,
+                -32602,
+                "Resource mentions are unavailable on this protocol surface",
+            ));
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct MentionQuery {
+            query: String,
+        }
+        let query = match serde_json::from_value::<MentionQuery>(params.arguments) {
+            Ok(value) if value.query.chars().count() <= 200 && !value.query.contains('\0') => {
+                value.query
+            }
+            _ => return McpOutcome::BadRequest(rpc_error(id, -32602, "Invalid mention query")),
+        };
+        let mut items = Vec::new();
+        let mut incomplete = Vec::new();
+        for (kind, tool, label) in [
+            (
+                webcodex_tool_contracts::tool_call::WebcodexResourceKind::Project,
+                "list_projects",
+                "project",
+            ),
+            (
+                webcodex_tool_contracts::tool_call::WebcodexResourceKind::Goal,
+                "list_goals",
+                "goal",
+            ),
+        ] {
+            if crate::tool_runtime::kernel::check_runtime_tool_scope(auth, tool).is_err() {
+                continue;
+            }
+            let found = runtime
+                .search_webcodex_resources(
+                    kind,
+                    Some(query.clone()),
+                    None,
+                    None,
+                    None,
+                    Some(10),
+                    auth,
+                )
+                .await;
+            if found.success {
+                if let Some(rows) = found.output["items"].as_array() {
+                    items.extend(rows.iter().cloned());
+                }
+                if found.output["list_truncated"] == true {
+                    incomplete.push(label);
+                }
+            } else {
+                incomplete.push(label);
+            }
+        }
+        let mut result = json!({"content":[],"structuredContent":{"items":items}});
+        if !incomplete.is_empty() {
+            result["_meta"] = json!({"webcodex/incompleteResourceKinds":incomplete});
+            if result["structuredContent"]["items"]
+                .as_array()
+                .is_some_and(|items| items.is_empty())
+            {
+                result["isError"] = json!(true);
+                result["content"] = json!([{"type":"text","text":"Resource search is incomplete; use search_webcodex_resources for domain details."}]);
+            }
+        }
+        return McpOutcome::Ok(rpc_result(id, mcp_stateless_result(result, false)));
+    }
     let app_call_id = if stateless_2026 && is_host_continuation_app_tool_name(&params.name) {
         match strip_agent_continuation_app_call_id(&mut params.arguments) {
             Ok(app_call_id) => app_call_id,
@@ -2528,13 +2809,51 @@ pub(super) async fn handle_call(
     let work_result_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let agent_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
     let job_terminal_continuation_app_admitted = server_mcp_apps_enabled && stateless_2026;
-    let app_only_goal_plan_sync = goal_plan_app_admitted && params.name == "goal_plan_sync";
-    let app_only_work_result_state = work_result_app_admitted && params.name == "work_result_state";
+    let app_only_goal_plan_sync = goal_plan_app_admitted && params.name == "sync_goal_plan";
+    let work_result_thread_panel =
+        work_result_app_admitted && params.name == WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME;
+    let mut work_result_thread_context = None;
+    if work_result_thread_panel {
+        let empty_arguments = params
+            .arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty);
+        if !empty_arguments {
+            if let Some(lc) = lifecycle.as_deref() {
+                lc.dispatch_failed("invalid_arguments");
+                lc.dispatch_finished(false, Some(false), "invalid_arguments");
+            }
+            return McpOutcome::BadRequest(rpc_error(
+                id,
+                -32602,
+                "Work Result thread panel entrypoint accepts only an empty argument object",
+            ));
+        }
+        let binding = match work_result_thread_binding(runtime, auth, window) {
+            Ok(binding) => binding,
+            Err(message) => {
+                if let Some(lc) = lifecycle.as_deref() {
+                    lc.dispatch_failed("invalid_context");
+                    lc.dispatch_finished(false, Some(false), "invalid_context");
+                }
+                return McpOutcome::BadRequest(rpc_error(id, -32602, message));
+            }
+        };
+        work_result_thread_context = Some(json!({"session_id": binding.session_id.clone()}));
+        params.name = "get_work_result_state".to_string();
+        params.arguments = match binding.session_id {
+            Some(session_id) => json!({"project": binding.project, "session_id": session_id}),
+            None => json!({"project": binding.project}),
+        };
+    }
+    let app_only_work_result_state =
+        work_result_app_admitted && params.name == "get_work_result_state";
     let app_only_work_result_activity_detail =
-        work_result_app_admitted && params.name == "work_result_activity_detail";
+        work_result_app_admitted && params.name == "read_work_result_activity_detail";
     let app_only_work_result_send_message =
-        work_result_app_admitted && params.name == "work_result_send_message";
-    let app_only_changes_file_diff = work_result_app_admitted && params.name == "changes_file_diff";
+        work_result_app_admitted && params.name == "send_work_result_message";
+    let app_only_changes_file_diff =
+        work_result_app_admitted && params.name == "read_changed_file_diff";
     let app_only_agent_continuation =
         agent_continuation_app_admitted && is_agent_continuation_app_tool_name(&params.name);
     let app_only_job_terminal_continuation = job_terminal_continuation_app_admitted
@@ -2543,7 +2862,17 @@ pub(super) async fn handle_call(
         && crate::tool_runtime::stateless_operator_extension_tool_specs()
             .iter()
             .any(|spec| spec.name == params.name);
-    let direct_denied = !app_only_goal_plan_sync
+    let workbench_view_call = server_mcp_apps_enabled
+        && stateless_2026
+        && matches!(
+            params.name.as_str(),
+            "search_webcodex_resources"
+                | "read_webcodex_resource"
+                | "list_sessions"
+                | "open_webcodex_workbench"
+        );
+    let direct_denied = !workbench_view_call
+        && !app_only_goal_plan_sync
         && !app_only_work_result_state
         && !app_only_work_result_activity_detail
         && !app_only_work_result_send_message
@@ -2571,16 +2900,8 @@ pub(super) async fn handle_call(
     // tool identity. A few MCP-only validations still happen before the
     // shared ToolRuntime kernel; preserve those failed attempts in generic
     // telemetry without creating a second record for normal kernel calls.
-    // MCP model calls default to sparse status, including the generic gateway.
     // Preserve omission versus explicit false before canonical bool parsing.
-    if params.name == "runtime_status" {
-        if params.arguments.is_null() {
-            params.arguments = json!({});
-        }
-        if let Some(arguments) = params.arguments.as_object_mut() {
-            arguments.entry("compact").or_insert(json!(true));
-        }
-    }
+    project_mcp_model_argument_defaults(&params.name, &mut params.arguments);
     let invocation_facts = crate::tool_runtime::model_ergonomics_telemetry::invocation::InvocationFacts::from_arguments(&raw_mcp_arguments);
     let mut pre_kernel_model_ergonomics =
         ModelErgonomicsTimer::start_with_arguments(&params.name, &params.arguments);
@@ -2620,10 +2941,15 @@ pub(super) async fn handle_call(
     // Goal Plan sync accepts only goal_id; Work Result reads carry their exact
     // business Session separately. Discard a hand-crafted unadvertised
     // recorder provenance before the kernel sees any of these calls.
-    if matches!(
-        params.name.as_str(),
-        "goal_plan_sync" | "work_result_state" | "work_result_send_message" | "changes_file_diff"
-    ) {
+    if workbench_view_call
+        || matches!(
+            params.name.as_str(),
+            "sync_goal_plan"
+                | "get_work_result_state"
+                | "send_work_result_message"
+                | "read_changed_file_diff"
+        )
+    {
         session_id = None;
     } else {
         session_id = match canonicalize_recording_session_id(runtime, session_id, auth) {
@@ -2748,8 +3074,8 @@ pub(super) async fn handle_call(
             .expect("tool kernel outcome without error must include result"),
     };
     debug_assert_eq!(outcome.success, result.success);
-    if params.name == "tool_manifest" {
-        project_mcp_runtime_status_manifest_defaults(&mut result);
+    if params.name == "read_tool_manifest" {
+        project_mcp_model_manifest_defaults(&mut result);
     }
     project_job_terminal_resume_suggested_call(
         app_enabled
@@ -2794,7 +3120,8 @@ pub(super) async fn handle_call(
             )
         }
     };
-    if app_only_work_result_state
+    if workbench_view_call
+        || (app_only_work_result_state && !work_result_thread_panel)
         || app_only_work_result_activity_detail
         || app_only_work_result_send_message
         || app_only_changes_file_diff
@@ -2809,11 +3136,18 @@ pub(super) async fn handle_call(
         // results retain the compact text fallback.
         attach_app_tool_content_fallback(&mut result);
     }
-    if app_enabled && params.name == "present_work_result" {
+    if (app_enabled && params.name == "present_work_result") || work_result_thread_panel {
         // Initial model-originated presentation keeps normal model content compact.
         // The private MCP App result channel lets the mounted View recover the exact
         // bounded Work Result when a Host omits structuredContent from tool-result.
         attach_work_result_app_private_result(&mut result);
+        if let Some(context) = work_result_thread_context {
+            // The admitted native entrypoint can omit discovery's UI capability
+            // on this call. Its exact authorized binding must still reach the View.
+            // Only the exact explicit presentation selection becomes refresh
+            // context. A Session merely linked to Window activity is not authority.
+            result["_meta"][WORK_RESULT_THREAD_CONTEXT_META_KEY] = context;
+        }
     }
     if app_only_agent_continuation {
         log_agent_continuation_app_result(

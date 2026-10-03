@@ -51,7 +51,7 @@ WebCodex scope 不会扩大这些客户端侧权限。
 
 如果 ChatGPT 自身返回 `FORBIDDEN: This conversation does not support developer MCPs`
 （或提示当前会话已禁用 developer MCP server），在有相反证据之前应先按 Host/conversation
-admission 问题处理。如果 Host 根本没有 dispatch `runtime_status`，这段文本并不是
+admission 问题处理。如果 Host 根本没有 dispatch `get_runtime_status`，这段文本并不是
 WebCodex tool result。修改 credential 或 Runner 配置前，先从独立路径确认 Server/Runner；
 完整流程见[故障排查](TROUBLESHOOTING.zh-CN.md)。
 
@@ -82,7 +82,7 @@ Direct 默认执行 handoff=10 秒、同步/观察上限=50 秒；Host Code Mode
 命令 `timeout_secs`、Job 身份、权限、执行生命周期及内部编排上限不变。
 `work_on_project.guidance_profile` 仍只覆盖当次指导文本；后续 context refresh
 按其自身请求策略处理。API transport、tools/list、App admission、错误语义及
-`WEBCODEX_MCP_TEXT_JSON_COMPAT` 均不改变。runtime_status 中的 mcp_host 继续
+`WEBCODEX_MCP_TEXT_JSON_COMPAT` 均不改变。get_runtime_status 中的 mcp_host 继续
 表示部署默认值，而非所有客户端当前请求的策略。
 
 默认在当前 turn 完成工作：先做独立工作，依赖 Job 时进行一次有界
@@ -119,6 +119,45 @@ credential。独立/network-accessible Server 仍默认关闭，不应使用它�
 
 如果在 Windows 上使用普通独立 Server + Runner 并通过 OpenAI Tunnel 接入，或排查“本地 `/readyz` 正常但 ChatGPT Connector 创建失败”的情况，见 [Windows + OpenAI Secure MCP Tunnel 深入实操](WINDOWS_OPENAI_TUNNEL.zh-CN.md)。它是深入配置/排障文档，不是普通用户第一次必须阅读的教程。
 
+## 对话侧边栏中的 Work Result
+
+`present_work_result` 在首次成功的 Project 操作后展示一次当前 Window 的工作结果。
+支持对话侧边栏的 Host 可以用空参数对象调用公开的界面展示
+`work_result_thread_panel` 入口。入口只恢复同一认证主体、同一 Host Window 中最近一次
+成功展示的 Project，以及该次展示显式传入的业务 Session。其他操作或失败的展示不能
+重新指定侧边栏目标。
+
+侧边栏默认打开 Review，依次展示 Changed files / 按需 Diff、Session 检查结果和
+sealed Final Changes。Activity / Collaboration 保留在次级页签；Project / Window /
+Session 标识收进默认折叠的 Diagnostics。inline card 继续采用 Activity 优先的布局，
+打开 Review 不会提前加载所有 Diff。
+
+已打开的侧边栏在刷新时保留原 Project 和显式 Session 选择；Window 关联的 Session
+证据不会成为刷新授权依据。重新打开才选择更新的成功展示记录。缺少稳定 Window
+或展示绑定时拒绝打开，每次读取仍校验当前授权和快照边界。
+
+Changed files 和 Final Changes 仅允许对已列出的路径按需查看 Full text。
+当前文件来自固定的工作树快照，最终文件来自 sealed final tree，后续修改不会漂移。
+每次显式加载最多 32 KiB，每文件累计最多 256 KiB；未完整或达到上限会明确标记。
+已删除文件没有最终版本；二进制、非 UTF-8、符号链接与 submodule 不提供文本预览。
+读取失败或快照过期不会转向实时路径。`.md` / `.markdown` 完整读取后才启用
+Markdown：内嵌 markdown-it 支持标准 Markdown、表格、删除线，不承诺完整 GFM。
+DOM 节点和属性采用允许列表，原生 HTML 作为文本，拒绝不安全 URL；链接不打开，
+外部图片仅显示未加载说明，不自动请求资源。行或选区回传对话留待后续版本。
+
+Markdown bundle 已提交在单 script App 资源内，纯 Rust 编译不需要 npm。
+`npm ci --prefix frontend` 后用 `npm --prefix frontend run build:work-result`
+重新生成；`node frontend/scripts/build-work-result-markdown.mjs --check` 比对确定性产物，
+该检查同时接入 `check:dist`。
+
+展示调用会保存这条窗口绑定，但不会启动 live Window activity；侧边栏入口和 App
+刷新调用也不会启动 live Window activity。当前界面资源是
+`ui://webcodex/work-result/v17`，旧版资源 URI 不再提供模板，避免缓存界面调用已退役的工具名。
+
+界面展示入口保留默认的 model/App 可见性；App-only 桥接工具只返回数据，不声明
+`ui.resourceUri`。ChatGPT 刷新工具时会拒绝声明界面资源的私有工具。更新 Server
+的工具描述后，应先在 ChatGPT 插件设置中刷新已有 App 的工具，再验证新入口。
+
 ## 已有 Server
 
 对于已经明确配置为 shared-key client 接入的 hosted Server，使用 operator 提供的 credential
@@ -141,7 +180,7 @@ OAuth 仍是独立的高级身份路径。
 
 ### Adaptive Runtime routing
 
-WebCodex 只有一个 model-facing MCP runtime contract：**Adaptive Runtime**。Canonical `ToolDefinition` rank 决定 direct tools；普通 model-visible long-tail tools 通过 `call_runtime_tool` 调用；server-owned protocol capability 与 MCP App admission 可以为对应请求加入 hidden extension。启动时不再选择 model surface。`tool_manifest(tool_name=...)` 只负责 discovery，不会动态向 Host 注册一个新 tool。exact manifest 的 `route.primary` 给出首选 callable；普通 direct tool 还会给出经 `call_runtime_tool` 的 `route.fallback`，用于 Host 当前没有该 direct callable 的情况；显式 MCP App presentation tool 会标明 Apps enabled 时该 fallback 被禁止。direct/gateway 只改变 presentation，不会绕过目标工具的 authentication、Project authority、permission、Runner capability、Session 或 safety checks。
+WebCodex 只有一个 model-facing MCP runtime contract：**Adaptive Runtime**。Canonical `ToolDefinition` rank 决定 direct tools；普通 model-visible long-tail tools 通过 `call_runtime_tool` 调用；server-owned protocol capability 与 MCP App admission 可以为对应请求加入 hidden extension。启动时不再选择 model surface。`read_tool_manifest(tool_name=...)` 只负责 discovery，不会动态向 Host 注册一个新 tool。exact manifest 的 `route.primary` 给出首选 callable；普通 direct tool 还会给出经 `call_runtime_tool` 的 `route.fallback`，用于 Host 当前没有该 direct callable 的情况；显式 MCP App presentation tool 会标明 Apps enabled 时该 fallback 被禁止。direct/gateway 只改变 presentation，不会绕过目标工具的 authentication、Project authority、permission、Runner capability、Session 或 safety checks。
 
 ### Tool result framing
 
@@ -161,7 +200,7 @@ hosted Server 可以通过同一个 `/mcp` 暴露 Runner-owned 本地 stdio MCP 
 
 ### Managed SSH resource 接入
 
-`ssh_resource` 工具提供一条窄化的 Runner-local 命名 SSH resource 接入路径。`list`
+`manage_ssh_resource` 工具提供一条窄化的 Runner-local 命名 SSH resource 接入路径。`list`
 观察安全逻辑名称并返回 opaque exact-Runner/revision binding；`register` 与 `remove`
 消费该 binding，只修改 durable desired state。它们不会把旧 mutation 静默重定向到
 replacement Runner，也不会在 uncertain outcome 后自动 replay。Raw SSH target 不会出现在
@@ -261,7 +300,7 @@ work_on_project
 → edit_project_files 或其它 canonical edit 工具
 → substantial work 进入真实状态后调用一次 present_work_result
 → 按需 run_process / run_shell / focused validation
-→ show_changes
+→ read_workspace_changes
 → finish_coding_task
 ```
 
@@ -269,9 +308,11 @@ work_on_project
 
 `present_work_result` 是 substantial coding 的一次性可视化层，不是 correctness primitive。挂载后，卡片通过 App-only state read 持续显示 Progress、Workspace、Validation 与 Review，无需模型轮询。`finish_coding_task` 在 non-blocking closeout 时把 eligible final changes seal 到 presentation cache，同一张卡随后发现这份 immutable snapshot，并按文件 lazy 展开 diff。tiny/read-only 工作应跳过这张卡，同一 Session 不应重复 presentation。
 
-普通的 portable read-only validation 优先使用 `project_validate`。它只接受封闭的 `format_check` / `check` / `test` intent，以及可选的 `auto` / `rust` / `go` adapter hint；Runner 在自己注册的真实文件系统上解析最近且无歧义的 recipe，然后进入现有 structured validation Job。Rust 分别映射到 `cargo fmt -- --check`、`cargo check --all-targets`、`cargo test`；Go 映射到 `go vet ./...` 或 `go test -json ./...`。Go project validation 由 Runner 固定为 single-module 模式（`GO111MODULE=on`、`GOWORK=off`），因此 ambient module mode 或父目录 `go.work` 选择不会静默改变 gateway 的 workspace 语义；其 validation target identity 与 ambient Go specialist evidence 做 domain separation，因此不同 workspace 语义下产生的成功不会消解 gateway failure。独立的 `go_test` specialist 保持现有环境语义。可选的有界 `scope.packages`（1..8 项）会把 Rust check/test 映射为重复 Cargo `-p` selector，把 Go check/test 映射为 project-relative package pattern；带 package scope 的格式检查会 fail closed。当前检测到 Node/Python 时会返回有界的 unsupported 结果。请求不会携带 arbitrary executable、argv、shell grammar、安装动作或 source mutation；需要 ecosystem-specific 高级参数时继续使用现有 `cargo_*` / `go_test`。`project_validate` 依赖 additive `project_validation_v1` Runner capability；只有 scoped request 额外要求 `project_validation_package_scope_v1`；Go project-validation Job 准入还额外要求 `project_go_single_module_v1`，因此 Server 不会把 Go gateway plan 交给仍可能继承 ambient workspace 状态的旧 Runner。
+普通的 portable read-only validation 优先使用 `project_validate`。它只接受封闭的 `format_check` / `check` / `test` intent，以及可选的 `auto` / `rust` / `go` / `python` adapter hint；Runner 在自己注册的真实文件系统上解析最近且无歧义的 recipe，然后进入现有 structured validation Job。Rust 分别映射到 `cargo fmt -- --check`、`cargo check --all-targets`、`cargo test`；Go 映射到 `go vet ./...` 或 `go test -json ./...`。Go project validation 由 Runner 固定为 single-module 模式（`GO111MODULE=on`、`GOWORK=off`），因此 ambient module mode 或父目录 `go.work` 选择不会静默改变 gateway 的 workspace 语义；其 validation target identity 与 ambient Go specialist evidence 做 domain separation，因此不同 workspace 语义下产生的成功不会消解 gateway failure。独立的 `go_test` specialist 保持现有环境语义。可选 `scope` 只允许二选一的 portable package intent：有界 `packages`（1..8 项）把 Rust check/test 映射为重复 Cargo `-p` selector，把 Go check/test 映射为 project-relative package pattern；`all_packages=true` 则选择完整 project unit。Rust all-packages 只有在 Runner 证明 effective Cargo workspace root 与 registered Project root 完全一致后才映射为 Cargo `--workspace`，并把 Project 内 Cargo manifest graph 绑定到既有 re-plan fence；Go all-packages 保持 canonical `./...` single-module scope。带 scope 的格式检查会 fail closed。Python 仅支持 test，复用 configured/profile/PATH 中已有的 Python 3，canonical argv 为 `python -m pytest --color=no -rA`；Python check/format、所有 scope 与 dependency policy 均 fail closed。Node 仍返回有界 unsupported。Python planning 与 Job 准入均要求 `project_validation_python_pytest_v1`；缺失 pytest 为明确的 not-started tooling failure，不自动安装或 fallback。环境、证据与同 Job 行为见 [Python/pytest validation](implementation/python-pytest-project-validation.md)。请求不会携带 arbitrary executable、argv、shell grammar、安装动作或 source mutation；需要 ecosystem-specific 高级参数时继续使用现有 `cargo_*` / `go_test`。`project_validate` 依赖 additive `project_validation_v1` Runner capability；显式 `packages` 额外要求 `project_validation_package_scope_v1`，而 `all_packages=true` 要求 `project_all_packages_v1`；Go project-validation Job 准入还额外要求 `project_go_single_module_v1`，因此 Server 不会把 Go gateway plan 交给仍可能继承 ambient workspace 状态的旧 Runner。
 
-普通的 portable Rust/Go 构建优先使用 `project_build`。它只接受精确 registered `project`、可选的 project-relative `cwd`、可选的 `auto` / `rust` / `go` adapter hint、有界 `scope.packages`（1..8 项）以及总 `timeout_secs`。Runner 解析最近且无歧义的 recipe 并拥有 canonical argv：Rust 映射为 `cargo build`，有 scope 时使用重复 `-p` selector；Go 映射为 `go build ./...` 或调用方给出的有界 project-relative package pattern。Go project build 由 Runner 固定以 `GO111MODULE=on`、`GOWORK=off` 执行；完整 `go.work` workspace 语义不属于 v1 gateway，也不会从 Runner host 隐式继承。请求不能携带 executable、argv、shell、script、release/profile/target/features、workspace/exclude、offline／network 策略或 artifact discovery contract；v1 检测到 Node/Python recipe 时 fail closed。
+Cargo all-packages provenance 是有界的 package-selection witness，并非完整构建输入快照。它要求 workspace 完全位于 registered Project 内，或独立 package 的祖先目录不存在 `Cargo.toml` marker；对 Project 外的祖先只探测 marker，不读取 manifest 内容。此 scope 不接受外部 path dependency，因为外部 manifest 的 `package.workspace` 可以把 Project 外 package 加入 workspace。相关 manifest／member／dependency alias 仍会被 fence，无关的非 manifest 链接会被忽略。无法证明的 topology 或超出边界上限时返回 `validation_scope_unavailable` / `build_scope_unavailable`；显式 package scope 和现有 specialist tools 保持各自契约。
+
+普通的 portable Rust/Go 构建优先使用 `project_build`。它只接受精确 registered `project`、可选的 project-relative `cwd`、可选的 `auto` / `rust` / `go` adapter hint、portable `scope`（有界 `packages` 1..8 项，或 `all_packages=true`，二者不可同时出现）以及总 `timeout_secs`。Runner 解析最近且无歧义的 recipe 并拥有 canonical argv：Rust 的显式 packages 使用重复 `-p` selector，all-packages 只有在 effective Cargo workspace root 与 registered Project root 完全一致时才映射为 `cargo build --workspace`；Go 的显式 package pattern 直接传入，all-packages 映射为 `go build ./...`。Go project build 由 Runner 固定以 `GO111MODULE=on`、`GOWORK=off` 执行；完整 `go.work` workspace 语义不属于 v1 gateway，也不会从 Runner host 隐式继承。请求不能携带 executable、argv、shell、script、release/profile/target/features、原生 workspace/exclude flag、offline／network 策略或 artifact discovery contract；portable all-packages request 额外要求 additive `project_all_packages_v1` Runner capability；v1 检测到 Node/Python recipe 时 fail closed。
 
 两个 gateway 都可选接受 `dependency_policy: {"mode":"locked"}`。这是 portable 的依赖解析保证，而不是宣称不同生态的原生 flag 完全等价：Rust build/check/test 映射为 Cargo `--locked`，Go build/vet/test 映射为 `-mod=readonly`。它要求 adapter 不得为了让本次操作成功而修复或改写项目级依赖选择状态，但**不**表示关闭 registry/module/toolchain 网络访问；offline／network policy 仍是 #599 后续独立扩展。`project_validate(action="format_check")` 会拒绝该 policy，而不是静默忽略。携带 policy 的 planning 与 typed Job admission 都要求 additive `project_dependency_policy_v1` Runner capability。locked validation 使用独立的 durable validation target identity；省略 policy 的请求保持原有 argv 与 identity。
 
@@ -279,7 +320,7 @@ work_on_project
 
 Adaptive Runtime 可以把常用工具直接暴露，把 long-tail 工具通过 `call_runtime_tool` 暴露。direct/gateway 只影响 model exposure，不改变 schema validation、OAuth scope、Project authority、permission policy、Runner capability、Session fence 或 tool effects。
 
-已删除的 ProjectConnector capability 名称（`task_start`、`files_read`、`edits_apply`、`task_finish` 等）不会作为 runtime 工具的 compatibility alias 保留。请使用当前 `tools/list` / `tool_manifest` 返回的 ToolRuntime 名称。
+已删除的 ProjectConnector capability 名称（`task_start`、`files_read`、`edits_apply`、`task_finish` 等）不会作为 runtime 工具的 compatibility alias 保留。请使用当前 `tools/list` / `read_tool_manifest` 返回的 ToolRuntime 名称。
 
 ### 长任务使用 Job lifecycle
 
@@ -340,35 +381,36 @@ stderr、provider stderr 或任意 provider prose。
 ### 项目级验证
 
 `project_validate` 通过 Runner 上的现有适配器执行 Rust 的格式检查／检查／测试，
-以及 Go 的检查／测试。`scope.packages` 表示有界包范围。
+以及 Go 的检查／测试、Python 的 pytest 测试。`scope.packages` 表示 Rust/Go 的有界包范围。
 `action="test"` 可使用 `test.filter`：Rust 为一个 libtest 子串，Go 为原生 `-run`
-正则表达式（包含子测试的斜杠语义），并非跨语言统一查询语法。Go 保留空格；
-空字符串或省略表示不加过滤。
+正则表达式（包含子测试的斜杠语义），Python 为原生 pytest `-k` 表达式，
+上限 200 UTF-8 bytes，拒绝控制字符及选项形状的前缀；并非跨语言统一查询语法。
+Go/Python 保留有意义的空格；空字符串或省略表示不加过滤。
 
 ```json
 {"project":"agent:runner:repo","action":"test","test":{"filter":"selected_test","require_tests":true,"min_tests":3}}
 ```
 
 `require_tests` 默认为 true，要求至少一个已证明执行的测试；false 且未设
-`min_tests` 时允许已证明的零测试结果。`min_tests` 为 1..1,000,000 的证据后置条件，
+`min_tests` 时保留原生成功，包括已证明的零测试或未知计数（未知计数仍未证明；source freshness 独立）。`min_tests` 为 1..1,000,000 的证据后置条件，
 即使 require_tests=false 仍需满足；计数未知不表示零。check／format_check 不接受
 该 test 块。任意显式 test 块均需 `project_validation_test_options_v1` 能力，
 规划与 Job 准入各检查一次；省略时保持原有行为。完整参数不会变成任意 argv／shell。
 长任务仍观察同一个 Job，不能因 Host 中断而重跑。
 
-构建产物、修改源码的格式化、lint、Node/Python 生产适配器，以及更广泛的
+构建产物、修改源码的格式化、lint、Node 与其他 Python 生产适配器，以及更广泛的
 workspace／依赖策略仍是 #599 后续工作；现有 cargo_*、go_test 与显式进程工具保留。
 
 ### ChatGPT 文件桥接
 
 当当前 MCP protocol/host admission 允许 artifact capability 时，WebCodex 支持双向的 host-native 文件传输，不需要把完整二进制经由模型文本搬运：
 
-- `import_conversation_files_to_project` 通过 ChatGPT host 的
+- `import_host_files` 通过 ChatGPT host 的
   `openai/fileParams` 导入 1..10 个文件。它既适用于用户选择的当前会话附件，也
   适用于 host 能绑定为 file parameter 的本轮新生成文件。Control 端负责下载原始
   bytes，并通过现有有界 artifact write 路径提交；调用方不应自行构造下载 URL，
   也不应手工 Base64 转运这些文件。
-- `project_artifact` 是首选的 Project → Model / Host 读取入口：
+- `inspect_project_artifact` 是首选的 Project → Model / Host 读取入口：
   `action=metadata` 用于 existence/size/MIME/digest/image/archive metadata；
   `action=inspect` 只读取一个有 snapshot fence 的有界 Base64 segment；
   `action=image` 通过 MCP native image delivery 给模型查看图片；
@@ -381,9 +423,9 @@ workspace／依赖策略仍是 #599 后续工作；现有 cargo_*、go_test 与�
   URI 本身不是独立 bearer authority；export handle 只是短期、process-local 的
   presentation state，现有大小、MIME、路径与 authorization 边界继续生效。
 
-底层 `read_project_artifact_metadata` 与 `read_project_artifact` 继续作为
+底层 `read_project_artifact_metadata` 与 `read_project_artifact_chunk` 继续作为
 operator/gateway primitive 保留。旧的 `export_project_artifact` compatibility tool 已
-删除；完整 host 交付统一通过 `project_artifact(action=export)` 暴露。DOCX/PPTX/XLSX
+删除；完整 host 交付统一通过 `inspect_project_artifact(action=export)` 暴露。DOCX/PPTX/XLSX
 等 Office artifact 与 PDF 仍复用同一底层 artifact transport，因此在支持这些 host
 能力的 ChatGPT 中，可以在 project 与 host 之间直接传递，而不需要模型手工搬运 Base64。
 

@@ -19,9 +19,8 @@ use super::git_review_snapshot::{
     GitReviewSnapshot,
 };
 use super::handoff::{
-    actionable_unexpected_failure_count, apply_compact_workflow_outcomes, closeout_work_projection,
-    compact_jobs, compact_review_evidence, compact_tool_failures, compact_validation,
-    reconcile_closeout_evidence, review_evidence_summary_for_session,
+    closeout_work_projection, compact_jobs, compact_review_evidence, compact_tool_failures,
+    compact_validation, reconcile_closeout_evidence, review_evidence_summary_for_session,
     validation_has_cargo_test_zero_tests,
 };
 use super::handoff_brief::{build_handoff_brief, HandoffBriefInput};
@@ -60,7 +59,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 /// Short startup probe budget for the repository overview, much tighter than
-/// the standalone `project_overview` tool's 30s wait. An optional overview
+/// the standalone `read_project_overview` tool's 30s wait. An optional overview
 /// failure must not block the coding task, so it fails over quickly.
 pub(crate) const DEFAULT_REPOSITORY_OVERVIEW_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 

@@ -269,7 +269,7 @@ fn goal_tools_are_control_only_and_never_declare_execution_authority() {
         );
     }
 
-    let app_state = lookup_tool_definition("goal_plan_sync").unwrap();
+    let app_state = lookup_tool_definition("sync_goal_plan").unwrap();
     assert!(app_state.model_spec.is_none());
     assert_eq!(app_state.category, "goal");
     assert_eq!(app_state.metadata.provider_id, "control");
@@ -481,7 +481,7 @@ fn goal_schemas_are_bounded_private_and_existing_coding_tools_do_not_accept_goal
     }
     let app_specs = crate::tool_runtime::goal_plan_app_tool_specs();
     assert_eq!(app_specs.len(), 1);
-    assert_eq!(app_specs[0].name, "goal_plan_sync");
+    assert_eq!(app_specs[0].name, "sync_goal_plan");
     for app_spec in &app_specs {
         assert_eq!(app_spec.input_schema["required"], json!(["goal_id"]));
         assert_eq!(
@@ -970,6 +970,7 @@ async fn prepare_goal_workflow_reauthorizes_session_project_controller_and_stays
         .list_goals(
             &communication_principal(Some(&owner)).unwrap(),
             None,
+            None,
             0,
             100,
         )
@@ -986,6 +987,7 @@ async fn prepare_goal_workflow_reauthorizes_session_project_controller_and_stays
     assert_eq!(
         db.list_goals(
             &communication_principal(Some(&owner)).unwrap(),
+            None,
             None,
             0,
             100,
@@ -1019,6 +1021,7 @@ async fn prepare_goal_workflow_reauthorizes_session_project_controller_and_stays
     assert_eq!(
         db.list_goals(
             &communication_principal(Some(&owner)).unwrap(),
+            None,
             None,
             0,
             100,
@@ -1364,7 +1367,7 @@ async fn goal_activity_tracks_window_wide_work_and_separates_seen_from_meaningfu
         &auth,
         "goal-window-wide",
         &project_a,
-        "goal_plan_sync",
+        "sync_goal_plan",
         false,
         None,
         poll_at,
@@ -1927,6 +1930,7 @@ async fn workflow_session_link_is_identity_only_and_finish_coding_task_does_not_
             runtime
                 .dispatch_with_auth(
                     ToolCall::FinishCodingTask {
+                        outputs: Vec::new(),
                         project,
                         session_id,
                         summary_only: true,

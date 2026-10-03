@@ -130,6 +130,9 @@ class PathRiskFixtureTests(unittest.TestCase):
             "plugins/agent-browser/src/plugin.ts",
             "plugins/agent-browser/tests/core.test.mjs",
             "plugins/agent-browser/package-lock.json",
+            "plugins/agent-environment/src/pi.mjs",
+            "plugins/agent-environment/test/pi.integration.mjs",
+            "plugins/agent-environment/package-lock.json",
         ):
             with self.subTest(path=path):
                 result = classify(path)
@@ -216,6 +219,10 @@ class PathRiskFixtureTests(unittest.TestCase):
             "scripts/macos_sign_local_runner.sh",
             "scripts/macos_ci_developer_id_setup.sh",
             "scripts/macos_sign_runner.sh",
+            "scripts/macos_ci_signing_setup.sh",
+            "scripts/macos_sign_self_signed.sh",
+            "scripts/macos_finalize_desktop.sh",
+            "scripts/macos_finalize_dmg.sh",
             "scripts/verify_macos_desktop_identity.sh",
         ):
             with self.subTest(path=path):

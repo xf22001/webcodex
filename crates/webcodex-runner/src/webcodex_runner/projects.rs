@@ -7,18 +7,19 @@ use serde::{Deserialize, Serialize};
 use super::config::default_true;
 #[cfg(test)]
 use super::config::RunnerPolicy;
-use crate::runner_protocol::RunnerProjectSummary;
-#[cfg(test)]
-use crate::runner_protocol::RunnerRequest;
-use crate::CommandResult;
+use crate::webcodex_runner::output::CommandResult;
 #[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
 use webcodex_core::runner_operation::RunnerOperation;
 #[cfg(test)]
 use webcodex_core::runner_operation::RunnerProjectOperation;
+use webcodex_core::runner_protocol::RunnerProjectSummary;
+#[cfg(test)]
+use webcodex_core::runner_protocol::RunnerRequest;
 
 mod catalog;
+mod created_paths;
 mod lifecycle;
 mod managed_worktree;
 mod registration;
@@ -34,9 +35,11 @@ pub(crate) use lifecycle::{handle_project_lifecycle_operation, handle_project_op
 
 pub(crate) use managed_worktree::handle_prepare_managed_worktree_operation;
 
-pub(crate) use registration::handle_resolve_or_register_project_operation;
 #[cfg(test)]
-use registration::{build_project_toml, sync_parent_dir};
+use registration::build_project_toml;
+pub(crate) use registration::handle_resolve_or_register_project_operation;
+#[cfg(all(test, unix))]
+use registration::sync_parent_dir;
 #[cfg(test)]
 pub(crate) use registration::{
     fail_next_project_parent_sync_after_rename, fail_next_project_publish_before_rename,
@@ -135,6 +138,8 @@ pub(crate) struct RunnerProjectCache {
 pub(crate) struct RunnerProjectShellContext {
     pub(crate) id: String,
     pub(crate) path: String,
+    /// Current registry write authority; avoids Git/status probes on tool admission.
+    pub(crate) allow_patch: bool,
     pub(crate) shell_profile: Option<String>,
 }
 

@@ -205,6 +205,13 @@ pub(super) fn context_result_summary_for_tool_result(
 ) -> Option<Value> {
     let policy = audit_policy_for_tool(tool_name)?;
     let summary = match policy.context {
+        ToolAuditContextPolicy::TaskOutputs => {
+            let outputs: webcodex_core::task_outputs::TaskOutputs =
+                serde_json::from_value(output.get("task_outputs")?.clone()).ok()?;
+            return outputs
+                .valid()
+                .then(|| serde_json::json!({"task_outputs": outputs}));
+        }
         ToolAuditContextPolicy::Omit => return None,
         ToolAuditContextPolicy::ResultProjection => match policy.result {
             // Reuse the same result declaration for either canonical raw evidence
@@ -299,7 +306,7 @@ mod tests {
     #[test]
     fn search_and_read_session_audit_redacts_single_and_batched_patterns() {
         let single = session_input_summary_for_tool(
-            "search_and_read",
+            "search_file_context",
             &json!({
                 "project": "demo",
                 "query": {"pattern": "PRIVATE_SINGLE_PATTERN", "path": "src/lib.rs"},
@@ -312,7 +319,7 @@ mod tests {
         assert!(!single.to_string().contains("PRIVATE_SINGLE_PATTERN"));
 
         let batched = session_input_summary_for_tool(
-            "search_and_read",
+            "search_file_context",
             &json!({
                 "project": "demo",
                 "queries": [
@@ -357,7 +364,7 @@ mod tests {
     #[test]
     fn skill_load_session_audit_omits_private_name() {
         let input = session_input_summary_for_tool(
-            "skill_load",
+            "load_skill",
             &json!({
                 "project": "demo",
                 "name": "PRIVATE SKILL NAME"
@@ -368,7 +375,7 @@ mod tests {
         assert!(!input.to_string().contains("PRIVATE SKILL NAME"));
 
         let context = context_result_summary_for_tool_result(
-            "skill_load",
+            "load_skill",
             &json!({
                 "catalog_revision": "wc_skillcat_demo",
                 "skill_id": "wc_skill_demo",
@@ -410,7 +417,7 @@ mod tests {
         .unwrap();
         assert_eq!(raw_agent["agent_id"], "wc_dagent_raw");
         let raw_memory = context_result_summary_for_tool_result(
-            "memory_read",
+            "read_memory",
             &json!({
                 "memory_id":"wc_mem_demo", "memory_key":"policy", "revision":"wc_memrev_demo",
                 "body":"PRIVATE_MEMORY_BODY", "bootstrap":false, "priority":"normal"
@@ -423,7 +430,7 @@ mod tests {
         );
         assert!(!raw_memory.to_string().contains("PRIVATE_MEMORY_BODY"));
         let status = context_result_summary_for_tool_result(
-            "git_status",
+            "get_git_status",
             &json!({"stdout":" M src/lib.rs\n", "exit_code":0}),
         )
         .unwrap();

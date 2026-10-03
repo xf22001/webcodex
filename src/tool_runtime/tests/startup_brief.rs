@@ -119,7 +119,7 @@ fn assert_builtin_workflow(output: &Value) {
     let recovery = workflow["model_protocol"]["handoff_recovery"]
         .as_str()
         .unwrap();
-    assert!(recovery.contains("session_handoff_summary"));
+    assert!(recovery.contains("read_session_handoff"));
     assert!(recovery.contains("exact session_id"));
     assert!(recovery.contains("basis completeness"));
     assert!(recovery.contains("only after task-context loss/compaction/restart"));
@@ -184,7 +184,7 @@ fn assert_builtin_workflow(output: &Value) {
         .as_str()
         .expect("exact Runner targeting guidance");
     assert!(runner_targeting_guidance.contains("exact Runner client_id"));
-    assert!(runner_targeting_guidance.contains("runtime_status(client_id=...)"));
+    assert!(runner_targeting_guidance.contains("get_runtime_status(client_id=...)"));
     assert!(runner_targeting_guidance.contains("list_projects(client_id=...)"));
     assert!(runner_targeting_guidance.contains("before treating it as absent"));
     assert_eq!(workflow["tool_strategy"]["profile"], "direct");
@@ -200,8 +200,8 @@ fn assert_builtin_workflow(output: &Value) {
         "Recovery/compaction/exact Session resume is continuation",
         "reuse still-current Git/read/validation/Job facts",
         "continue independent work",
-        "Ordinary implementation is default",
-        "map cross-layer changes end to end",
+        "For inspection, files/data/artifacts, diagnostics, or coding",
+        "Coding maps cross-layer changes end to end",
         "compiler/schema/exhaustiveness failures",
         "Validation failure is evidence, not queue cleanliness",
         "Reuse assertion_name",
@@ -272,7 +272,7 @@ fn assert_builtin_workflow(output: &Value) {
     assert!(closeout_guidance.contains("Read/planning/artifact"));
     assert!(closeout_guidance.contains("finalize directly"));
     assert!(closeout_guidance.contains("goal_follow_up"));
-    assert!(closeout_guidance.contains("never completes a Goal"));
+    assert!(closeout_guidance.contains("never complete a Goal"));
     let goal_workflow = workflow["model_protocol"]["goal_workflow"]
         .as_str()
         .unwrap();
@@ -1484,7 +1484,7 @@ async fn minimal_standard_and_full_coding_workflow_diagnostics_validate_against_
             "has_open_messages": true,
             "open_counts": {"guidance": 1, "question": 0, "todo": 0, "risk": 0},
             "highest_priority": "normal",
-            "suggested_next_tool": "session_discussion_summary"
+            "suggested_next_tool": "read_session_discussion_summary"
         });
         recorded.output["permission"] = json!({"status": "auto_approved"});
         let recorded_value = json!({

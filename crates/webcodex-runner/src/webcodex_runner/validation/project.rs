@@ -6,8 +6,8 @@ use webcodex_core::validation_identity::{
     contextualize_structured_validation_target_identity, StructuredValidationExecutionContext,
 };
 use webcodex_validation::{
-    detect_validation_recipe, project_validation_operation,
-    resolve_validation_recipe_with_project_policy, RecipeId, SemanticCheck,
+    detect_validation_recipe, project_validation_operation, resolve_project_validation_recipe,
+    RecipeId, SemanticCheck,
 };
 
 pub(crate) fn plan(
@@ -31,10 +31,11 @@ pub(crate) fn plan(
         ProjectValidationAdapter::Auto => None,
         ProjectValidationAdapter::Rust => Some(RecipeId::Rust),
         ProjectValidationAdapter::Go => Some(RecipeId::Go),
+        ProjectValidationAdapter::Python => Some(RecipeId::Python),
     };
     let backend = detect_validation_recipe(&root, request.cwd.as_deref(), hint)
         .map_err(|e| unavailable(e.code, None))?;
-    if matches!(backend, RecipeId::Node | RecipeId::Python) {
+    if matches!(backend, RecipeId::Node) {
         return Err(unavailable(
             "validation_adapter_unavailable",
             Some(backend.as_str()),
@@ -45,17 +46,25 @@ pub(crate) fn plan(
         ProjectValidationAction::Check => SemanticCheck::Check,
         ProjectValidationAction::Test => SemanticCheck::Test,
     };
-    let packages = request.scope.as_ref().map(|scope| scope.packages.clone());
+    let packages = request
+        .scope
+        .as_ref()
+        .and_then(ProjectValidationScope::explicit_packages)
+        .map(<[String]>::to_vec);
+    let all_packages = request
+        .scope
+        .as_ref()
+        .is_some_and(ProjectValidationScope::selects_all_packages);
     let filter = request
         .test
         .as_ref()
         .and_then(|test| test.filter.as_deref());
-    let operation = project_validation_operation(backend.as_str(), action, packages)
+    let operation = project_validation_operation(backend.as_str(), action, packages, all_packages)
         .and_then(|operation| operation.with_dependency_policy(request.dependency_policy))
         .and_then(|operation| operation.with_test_filter(filter))
         .map_err(|code| unavailable(code, Some(backend.as_str())))?;
     let adapter = operation.adapter();
-    let resolved = resolve_validation_recipe_with_project_policy(
+    let resolved = resolve_project_validation_recipe(
         &root,
         request.cwd.as_deref(),
         hint,
@@ -64,7 +73,8 @@ pub(crate) fn plan(
         request
             .scope
             .as_ref()
-            .map(|scope| scope.packages.as_slice()),
+            .and_then(ProjectValidationScope::explicit_packages),
+        all_packages,
         request.dependency_policy,
     )
     .map_err(|e| unavailable(e.code, Some(backend.as_str())))?;

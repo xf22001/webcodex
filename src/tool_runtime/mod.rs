@@ -1,4 +1,4 @@
-//! Tool Runtime — unified execution layer for MCP and GPT Actions.
+//! Tool Runtime — unified execution layer for MCP.
 //!
 //! Both protocol adapters call `ToolRuntime::dispatch()`.
 //! No HTTP framework types here — pure Rust input/output.
@@ -20,6 +20,8 @@ mod orchestration_host;
 mod validation;
 #[cfg(feature = "experimental-code-mode")]
 pub(crate) use code_mode::is_admitted_nested_tool as code_mode_nested_tool_is_admitted;
+mod closeout_facts;
+mod closeout_projection;
 mod coding_agent;
 mod coding_task;
 mod coding_task_tools;
@@ -38,6 +40,7 @@ mod git;
 mod runner_authorization;
 mod runner_config;
 mod runner_instructions;
+mod task_outputs;
 mod trace_diagnostics;
 #[cfg(test)]
 pub(crate) use git::{framed_clean_show_changes_test_stdout, framed_show_changes_test_block};
@@ -84,6 +87,8 @@ mod read_files;
 mod read_revisions;
 #[cfg(test)]
 pub(crate) use read_revisions::ReadRevisionTarget;
+mod optional_enrichment;
+pub(crate) mod resource_references;
 mod result_projection;
 mod return_timing;
 mod runtime;
@@ -127,6 +132,7 @@ pub(crate) use webcodex_tool_contracts::{
 pub(crate) use webcodex_tool_runtime_contracts::recorder_metadata::parse_tool_call_with_recorder_metadata;
 pub(crate) use webcodex_tool_runtime_contracts::{tool_audit, tool_result};
 mod work_result;
+mod work_result_workspace;
 pub(crate) use window_activity::{ActiveWindowRequest, MAX_ACTIVE_REQUESTS_PER_WINDOW};
 
 #[cfg(test)]

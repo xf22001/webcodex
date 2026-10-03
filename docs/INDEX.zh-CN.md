@@ -29,7 +29,6 @@
 - [MCP](MCP.zh-CN.md) —— Bearer、query-token 兼容方式、OAuth、私有隧道和 MCP 参考
 - [认证模型](AUTH_MODEL.zh-CN.md) —— 详细凭据和权限边界
 - [部署指南](DEPLOYMENT.zh-CN.md) —— 稳定 HTTPS、自托管和生产网络配置
-- [GPT Actions](GPT_ACTIONS.zh-CN.md) —— 可选的 OpenAPI Custom GPT 集成
 
 ## 我遇到了问题
 
@@ -46,6 +45,7 @@
 ## 我想参与开发或发布
 
 - [Desktop 开发与打包](DESKTOP_DEVELOPMENT.zh-CN.md) —— 从源码运行 Desktop，并本地构建/验证 Windows 与 macOS 原生安装包
+- [赞助与项目支持](SPONSORSHIP.zh-CN.md) —— 社区赞助、基础设施支持、项目合作与展示原则
 
 下面 `docs/agent/` 中的页面属于 maintainer/internal contract。它们会有意保留
 protocol field、兼容名称和实现 invariant；普通用户不需要为了使用 WebCodex 而学习
@@ -62,5 +62,5 @@ protocol field、兼容名称和实现 invariant；普通用户不需要为了�
 - [权限模型](agent/permission-model.md)
 - [会话模型](agent/session-model.md)
 - [手动多窗口协作](agent/manual-window-collaboration.md)
-- [OpenAPI 指南](agent/openapi-guidelines.md)
+- [OpenAPI 指南](agent/runtime-api-guidelines.md)
 - [发布流程](agent/release-process.md)

@@ -159,49 +159,6 @@ fn prepare_project_authority(
     })
 }
 
-fn prepare_exact_project_authority(
-    project: &Path,
-    configured_roots: &[PathBuf],
-    allow_cwd_anywhere: bool,
-) -> Result<PreparedProjectAuthority, String> {
-    webcodex_runner_config::paths::validate_project_path_ingress(project)?;
-    if project
-        .components()
-        .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
-        return Err("project path must not contain parent traversal".to_string());
-    }
-    let canonical_project = canonical_existing_directory(project, "project path")?;
-    let canonical_roots =
-        webcodex_runner_config::paths::canonicalize_usable_allowed_roots(configured_roots);
-    let exact_root_present = canonical_roots
-        .iter()
-        .any(|root| webcodex_runner_config::paths::paths_equal(root, &canonical_project));
-    let mut allowed_roots = configured_roots.to_vec();
-    if !exact_root_present {
-        allowed_roots.push(canonical_project.clone());
-    }
-    let canonical_after =
-        webcodex_runner_config::paths::canonicalize_usable_allowed_roots(&allowed_roots);
-    webcodex_runner_config::paths::validate_project_path_policy(
-        &canonical_project,
-        &canonical_after,
-        allow_cwd_anywhere,
-    )?;
-    if !exact_root_present
-        && project
-            .ancestors()
-            .any(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()))
-    {
-        return Err("project symlink resolves outside allowed_roots; select the canonical directory explicitly".to_string());
-    }
-    Ok(PreparedProjectAuthority {
-        canonical_project,
-        allowed_roots,
-        authority_changed: !exact_root_present,
-    })
-}
-
 fn register_canonical_project(
     project_registry_dir: &Path,
     canonical_project: PathBuf,
@@ -583,7 +540,7 @@ async fn reconcile_reload_generation(
     let checked = runtime_tool_call(
         server_url,
         token,
-        "runner_config_check",
+        "check_runner_config",
         json!({"client_id": client_id}),
     )
     .await
@@ -681,7 +638,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
     validate_user_api_token(&token)?;
 
     let (mut config, mut config_content) = read_activation_config(&opts.config)?;
-    let mut prepared = prepare_exact_project_authority(
+    let mut prepared = prepare_project_authority(
         &opts.project,
         &config.policy.allowed_roots,
         config.policy.allow_cwd_anywhere,
@@ -695,8 +652,8 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
     let mut generation_after = None;
     let mut reload_reconciled = false;
 
-    // Idempotence fast path: if the exact root is already persisted, let the
-    // current Runner prove active authority and canonical registration before
+    // Fast path: if the selected project is already covered by the current
+    // filesystem authority, register/resolve it without rewriting policy or
     // touching config generation.
     if !prepared.authority_changed {
         match resolve_project_operator(&server_url, &token, &client_id, &canonical_project).await {
@@ -788,7 +745,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
         let checked = runtime_tool_call(
             &server_url,
             &token,
-            "runner_config_check",
+            "check_runner_config",
             json!({"client_id": client_id}),
         )
         .await?;
@@ -833,7 +790,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
             let snapshot = reread_activation_config(&opts.config, &server_url, &client_id)?;
             config = snapshot.0;
             config_content = snapshot.1;
-            prepared = prepare_exact_project_authority(
+            prepared = prepare_project_authority(
                 &canonical_project,
                 &config.policy.allowed_roots,
                 config.policy.allow_cwd_anywhere,
@@ -844,7 +801,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
         let reload = runtime_tool_call(
             &server_url,
             &token,
-            "runner_config_reload",
+            "reload_runner_config",
             json!({"client_id": client_id, "expected_generation": generation}),
         )
         .await;
@@ -872,7 +829,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
                 let snapshot = reread_activation_config(&opts.config, &server_url, &client_id)?;
                 config = snapshot.0;
                 config_content = snapshot.1;
-                prepared = prepare_exact_project_authority(
+                prepared = prepare_project_authority(
                     &canonical_project,
                     &config.policy.allowed_roots,
                     config.policy.allow_cwd_anywhere,
@@ -1214,27 +1171,33 @@ mod tests {
     }
 
     #[test]
-    fn activation_adds_exact_root_even_when_parent_or_cwd_anywhere_already_authorizes_path() {
+    fn activation_reuses_existing_authority_and_only_adds_an_exact_root_when_needed() {
         let tmp = canonical_test_tempdir();
         let parent = tmp.path().join("parent");
         let project = parent.join("demo");
+        let outside = tmp.path().join("outside");
         std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
         let parent = parent.canonicalize().unwrap();
         let project = project.canonicalize().unwrap();
+        let outside = outside.canonicalize().unwrap();
 
-        let prepared = prepare_exact_project_authority(&project, &[parent.clone()], false).unwrap();
-        assert!(prepared.authority_changed);
+        let covered = prepare_project_authority(&project, &[parent.clone()], false).unwrap();
+        assert!(!covered.authority_changed);
+        assert_eq!(covered.allowed_roots, vec![parent.clone()]);
+
+        let expanded = prepare_project_authority(&outside, &[parent.clone()], false).unwrap();
+        assert!(expanded.authority_changed);
         assert_eq!(
-            prepared.allowed_roots,
-            vec![parent.clone(), project.clone()]
+            expanded.allowed_roots,
+            vec![parent.clone(), outside.clone()]
         );
 
-        let cwd_anywhere = prepare_exact_project_authority(&project, &[], true).unwrap();
-        assert!(cwd_anywhere.authority_changed);
-        assert_eq!(cwd_anywhere.allowed_roots, vec![project.clone()]);
+        let cwd_anywhere = prepare_project_authority(&outside, &[], true).unwrap();
+        assert!(!cwd_anywhere.authority_changed);
 
         let repeated =
-            prepare_exact_project_authority(&project, &[parent, project.clone()], false).unwrap();
+            prepare_project_authority(&project, &[parent, project.clone()], false).unwrap();
         assert!(!repeated.authority_changed);
         assert_eq!(
             repeated
@@ -1247,7 +1210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activation_existing_exact_root_and_project_skips_config_reload() {
+    async fn activation_existing_parent_root_and_project_skips_config_reload() {
         let tmp = canonical_test_tempdir();
         let project = tmp.path().join("demo");
         std::fs::create_dir_all(&project).unwrap();
@@ -1270,7 +1233,7 @@ mod tests {
         activation_config(
             &config_path,
             &server_url,
-            std::slice::from_ref(&canonical_project),
+            &[tmp.path().canonicalize().unwrap()],
             false,
         );
         let token_file = tmp.path().join("user-token");
@@ -1353,19 +1316,19 @@ mod tests {
         let canonical_project = project.canonicalize().unwrap();
         let responses = vec![
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":1,"restart_required":false}}),
             ),
             (
-                "tool:runner_config_reload",
+                "tool:reload_runner_config",
                 json!({"success":false,"output":{"execution_state":"not_started","error_code":"config_generation_conflict","current_generation":2},"error":"generation changed"}),
             ),
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":2,"restart_required":false}}),
             ),
             (
-                "tool:runner_config_reload",
+                "tool:reload_runner_config",
                 json!({"success":true,"output":{"execution_state":"completed","valid":true,"current_generation":3,"restart_required":false}}),
             ),
             (
@@ -1375,7 +1338,15 @@ mod tests {
         ];
         let (server_url, server) = spawn_operator_server(responses);
         let config_path = tmp.path().join("runner.toml");
-        activation_config(&config_path, &server_url, &[], false);
+        let unrelated = tmp.path().join("authorized");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let unrelated = unrelated.canonicalize().unwrap();
+        activation_config(
+            &config_path,
+            &server_url,
+            std::slice::from_ref(&unrelated),
+            false,
+        );
         let token_file = tmp.path().join("user-token");
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
@@ -1405,9 +1376,13 @@ mod tests {
         let parsed: toml::Value =
             toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let roots = parsed["policy"]["allowed_roots"].as_array().unwrap();
-        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.len(), 2);
         assert_eq!(
             roots[0].as_str(),
+            Some(unrelated.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            roots[1].as_str(),
             Some(canonical_project.to_string_lossy().as_ref())
         );
     }
@@ -1420,15 +1395,15 @@ mod tests {
         let canonical_project = project.canonicalize().unwrap();
         let responses = vec![
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":7,"restart_required":false}}),
             ),
             (
-                "tool:runner_config_reload",
+                "tool:reload_runner_config",
                 json!({"success":false,"output":{"execution_state":"outcome_unknown","error_code":"operation_indeterminate"},"error":"response lost"}),
             ),
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":8,"restart_required":false}}),
             ),
             (
@@ -1438,7 +1413,15 @@ mod tests {
         ];
         let (server_url, server) = spawn_operator_server(responses);
         let config_path = tmp.path().join("runner.toml");
-        activation_config(&config_path, &server_url, &[], false);
+        let unrelated = tmp.path().join("authorized");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let unrelated = unrelated.canonicalize().unwrap();
+        activation_config(
+            &config_path,
+            &server_url,
+            std::slice::from_ref(&unrelated),
+            false,
+        );
         let token_file = tmp.path().join("user-token");
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
@@ -1462,11 +1445,11 @@ mod tests {
         assert_eq!(
             requests
                 .iter()
-                .filter(|request| request_json(request)["tool"] == "runner_config_reload")
+                .filter(|request| request_json(request)["tool"] == "reload_runner_config")
                 .count(),
             1
         );
-        assert_eq!(request_json(&requests[2])["tool"], "runner_config_check");
+        assert_eq!(request_json(&requests[2])["tool"], "check_runner_config");
         assert!(requests[3].starts_with("POST /api/projects/resolve-or-register "));
     }
 
@@ -1477,21 +1460,29 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let responses = vec![
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":7,"restart_required":false}}),
             ),
             (
-                "tool:runner_config_reload",
+                "tool:reload_runner_config",
                 json!({"success":false,"output":{"execution_state":"outcome_unknown","error_code":"operation_indeterminate"},"error":"response lost"}),
             ),
             (
-                "tool:runner_config_check",
+                "tool:check_runner_config",
                 json!({"success":true,"output":{"valid":true,"current_generation":7,"restart_required":false}}),
             ),
         ];
         let (server_url, server) = spawn_operator_server(responses);
         let config_path = tmp.path().join("runner.toml");
-        activation_config(&config_path, &server_url, &[], false);
+        let unrelated = tmp.path().join("authorized");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let unrelated = unrelated.canonicalize().unwrap();
+        activation_config(
+            &config_path,
+            &server_url,
+            std::slice::from_ref(&unrelated),
+            false,
+        );
         let token_file = tmp.path().join("user-token");
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
@@ -1512,7 +1503,7 @@ mod tests {
         assert_eq!(
             requests
                 .iter()
-                .filter(|request| request_json(request)["tool"] == "runner_config_reload")
+                .filter(|request| request_json(request)["tool"] == "reload_runner_config")
                 .count(),
             1,
             "uncertain reload with unchanged generation must never be retried"

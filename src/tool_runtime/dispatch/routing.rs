@@ -22,6 +22,28 @@ impl ToolRuntime {
         bootstrap_context: &mut Option<crate::tool_runtime::coding_task::BootstrapContext>,
     ) -> ToolResult {
         match call {
+            ToolCall::OpenWebcodexWorkbench {
+                project,
+                session_id,
+            } => {
+                self.open_webcodex_workbench(project, session_id, auth)
+                    .await
+            }
+            ToolCall::SearchWebcodexResources {
+                kind,
+                query,
+                project,
+                session_id,
+                offset,
+                limit,
+            } => {
+                self.search_webcodex_resources(
+                    kind, query, project, session_id, offset, limit, auth,
+                )
+                .await
+            }
+            ToolCall::ReadWebcodexResource { uri } => self.read_webcodex_resource(&uri, auth).await,
+
             call @ (ToolCall::ListTools { .. }
             | ToolCall::ListRunners { .. }
             | ToolCall::RuntimeStatus { .. }
@@ -51,7 +73,7 @@ impl ToolRuntime {
 
             ToolCall::SshResource(_) => {
                 unreachable!(
-                    "ssh_resource is dispatched before generic static ToolDefinition policy"
+                    "manage_ssh_resource is dispatched before generic static ToolDefinition policy"
                 )
             }
 
@@ -217,11 +239,6 @@ impl ToolRuntime {
                 self.dispatch_agent_work_authorized(call, auth).await
             }
 
-            #[cfg(feature = "legacy-gpt-actions")]
-            call @ ToolCall::AttachAgentEndpoint { .. } => {
-                self.dispatch_agents_authorized(call, auth, window).await
-            }
-
             call @ (ToolCall::CreateAgentIdentity { .. }
             | ToolCall::ListAgentIdentities { .. }
             | ToolCall::UpdateAgentIdentity { .. }
@@ -281,6 +298,7 @@ impl ToolRuntime {
             | ToolCall::WriteProjectFile { .. }
             | ToolCall::SaveProjectArtifact { .. }
             | ToolCall::TransferProjectArtifact { .. }
+            | ToolCall::AcceptArtifactHandoff { .. }
             | ToolCall::ProjectArtifact { .. }
             | ToolCall::ReadProjectArtifactMetadata { .. }
             | ToolCall::ReadProjectArtifact { .. }

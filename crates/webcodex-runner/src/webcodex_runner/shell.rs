@@ -10,9 +10,6 @@ use super::output_text::{
     CapturedOutputEncoding, FullStreamUtf8Validity, LeadingBom, OutputTextSource,
 };
 use super::projects::find_project_shell_context;
-#[cfg(windows)]
-use crate::runner_protocol::ShellCommandExecutionState;
-use crate::runner_protocol::{ShellProcessArgv, ShellScriptLanguage, ShellScriptPayload};
 use std::collections::HashMap;
 #[cfg(windows)]
 use std::ffi::OsStr;
@@ -23,6 +20,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use webcodex_core::runner_protocol::ShellCommandExecutionState;
+use webcodex_core::runner_protocol::{ShellProcessArgv, ShellScriptLanguage, ShellScriptPayload};
 
 use webcodex_core::workflow_session_contract::ExecutionShell;
 use webcodex_process::{GracefulTermination, ManagedChild};
@@ -127,8 +127,8 @@ mod search;
 pub(crate) use commands::shell_quote_powershell;
 pub(crate) use commands::{
     configured_explicit_shell_command, configured_prepared_shell_job_command,
-    configured_shell_job_command, configured_validation_job_command, explicit_shell_available,
-    shell_quote,
+    configured_pytest_job_command, configured_shell_job_command, configured_validation_job_command,
+    explicit_shell_available, shell_quote,
 };
 use commands::{
     configured_prepared_shell_command, configured_process_command, configured_process_path,

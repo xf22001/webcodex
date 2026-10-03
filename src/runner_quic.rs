@@ -2,7 +2,7 @@
 //!
 //! This is a **custom QUIC stream transport** for Runner connections, NOT
 //! HTTP/3. It runs a separate `quinn` UDP listener in parallel with the HTTP
-//! server (which keeps serving GPT Actions over TCP 443 via Nginx unchanged).
+//! server (which keeps serving MCP over TCP 443 via Nginx unchanged).
 //! Nginx is not involved in QUIC.
 //!
 //! QUIC is an alternative transport for the existing Runner envelope protocol.
@@ -611,7 +611,9 @@ mod tests {
             project_dependency_policy_v1: false,
             project_go_single_module_v1: false,
             project_validation_package_scope_v1: false,
+            project_all_packages_v1: false,
             project_validation_test_options_v1: false,
+            project_validation_python_pytest_v1: false,
             structured_go_test_tool: true,
             structured_go_test_packages: true,
             structured_process_argv: true,
@@ -1553,7 +1555,7 @@ mod tests {
     }
 
     /// A QUIC-registered Runner must surface protocol generation 2 and the
-    /// `quic` transport in `list_runners` (used by runtime_status / list_runners).
+    /// `quic` transport in `list_runners` (used by get_runtime_status / list_runners).
     #[tokio::test]
     async fn quic_runner_surfaces_transport_and_protocol_in_list() {
         let (cert_der, key_der) = self_signed_cert();

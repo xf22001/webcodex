@@ -1,6 +1,6 @@
 use super::{
-    resolve_validation_recipe, resolve_validation_recipe_with_packages, RecipeError, RecipeId,
-    SemanticCheck,
+    resolve_project_validation_recipe, resolve_validation_recipe,
+    resolve_validation_recipe_with_packages, RecipeError, RecipeId, SemanticCheck,
 };
 use std::fs;
 use std::path::Path;
@@ -515,6 +515,53 @@ fn package_scope_is_rejected_for_non_portable_backends() {
 }
 
 #[test]
+fn project_pytest_fences_ancestor_config_and_external_parent_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("nested")).unwrap();
+
+    write(temp.path(), "pytest.ini", "[pytest]\naddopts=-q\n");
+    let external = resolve_project_validation_recipe(
+        &project,
+        Some("nested"),
+        Some(RecipeId::Python),
+        &[SemanticCheck::Test],
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(external.code, "validation_manifest_invalid");
+
+    write(&project, "pytest.ini", "[pytest]\naddopts=-q\n");
+    let before = resolve_project_validation_recipe(
+        &project,
+        Some("nested"),
+        Some(RecipeId::Python),
+        &[SemanticCheck::Test],
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    write(&project, "pytest.ini", "[pytest]\naddopts=-ra\n");
+    let after = resolve_project_validation_recipe(
+        &project,
+        Some("nested"),
+        Some(RecipeId::Python),
+        &[SemanticCheck::Test],
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    assert_ne!(before.manifest_digest, after.manifest_digest);
+}
+
+#[test]
 fn project_recipe_filtered_execution_is_deterministic_without_repeating_arg_builders() {
     for (marker, backend, filter) in [
         ("Cargo.toml", RecipeId::Rust, " selected "),
@@ -539,7 +586,7 @@ fn project_recipe_filtered_execution_is_deterministic_without_repeating_arg_buil
         )
         .unwrap();
         let expected =
-            crate::project_validation_operation(backend.as_str(), SemanticCheck::Test, None)
+            crate::project_validation_operation(backend.as_str(), SemanticCheck::Test, None, false)
                 .unwrap()
                 .with_test_filter(Some(filter))
                 .unwrap()

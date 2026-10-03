@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+mod project_addition;
 
 const HTTP_LIMIT: usize = 1024 * 1024;
 use webcodex_core::authority::{
@@ -19,8 +21,56 @@ use webcodex_core::authority::{
 /// The production adapter. Neither frontend supplies its own deployment backend.
 pub struct NativeEnvironment {
     client: reqwest::Client,
+    direct_client: reqwest::Client,
     pub readiness_timeout: Duration,
     preserve_legacy_listen: bool,
+}
+
+fn server_url_is_loopback(server: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(server) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn project_requires_authority(config: &toml::Value, path: &Path) -> SetupResultValue<bool> {
+    let policy = config
+        .get("policy")
+        .ok_or_else(|| diagnostic("runner_policy", "Runner policy is missing"))?;
+    let roots = policy
+        .get("allowed_roots")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| diagnostic("runner_policy", "Runner allowed roots are missing"))?
+        .iter()
+        .map(|root| {
+            root.as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| diagnostic("runner_policy", "Runner allowed roots are invalid"))
+        })
+        .collect::<SetupResultValue<Vec<_>>>()?;
+    let allow_cwd_anywhere = policy
+        .get("allow_cwd_anywhere")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let effective = webcodex_runner_config::effective_allowed_roots(&roots, allow_cwd_anywhere)
+        .map_err(|_| diagnostic("runner_policy", "Runner allowed roots are invalid"))?;
+    let canonical = webcodex_runner_config::paths::canonicalize_usable_allowed_roots(&effective);
+    Ok(webcodex_runner_config::paths::validate_project_path_policy(
+        path,
+        &canonical,
+        allow_cwd_anywhere,
+    )
+    .is_err())
 }
 
 impl NativeEnvironment {
@@ -174,6 +224,7 @@ impl NativeEnvironment {
                 .unwrap_or(ProjectAddition {
                     path: path.clone(),
                     dispatched: false,
+                    config_change: None,
                 });
         if pending.path != path {
             return Err(diagnostic(
@@ -217,75 +268,15 @@ impl NativeEnvironment {
             ));
         }
         if visible.is_none() {
-            let config_path = store.root().join("runner.toml");
-            let before = read_secret(&config_path)?;
-            let mut config: toml::Value = toml::from_str(before.expose()).map_err(|_| {
-                diagnostic("runner_configuration", "Runner configuration is invalid")
-            })?;
-            if config.get("client_id").and_then(toml::Value::as_str) != Some(&client_id)
-                || config.get("server_url").and_then(toml::Value::as_str)
-                    != Some(record.request.server_url.as_str())
-            {
-                return Err(diagnostic(
-                    "runner_binding_conflict",
-                    "The local Runner binding has changed",
-                ));
-            }
-            let roots = config
-                .get_mut("policy")
-                .and_then(|v| v.get_mut("allowed_roots"))
-                .and_then(toml::Value::as_array_mut)
-                .ok_or_else(|| diagnostic("runner_policy", "Runner allowed roots are missing"))?;
-            if !roots.iter().any(|root| root.as_str() == path.to_str()) {
-                roots.push(toml::Value::String(path.to_string_lossy().into_owned()));
-                if read_secret(&config_path)?.expose() != before.expose() {
-                    return Err(diagnostic(
-                        "config_concurrent_change",
-                        "Runner configuration changed while preparing the project",
-                    ));
-                }
-                atomic_private_write(
-                    &config_path,
-                    toml::to_string(&config)
-                        .map_err(|_| SetupDiagnostic::io())?
-                        .as_bytes(),
-                )?;
-            }
-            let candidate = read_secret(&config_path)?;
-            let checked = self
-                .post(
-                    &record.request.server_url,
-                    "/api/tools/call",
-                    Some(token.expose()),
-                    json!({"tool":"runner_config_check","params":{"client_id":client_id}}),
-                )
-                .await?;
-            let checked = tool_output(&checked)?;
-            if checked.get("valid").and_then(Value::as_bool) != Some(true)
-                || checked.get("restart_required").and_then(Value::as_bool) == Some(true)
-            {
-                return Err(diagnostic(
-                    "config_requires_attention",
-                    "Runner configuration cannot be hot reloaded",
-                ));
-            }
-            let generation = checked
-                .get("current_generation")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    diagnostic(
-                        "config_generation",
-                        "Runner did not report its configuration generation",
-                    )
-                })?;
-            if candidate.expose() != read_secret(&config_path)?.expose() {
-                return Err(diagnostic(
-                    "config_concurrent_change",
-                    "Runner configuration changed before reload",
-                ));
-            }
-            let reload = self.post(&record.request.server_url, "/api/tools/call", Some(token.expose()), json!({"tool":"runner_config_reload","params":{"client_id":client_id,"expected_generation":generation}})).await?;
-            tool_output(&reload)?;
+            self.ensure_project_authority(
+                store,
+                &record,
+                &client_id,
+                &path,
+                token.expose(),
+                &mut pending,
+            )
+            .await?;
             pending.dispatched = true;
             store.write_json("add-project.json", &pending)?;
             // Lost responses are reconciled by exact path on the next invocation.
@@ -531,11 +522,35 @@ impl NativeEnvironment {
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|_| diagnostic("http_client", "Could not initialize the Server connection"))?;
+        // Local Desktop environments must never route loopback Server traffic
+        // through an OS/user proxy. Keep the ordinary client for remote Server
+        // URLs so existing proxy behavior remains available there.
+        let direct_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .no_proxy()
+            .build()
+            .map_err(|_| {
+                diagnostic(
+                    "http_client",
+                    "Could not initialize the direct Server connection",
+                )
+            })?;
         Ok(Self {
             client,
+            direct_client,
             readiness_timeout: Duration::from_secs(45),
             preserve_legacy_listen: false,
         })
+    }
+
+    fn client_for_server(&self, server: &str) -> &reqwest::Client {
+        if server_url_is_loopback(server) {
+            &self.direct_client
+        } else {
+            &self.client
+        }
     }
 
     pub async fn status(&mut self, store: &EnvironmentStore) -> SetupResultValue<SetupResult> {
@@ -744,7 +759,10 @@ impl NativeEnvironment {
         token: Option<&str>,
         body: Value,
     ) -> SetupResultValue<Value> {
-        let mut request = self.client.post(format!("{server}{route}")).json(&body);
+        let mut request = self
+            .client_for_server(server)
+            .post(format!("{server}{route}"))
+            .json(&body);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
@@ -832,7 +850,7 @@ impl NativeEnvironment {
 
     async fn reachable(&self, record: &EnvironmentRecord) -> SetupResultValue<()> {
         let response = self
-            .client
+            .client_for_server(&record.request.server_url)
             .get(format!("{}/runtime", record.request.server_url))
             .send()
             .await
@@ -1616,6 +1634,8 @@ struct Enrollment {
 struct ProjectAddition {
     path: std::path::PathBuf,
     dispatched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_change: Option<project_addition::ProjectConfigChange>,
 }
 #[derive(Serialize, Deserialize)]
 struct ProjectRemoval {
@@ -1957,19 +1977,29 @@ pub fn resolve_service_scope(
 ) -> SetupResultValue<service::ServiceScope> {
     let environment = store.load_environment()?;
     let journal = store.load_journal()?;
-    if let (Some(record), Some(journal)) = (&environment, &journal) {
-        if record.request.service_scope != journal.environment.request.service_scope {
-            return Err(diagnostic("service_scope_conflict","Saved environment and setup journal have different service managers; reconcile the original operation first"));
-        }
+    // A legacy handoff records intent before creating setup.json. Reading only
+    // the environment/setup records would silently change a pending SCM handoff
+    // into user tasks on retry after the Desktop default changes.
+    let migration = crate::migration_journal(store)?;
+    let scopes = [
+        environment
+            .as_ref()
+            .map(|record| record.request.service_scope),
+        journal
+            .as_ref()
+            .map(|journal| journal.environment.request.service_scope),
+        migration
+            .as_ref()
+            .map(|journal| journal.request.service_scope),
+    ];
+    let saved = scopes.into_iter().flatten().next();
+    if scopes
+        .into_iter()
+        .flatten()
+        .any(|scope| Some(scope) != saved)
+    {
+        return Err(diagnostic("service_scope_conflict", "Saved environment, setup and migration journals have different service managers; reconcile the original operation first"));
     }
-    let saved = environment
-        .as_ref()
-        .map(|record| record.request.service_scope)
-        .or_else(|| {
-            journal
-                .as_ref()
-                .map(|journal| journal.environment.request.service_scope)
-        });
     if saved.is_some() && requested.is_some() && saved != requested {
         return Err(diagnostic("service_scope_conflict", "This environment already belongs to another service manager; resume its saved scope instead of adopting or replacing services"));
     }

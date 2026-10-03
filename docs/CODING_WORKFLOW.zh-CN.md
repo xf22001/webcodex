@@ -27,8 +27,16 @@ Bootstrap 或 discovery 返回 `project_ref` 后，普通 Project-scoped tool ca
 
 当已经有 registered Project、又需要隔离工作区时，直接使用 `work_on_project(project=<canonical id 或 project_ref>, mode="worktree", ...)`。不要重新推导 `client_id`、source absolute path，也不要猜 managed destination。Server 会在本次调用重新授权 source Project，Runner 负责派生并拥有 managed placement、持久化 source/base provenance，并返回新的 canonical Project 与短 ref。source Project → managed Project 是 fresh-Session transition，因此不要携带 source Project 的 Session；后续使用返回的 managed `project_ref` 与 Session 继续。兼容入口 `client_id + path + mode="worktree"` 仍受普通 path authority 约束；当已有 Project identity 时，它不是推荐流程。Managed storage 的实际目录布局属于实现细节，模型不应记忆或猜测。
 
-当 `work_on_project`、`start_session`、`session_summary` 或显式 handoff 返回 `session_ref` 时，后续显式 Session 选择可优先复用这个短 selector。Business `session_id` 与 wrapper `recording_session_id` 仍是两套独立语义，但都可以显式携带已签发的 ref：Runtime 会先把它还原为钉住的 canonical `wc_sess_*`，再执行各自原有的授权、生命周期或 guard 逻辑。Canonical identity 仍是持久化、审计、诊断和内部关联的权威身份。`session_ref` 只是按 principal 隔离的便利选择器；省略 recorder 时不会自动推断，也不会形成隐式或粘滞的 recorder context。
-默认情况下，它还会返回一个很小且有界的 `extensions` selection catalog：Skill metadata 来自 canonical 的 project / Runner-configured `skills.roots` / Runner-managed Skill Store 三类来源；Plugin metadata 只包含 configured working directory 与当前 Project root 匹配、且已 ready/committed 的 provider。该 metadata 不授予任何 authority，也不会自动读取 Skill body 或创建 Plugin binding；模型选择后使用 `skill_read_file` 读取 Skill 文本，`run_skill_resource` 只执行可信 Runner-configured live `scripts/` resource（由 `expected_definition_revision` fence definition）或 Runner-installed managed resource（另由 `expected_package_revision` fence package），Plugin 则走 `plugin_tool describe -> call`。Configured resource bytes 会一直保持 live 到实际执行时，并不会预先被 package revision 固定。只有当前模型上下文仍明确保留这些 discovery metadata 时，才应设置 `include_extension_catalog=false`。
+当 `work_on_project`、`start_session`、`read_session_summary` 或显式 handoff 返回 `session_ref` 时，后续显式 Session 选择可优先复用这个短 selector。Business `session_id` 与 wrapper `recording_session_id` 仍是两套独立语义，但都可以显式携带已签发的 ref：Runtime 会先把它还原为钉住的 canonical `wc_sess_*`，再执行各自原有的授权、生命周期或 guard 逻辑。Canonical identity 仍是持久化、审计、诊断和内部关联的权威身份。`session_ref` 只是按 principal 隔离的便利选择器；省略 recorder 时不会自动推断，也不会形成隐式或粘滞的 recorder context。
+默认情况下，它还会返回一个很小且有界的 `extensions` selection catalog：Skill metadata 来自 canonical 的 project / Runner-configured `skills.roots` / Runner-managed Skill Store 三类来源；Plugin metadata 只包含 configured working directory 与当前 Project root 匹配、且已 ready/committed 的 provider。该 metadata 不授予任何 authority，也不会自动读取 Skill body 或创建 Plugin binding；模型选择后使用 `read_skill_file` 读取 Skill 文本，`run_skill_resource` 只执行可信 Runner-configured live `scripts/` resource（由 `expected_definition_revision` fence definition）或 Runner-installed managed resource（另由 `expected_package_revision` fence package），Plugin 则走 `plugin_tool describe -> call`。Configured resource bytes 会一直保持 live 到实际执行时，并不会预先被 package revision 固定。只有当前模型上下文仍明确保留这些 discovery metadata 时，才应设置 `include_extension_catalog=false`。
+
+### 切回明确的工作上下文
+
+已明确选择 Active Session 时，可以直接调用 `work_on_project(session_id="~s12", instruction="继续评审")`，省略 `project`、`client_id` 和 `path`。默认的 `checkout` 模式会授权这个精确 Session，取得它绑定的 Project，重新检查当前项目访问权限，再恢复同一个 Session。后续普通 Project 工具使用返回的 `project_ref`。显式传入 Project 仍然有效，但必须匹配；`_wc.record` 仍仅为独立的记录来源，不会替代业务目标。
+
+Fresh work 仍须明确 `project` 或 `client_id + path`。`mode="worktree"` 始终要求明确 source，不能从 Session 推导新 worktree 的 source。Closed、不存在、不可访问或未绑定 Project 的 Session 不会触发 fresh fallback，也不会给 Window 增加隐式 current Project/Session。
+
+在原 Window 丢失 Session selector 时，请求 `_wc.context=["workflow.resume"]` 并显式选择候选。已授权候选保留 canonical identity，并提供 `session_ref`；当前 root fingerprint 和 reference store 可用时还提供 `project_ref`。这只是发现，不会自动恢复；丢失任务上下文时应先读取精确 handoff。跨 Window 必要时仍用 `list_sessions(project)` 发现候选。
 
 ## 工具策略 guidance
 
@@ -73,7 +81,7 @@ Bootstrap 或 discovery 返回 `project_ref` 后，普通 Project-scoped tool ca
   仍回模型。Host cell 返回不等于当前 turn 完成；继续在当前 turn 推进任务，不假设
   自动开启下一 turn，也不要用 `observe_jobs` heartbeat 保活。startup
   `tool_strategy.host_orchestration` catalog 与 exact
-  `tool_manifest(tool_name=...)` hint 都从 canonical `ToolDefinition` metadata 派生；
+  `read_tool_manifest(tool_name=...)` hint 都从 canonical `ToolDefinition` metadata 派生；
   它们只提供 guidance，不改变 `ToolCompositionPolicy`、authority、effect、permission、
   retry、idempotency 或 runtime scheduling，默认/broad ToolSpec 也不携带这批 metadata。
   该 profile 不授予任何 WebCodex capability/authority，也不要求 nested WebCodex Code Mode。

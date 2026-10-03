@@ -101,6 +101,8 @@ def _workflow_contract(root: Path) -> str:
     readiness_workflow = (root / ".github/workflows/release-readiness.yml").read_text(encoding="utf-8")
     build = (root / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
     intel_desktop = (root / ".github/workflows/release-desktop-darwin-x64.yml").read_text(encoding="utf-8")
+    release_image = (root / ".github/workflows/release-image.yml").read_text(encoding="utf-8")
+    download_page = (root / ".github/workflows/download-page.yml").read_text(encoding="utf-8")
     required = {
         "ci.yml": (
             ("apps/desktop/package-lock.json", ci),
@@ -131,9 +133,12 @@ def _workflow_contract(root: Path) -> str:
         ),
         "release-readiness.yml": (
             ("ci_run_id", readiness_workflow),
+            ("evidence_run_id", readiness_workflow),
+            ("- 'release/v*'", readiness_workflow),
             ("source_ref:", readiness_workflow),
             ('refs/heads/$INPUT_SOURCE_REF', readiness_workflow),
             ("uses: ./.github/workflows/extended-native.yml", readiness_workflow),
+            ("if: github.event_name == 'push' || inputs.source_ref == 'main'", readiness_workflow),
             ("linux/amd64", readiness_workflow),
             ("linux/arm64", readiness_workflow),
         ),
@@ -157,16 +162,21 @@ def _workflow_contract(root: Path) -> str:
             ("-Installer $env:DESKTOP_INSTALLER_PATH", build),
             ("dist/webcodex-desktop-*.dmg", build),
             ("dist/webcodex-desktop-*-${{ matrix.platform }}-setup.exe", build),
-            ("macos_ci_developer_id_setup.sh", build),
-            ("macos_sign_runner.sh", build),
-            ("verify_macos_desktop_identity.sh", build),
-            ("signing_mode=developer-id", build),
-            ("secrets.APPLE_CERTIFICATE", build),
-            ("secrets.APPLE_CERTIFICATE_PASSWORD", build),
-            ("secrets.APPLE_SIGNING_IDENTITY", build),
-            ("secrets.APPLE_ID", build),
-            ("secrets.APPLE_PASSWORD", build),
-            ("secrets.APPLE_TEAM_ID", build),
+            ('bash scripts/macos_sign_runner.sh target/release/webcodex-runner "$APPLE_SIGNING_IDENTITY" "$WEBCODEX_MACOS_SIGNING_MODE"', build),
+            ("macos_finalize_desktop.sh", build),
+            ("macos_ci_signing_setup.sh", build),
+            ("macos_finalize_dmg.sh", build),
+            ("public release requires persistent signing identity", build),
+            ('expected_notarized = expected_signing == "developer-id"', build),
+            ("  preflight:", build),
+            ("Fail fast on deterministic release contracts", build),
+            ("bash scripts/release_check.sh --static-only", build),
+            ("include_unified_installers:", build),
+            ("if: inputs.include_unified_installers", build),
+            ("!inputs.include_unified_installers || needs.unified-native.result == 'success'", build),
+            ("export CARGO_TARGET_DIR=/work/target", build),
+            ('export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"', build),
+            ('desktop="$CARGO_TARGET_DIR/release/webcodex-desktop"', build),
         ),
         "release-desktop-darwin-x64.yml": (
             ("types: [published]", intel_desktop),
@@ -177,14 +187,23 @@ def _workflow_contract(root: Path) -> str:
             ("SHA256SUMS", intel_desktop),
             ("gh release upload", intel_desktop),
             ("desktop_install_macos_smoke.sh", intel_desktop),
-            ("macos_ci_developer_id_setup.sh", intel_desktop),
-            ("macos_sign_runner.sh", intel_desktop),
-            ("developer-id", intel_desktop),
-            ("secrets.APPLE_CERTIFICATE", intel_desktop),
-            ("secrets.APPLE_ID", intel_desktop),
-            ("needs.resolve.outputs.version != '0.4.3'", intel_desktop),
-            ('if [ "$VERSION" = "0.4.3" ]', intel_desktop),
-            ("a notarized DMG cannot be reconstructed byte-for-byte", intel_desktop),
+            ("desktop_install_macos_smoke.sh", intel_desktop),
+            ("macos_ci_signing_setup.sh", intel_desktop),
+            ("macos_finalize_dmg.sh", intel_desktop),
+            ("Treat an already-published DMG as immutable authority", intel_desktop),
+            ("--build-info-json", intel_desktop),
+            ("source_sha.startswith(commit)", intel_desktop),
+            ("immutable runtime binaries disagree on commit identity", intel_desktop),
+        ),
+        "release-image.yml": (
+            ("WEBCODEX_GIT_COMMIT=${{ needs.resolve.outputs.source_short }}", release_image),
+            ("--build-info-json", release_image),
+            ("source_sha.startswith(commit)", release_image),
+        ),
+        "download-page.yml": (
+            ("Resolve optional installer manifest", download_page),
+            ('echo "has_installers=false" >> "$GITHUB_OUTPUT"', download_page),
+            ("if: steps.manifest.outputs.has_installers == 'true'", download_page),
         ),
     }
     missing = []
@@ -202,13 +221,18 @@ def _workflow_contract(root: Path) -> str:
         raise DoctorError("release-readiness gained publication/upload authority")
     if "prepare_desktop_bundle.ps1" in readiness_workflow or "tauri" in readiness_workflow.lower():
         raise DoctorError("release-readiness gained Desktop candidate build responsibility")
-    if (
-        "secrets.APPLE_" in ci
-        or "secrets.APPLE_" in extended
-        or "secrets.APPLE_" in readiness_workflow
-    ):
-        raise DoctorError("ordinary/readiness CI unexpectedly depends on Apple release-signing credentials")
-    return "main/release-branch CI, extended-native readiness, Developer ID release signing, and tag-bound authoritative build contracts are consistent"
+    apple_secret_surfaces = {
+        "ci.yml": ci,
+        "extended-native.yml": extended,
+        "release-readiness.yml": readiness_workflow,
+    }
+    leaked_apple_secrets = [name for name, body in apple_secret_surfaces.items() if "secrets.APPLE_" in body]
+    if leaked_apple_secrets:
+        raise DoctorError(
+            "disposable CI unexpectedly depends on Apple release-signing credentials: "
+            + ", ".join(leaked_apple_secrets)
+        )
+    return "main/release-branch CI, precomputed release-source evidence, persistent macOS release signing, and tag-bound authoritative build contracts are consistent"
 
 
 def _compile_verifiers(root: Path) -> str:
@@ -306,6 +330,21 @@ def run_doctor(
 
     _record(checks, "exact-source-ci", ci_check)
 
+    evidence_result: dict | None = None
+
+    def evidence_check() -> str:
+        nonlocal evidence_result
+        if not release_source_ref.startswith("release/"):
+            return "main-source release uses readiness-dispatch evidence fallback"
+        client = collector.GitHubClient(repo, collector.resolve_github_token(), timeout)
+        evidence_result = readiness._successful_source_evidence_run(client, source, release_source_ref)
+        return (
+            f"exact-source release evidence run {evidence_result['id']} attempt "
+            f"{evidence_result['run_attempt']} is successful for {release_source_ref}"
+        )
+
+    _record(checks, "exact-source-release-evidence", evidence_check)
+
     def release_list_check() -> str:
         client = collector.GitHubClient(repo, collector.resolve_github_token(), timeout)
         payload = publication._github_json_array(client, "/releases?per_page=1&page=1")
@@ -326,6 +365,15 @@ def run_doctor(
         "source_ci": (
             {"run_id": ci_result["id"], "run_attempt": ci_result["run_attempt"], "url": ci_result["html_url"]}
             if ci_result is not None
+            else None
+        ),
+        "source_evidence": (
+            {
+                "run_id": evidence_result["id"],
+                "run_attempt": evidence_result["run_attempt"],
+                "url": evidence_result["html_url"],
+            }
+            if evidence_result is not None
             else None
         ),
         "mutations_performed": False,

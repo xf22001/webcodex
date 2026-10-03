@@ -8,17 +8,25 @@ For contributor workflows—frontend/Tauri development, source runtime resolutio
 
 ## Runtime project inventory
 
-**Projects** is a read-only view of Runtime Projects observed on the current Runner, including Git branches, active Sessions, and recent activity. Runtime Project identity remains the authorization, routing, persistence, audit, and Session boundary, but it is not a Desktop setup resource that users need to maintain.
+**Projects** shows Runtime Projects observed on the current Runner, including Git branches, active Sessions, and recent activity. **Add local folder** is an optional shortcut for explicitly authorizing and registering another folder on this computer, not a prerequisite for model-driven work. Runtime Project identity remains the authorization, routing, persistence, audit, and Session boundary, but it is not a Desktop setup resource that users need to maintain.
 
 For local Full Runtime, ChatGPT/model-driven calls supply the concrete workspace path. `work_on_project(path)` reuses the exact registered Project when present or registers it on demand when Runner policy permits. Multiple Projects can remain active concurrently; opening one does not revoke another.
 
 The Runner filesystem policy remains the authority boundary. A fresh Desktop local Runner uses the normal Runner policy defaults; an empty `allowed_roots` resolves to the user's home directory. Explicit Runner policy can narrow that scope. This is Runner-level authority, separate from Runtime Project identity: a Project on one drive or root does not authorize another drive or unrelated path unless that target is also inside `allowed_roots`. Project registration never expands this scope.
 
+## Windows startup and upgrades
+
+**After sign-in (recommended)** uses user-session Task Scheduler tasks. This is the ordinary Desktop path and does not require an administrator account or a service password. Server, Runner and Tunnel use the signed-in user's identity. Closing Desktop does not stop these tasks; signing out ends the user-session path.
+
+**At computer startup (advanced)** is under **Advanced deployment options**. It uses SCM and is intended for always-on or remotely managed machines that must run before sign-in. It requires administrator authorization and has different filesystem and desktop-session permissions. It is not a more reliable or more capable version of normal Desktop startup.
+
+Upgrading a legacy Desktop-owned environment preserves its Server, Runner identity, projects and saved Tunnel credentials. New migrations default to user-session startup. An interrupted migration or an already managed environment retains its recorded manager; Desktop never silently replaces an existing SCM service with a second scheduled task. Resume the saved operation after fixing its diagnostic rather than deleting configuration or creating another connection.
+
 ## First use
 
 1. Launch WebCodex Desktop and make the one-time local/remote environment choice. Local setup enables **Allow AI to work on this computer** by default, with no default Project. Confirm setup before persistent services or system authorization are requested; merely opening Desktop never binds a fresh machine to a local Server.
 2. Start describing work in ChatGPT. When a request identifies a workspace path, the runtime resolves or registers that Project automatically within the Runner's allowed scope. Later launches observe saved persistent services rather than silently restarting stopped components.
-3. **Projects** can be used to observe which Runtime Projects have appeared; there is no Add, Activate, Reactivate, or Unregister workflow in the normal Desktop UI.
+3. **Projects** shows Runtime Projects that have appeared. To add a local folder manually, choose **Add local folder**, select it, and confirm **Authorize and add folder**. This explicitly adds access to that folder and its subfolders through the existing local Runner; Server and Tunnel credentials are reused. Viewer-only connections cannot add local folders.
 4. Configure **OpenAI Secure Tunnel** only when external ChatGPT reachability is needed. Tunnel setup controls connectivity; it does not define Project authority.
 5. A real observed project call verifies prior client use, not current host presence.
 
@@ -30,7 +38,7 @@ For temporary sharing of one project, choose Quick Share and a connection provid
 
 Home shows Server, Runner, and connection status, a short ChatGPT handoff, and shortcuts to Projects, Activity, and Extensions. Project and activity lists live on their respective pages. Healthy state avoids duplicate readiness information; problems still expose recovery actions. A local Full Runtime is healthy with no default Project; Project readiness is not a prerequisite for starting Desktop.
 
-- **Projects** shows observed Runtime Projects only. Project lifecycle is driven by model/runtime path resolution rather than Desktop buttons.
+- **Projects** shows observed Runtime Projects and an optional **Add local folder** shortcut. Model/runtime path resolution remains the normal workflow.
 - **Activity** and **Extensions** operate on the Runtime Project associated with the selected Session or observed context.
 - **Connection** manages external reachability independently from Project authority.
 - **Settings** exposes Runner configuration, diagnostics, and explicit operational controls.
@@ -88,7 +96,7 @@ If the local Server exits during startup, expand the error's **Details**. Deskto
 
 **Activity** shows newest entries first. Search content or sources, or select **Warnings and errors only**. Filtering never deletes records.
 
-**Settings** groups controls into General, Files & permissions, Network, Runtime, Troubleshooting, and About & updates. Selecting a category shows its configuration directly. Switching categories preserves network and tracing drafts without saving or restarting services. General contains language, appearance, and launch at login; Files & permissions contains allowed Runner folders and macOS Computer Use permissions. You can also switch language at the bottom of the sidebar. Supported languages are 简体中文, English, 日本語, 한국어, Deutsch, and Français. The selection is remembered across restarts, and activity times follow the selected locale. System tray menus and raw backend diagnostics remain in English; the operating system controls native file-picker language.
+**Settings** groups controls into General, Files & permissions, Network, Runtime, Troubleshooting, and About & updates. Selecting a category shows its configuration directly. Switching categories preserves network and tracing drafts without saving or restarting services. General contains language, appearance, and launch at login; Files & permissions contains allowed Runner folders and macOS Computer Use permissions. You can also switch language at the bottom of the sidebar. Supported languages are 简体中文, 繁體中文, English, 日本語, 한국어, Deutsch, and Français. The selection is remembered across restarts, and activity times follow the selected locale. System tray menus follow the selected language, including background startup. Raw backend diagnostics remain in English; the operating system controls native file-picker language.
 
 Closing the window hides Desktop in the menu bar or system tray. Persistent Server, Runner, and Tunnel services continue independently of that window, including when Desktop quits. **Quit WebCodex** ends Desktop and processes it directly owns, such as a temporary Quick Share and legacy Desktop-owned runtime or regular Tunnel. Use the explicit Diagnostics controls for Core-managed local services; they appear only for components this computer owns. A viewer has no local Runner control, and a Server-only computer has no Runner control. A custom legacy service can be observed through its Server connection without Desktop taking over its lifecycle. The legacy Desktop-managed runtime stop in Settings → Runtime also updates its saved startup preference; it does not stop an independent service.
 

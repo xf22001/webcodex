@@ -32,6 +32,7 @@ pub enum ProjectValidationAdapter {
     Auto,
     Rust,
     Go,
+    Python,
 }
 
 /// Test-only selection and evidence policy. Filtering changes the execution
@@ -41,6 +42,7 @@ pub enum ProjectValidationAdapter {
 pub struct ProjectValidationTestOptions {
     /// Rust: one libtest substring (not flags). Go: native -run regexp, including
     /// slash-separated subtest expressions; whitespace is significant for Go.
+    /// Python: one native pytest -k expression, never command-line flags.
     /// Omission/empty selects the unfiltered default. At most 200 UTF-8 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 200))]
@@ -101,6 +103,9 @@ impl ProjectValidationRequest {
         validate_relative(self.cwd.as_deref().unwrap_or("."))?;
         if let Some(scope) = &self.scope {
             scope.validate().map_err(|error| match error {
+                ProjectOperationScopeError::Selection => {
+                    "project validation scope must select packages or all_packages=true".to_string()
+                }
                 ProjectOperationScopeError::PackageCount => {
                     "project validation packages must contain between 1 and 8 items".to_string()
                 }
@@ -162,7 +167,7 @@ impl ProjectValidationProvenance {
     pub fn is_valid(&self) -> bool {
         self.request.validate().is_ok()
             && validate_relative(&self.recipe_root).is_ok()
-            && matches!(self.backend.as_str(), "rust" | "go")
+            && matches!(self.backend.as_str(), "rust" | "go" | "python")
             && [
                 &self.root_digest,
                 &self.manifest_digest,

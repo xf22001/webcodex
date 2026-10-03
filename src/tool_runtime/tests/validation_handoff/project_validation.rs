@@ -15,7 +15,9 @@ async fn setup(grace_ms: u64) -> ToolRuntime {
             project_validation_v1: true,
             project_go_single_module_v1: true,
             project_validation_package_scope_v1: true,
+            project_all_packages_v1: true,
             project_validation_test_options_v1: true,
+            project_validation_python_pytest_v1: true,
             structured_go_test_json: true,
             structured_go_test_tool: true,
             structured_go_test_packages: true,
@@ -46,7 +48,15 @@ async fn reply_plan(
     let operation = webcodex_validation::project_validation_operation(
         backend,
         check,
-        semantic.scope.as_ref().map(|scope| scope.packages.clone()),
+        semantic
+            .scope
+            .as_ref()
+            .and_then(ProjectValidationScope::explicit_packages)
+            .map(<[String]>::to_vec),
+        semantic
+            .scope
+            .as_ref()
+            .is_some_and(ProjectValidationScope::selects_all_packages),
     )
     .unwrap()
     .with_test_filter(
@@ -100,7 +110,10 @@ fn call_with_scope(
         cwd: None,
         action,
         adapter: None,
-        scope: packages.map(|packages| ProjectValidationScope { packages }),
+        scope: packages.map(|packages| ProjectValidationScope {
+            packages,
+            all_packages: false,
+        }),
         dependency_policy: None,
         test: None,
         timeout_secs: Some(60),
@@ -338,6 +351,7 @@ async fn project_validation_package_scope_requires_additive_runner_capability() 
             structured_validation_argv: true,
             project_validation_v1: true,
             project_validation_package_scope_v1: false,
+            project_all_packages_v1: false,
             ..Default::default()
         },
     )
@@ -357,6 +371,44 @@ async fn project_validation_package_scope_requires_additive_runner_capability() 
         .error
         .unwrap()
         .contains("project_validation_package_scope_v1"));
+    assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+    assert!(probe_patch_agent_request(&runtime, "project-validation")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn project_validation_all_packages_requires_additive_runner_capability() {
+    let runtime = runtime_with_agent_project("project-validation");
+    register_agent(
+        &runtime,
+        "project-validation",
+        None,
+        RunnerCapabilities {
+            async_shell_jobs: true,
+            structured_validation_argv: true,
+            project_validation_v1: true,
+            project_validation_package_scope_v1: true,
+            project_all_packages_v1: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut call = call(ProjectValidationAction::Check, None);
+    let ToolCall::ProjectValidate { scope, .. } = &mut call else {
+        unreachable!()
+    };
+    *scope = Some(ProjectValidationScope {
+        packages: Vec::new(),
+        all_packages: true,
+    });
+
+    let result = runtime
+        .dispatch_with_auth(call, Some(&auth_context(None, true)))
+        .await;
+    assert!(!result.success);
+    assert!(result.error.unwrap().contains("project_all_packages_v1"));
     assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
     assert!(probe_patch_agent_request(&runtime, "project-validation")
         .await
@@ -383,6 +435,7 @@ async fn project_validation_test_options_reject_before_any_plan_on_old_runner() 
             structured_validation_argv: true,
             project_validation_v1: true,
             project_validation_package_scope_v1: true,
+            project_all_packages_v1: true,
             ..Default::default()
         },
     )
@@ -476,6 +529,7 @@ async fn project_validation_readonly_adapters_preserve_source_fence_through_hand
         ("rust", ProjectValidationAction::Test, "cargo_test", "running 1 test\ntest example ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"),
         ("go", ProjectValidationAction::Check, "go_vet", ""),
         ("go", ProjectValidationAction::Test, "go_test", "{\"Action\":\"run\",\"Package\":\"example/pkg\",\"Test\":\"TestOne\"}\n{\"Action\":\"pass\",\"Package\":\"example/pkg\",\"Test\":\"TestOne\"}\n{\"Action\":\"pass\",\"Package\":\"example/pkg\"}\n"),
+        ("python", ProjectValidationAction::Test, "python:pytest:test", "1 passed in 0.01s\n"),
     ] {
         for external_writer in [false, true] {
             let runtime = setup(1).await;
@@ -515,5 +569,299 @@ async fn project_validation_readonly_adapters_preserve_source_fence_through_hand
             assert!(probe_patch_agent_request(&runtime, "project-validation").await.is_none());
             drop(writer);
         }
+    }
+}
+
+#[tokio::test]
+async fn project_validation_python_pytest_success_and_count_failures_record_session_evidence() {
+    for (stdout, exit, options, expected) in [
+        ("==== 2 passed in 0.01s ====\n", 0, None, true),
+        ("==== 1 failed, 1 passed in 0.01s ====\n", 1, None, false),
+        ("no tests ran in 0.01s\n", 5, None, false),
+        ("==== 2 skipped in 0.01s ====\n", 0, None, false),
+        (
+            "==== 2 skipped in 0.01s ====\n",
+            0,
+            Some(ProjectValidationTestOptions {
+                require_tests: Some(false),
+                ..Default::default()
+            }),
+            true,
+        ),
+        (
+            "==== 2 passed in 0.01s ====\n",
+            0,
+            Some(ProjectValidationTestOptions {
+                min_tests: Some(3),
+                ..Default::default()
+            }),
+            false,
+        ),
+        ("progress without summary\n", 0, None, false),
+        (
+            "progress without summary\n",
+            0,
+            Some(ProjectValidationTestOptions {
+                require_tests: Some(false),
+                ..Default::default()
+            }),
+            true,
+        ),
+        ("==== 1 error in 0.01s ====\n", 2, None, false),
+        ("==== 1 failed, 1 passed in 0.01s ====\n", 0, None, false),
+        ("==== 1 passed in 0.01s ====\n", 5, None, false),
+    ] {
+        let runtime = setup(500).await;
+        let session = runtime
+            .sessions
+            .start_session(Some(agent_test_project_id("project-validation")), None);
+        let mut tool = call(
+            ProjectValidationAction::Test,
+            Some(session.session_id.clone()),
+        );
+        if let ToolCall::ProjectValidate { adapter, test, .. } = &mut tool {
+            *adapter = Some(ProjectValidationAdapter::Python);
+            *test = options;
+        }
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .dispatch_with_auth(tool, Some(&auth_context(None, true)))
+                    .await
+            }
+        });
+        let (request, job_id) = reply_plan(&runtime, "python", ProjectValidationAction::Test).await;
+        let metadata = request
+            .job_context
+            .as_ref()
+            .unwrap()
+            .validation
+            .as_ref()
+            .unwrap();
+        assert!(metadata.is_valid());
+        assert_eq!(metadata.adapter, "python:pytest:test");
+        runtime
+            .runner_registry
+            .update_job(cargo_test_update(
+                "project-validation",
+                &request.request_id,
+                &job_id,
+                if exit == 0 { "completed" } else { "failed" },
+                stdout,
+                "",
+                Some(exit),
+                completed_progress(),
+                true,
+            ))
+            .await
+            .unwrap();
+        let result = task.await.unwrap();
+        assert_eq!(result.success, expected, "{result:?}");
+        assert_eq!(result.output["backend"], "python");
+        assert_eq!(result.output["adapter"], "python:pytest:test");
+        if exit != 0 {
+            assert_eq!(result.output["exit_code"], exit);
+        }
+        assert_model_cargo_result_matches_schema("project_validate", &result);
+        let summary = runtime
+            .sessions
+            .summary(&session.session_id, Some(50))
+            .unwrap();
+        let validation = validation_summary_for_session(&summary);
+        assert_eq!(
+            validation["status"],
+            if exit != 0 {
+                "failed"
+            } else if expected {
+                "passed"
+            } else {
+                "inconclusive"
+            },
+            "{validation}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_validation_python_pytest_handoff_observes_same_job_and_cancelled_evidence() {
+    for cancel in [false, true] {
+        let runtime = setup(1).await;
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .dispatch_with_auth(
+                        call(ProjectValidationAction::Test, None),
+                        Some(&auth_context(None, true)),
+                    )
+                    .await
+            }
+        });
+        let (request, job_id) = reply_plan(&runtime, "python", ProjectValidationAction::Test).await;
+        let result = task.await.unwrap();
+        assert_eq!(result.output["execution_state"], "pending");
+        assert_eq!(
+            result.output["continuation"]["arguments"]["items"][0]["job_id"],
+            job_id
+        );
+        assert_model_cargo_result_matches_schema("project_validate", &result);
+        runtime
+            .runner_registry
+            .update_job(cargo_test_update(
+                "project-validation",
+                &request.request_id,
+                &job_id,
+                if cancel { "stopped" } else { "completed" },
+                "1 passed in 0.01s\n",
+                "",
+                Some(if cancel { -1 } else { 0 }),
+                completed_progress(),
+                true,
+            ))
+            .await
+            .unwrap();
+        let status = runtime.job_status_for_auth(job_id, false, None).await;
+        if cancel {
+            assert_eq!(status.output["validation"]["state"], "cancelled");
+            assert!(status.output["validation"]["tests_run_count"].is_null());
+        } else {
+            assert_eq!(status.output["validation"]["passed"], true);
+            assert_eq!(status.output["validation"]["tests_run_count"], 1);
+        }
+        assert!(probe_patch_agent_request(&runtime, "project-validation")
+            .await
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn project_validation_python_pytest_old_runner_rejects_before_planning() {
+    let runtime = runtime_with_agent_project("project-validation");
+    register_agent(
+        &runtime,
+        "project-validation",
+        None,
+        RunnerCapabilities {
+            project_validation_v1: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut tool = call(ProjectValidationAction::Test, None);
+    if let ToolCall::ProjectValidate { adapter, .. } = &mut tool {
+        *adapter = Some(ProjectValidationAdapter::Python);
+    }
+    let result = runtime
+        .dispatch_with_auth(tool, Some(&auth_context(None, true)))
+        .await;
+    assert!(!result.success);
+    assert!(result
+        .error
+        .unwrap()
+        .contains("project_validation_python_pytest_v1"));
+    assert!(probe_patch_agent_request(&runtime, "project-validation")
+        .await
+        .is_none());
+    assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+}
+
+#[tokio::test]
+async fn project_validation_all_packages_dispatches_and_completes_same_wire_job() {
+    for action in [
+        ProjectValidationAction::Check,
+        ProjectValidationAction::Test,
+    ] {
+        let runtime = setup(1).await;
+        let mut request_call = call(action, None);
+        let ToolCall::ProjectValidate { scope, .. } = &mut request_call else {
+            unreachable!()
+        };
+        *scope = Some(ProjectValidationScope {
+            packages: Vec::new(),
+            all_packages: true,
+        });
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .dispatch_with_auth(request_call, Some(&auth_context(None, true)))
+                    .await
+            }
+        });
+        let (request, job_id) = reply_plan(&runtime, "rust", action).await;
+        assert_eq!(request.kind, "start_validation_job");
+        assert_eq!(request.job_id.as_deref(), Some(job_id.as_str()));
+        assert!(request.decode_operation().is_ok());
+        let metadata = request
+            .job_context
+            .as_ref()
+            .unwrap()
+            .validation
+            .as_ref()
+            .unwrap();
+        assert!(metadata.is_valid());
+        assert!(metadata.steps[0]
+            .args
+            .iter()
+            .any(|arg| arg == "--workspace"));
+        assert!(
+            metadata
+                .project_validation
+                .as_ref()
+                .unwrap()
+                .request
+                .scope
+                .as_ref()
+                .unwrap()
+                .all_packages
+        );
+        let pending = task.await.unwrap();
+        assert_eq!(
+            pending.output["continuation"]["arguments"]["items"][0]["job_id"],
+            job_id
+        );
+        let mut running = cargo_test_update(
+            "project-validation",
+            &request.request_id,
+            &job_id,
+            "running",
+            "",
+            "",
+            None,
+            running_progress(action.kind()),
+            false,
+        );
+        running.activity = Some(ShellJobActivity {
+            state: ShellJobActivityState::Working,
+            phase: ShellJobActivityPhase::CargoCompiling,
+            source: ShellJobActivitySource::CargoOutput,
+        });
+        runtime.runner_registry.update_job(running).await.unwrap();
+        let stdout = if action == ProjectValidationAction::Test {
+            "running 1 test\ntest selected ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        } else {
+            ""
+        };
+        runtime
+            .runner_registry
+            .update_job(cargo_test_update(
+                "project-validation",
+                &request.request_id,
+                &job_id,
+                "completed",
+                stdout,
+                "",
+                Some(0),
+                completed_progress(),
+                true,
+            ))
+            .await
+            .unwrap();
+        let status = runtime.job_status_for_auth(job_id, false, None).await;
+        assert_eq!(status.output["validation"]["passed"], true, "{status:?}");
+        assert!(probe_patch_agent_request(&runtime, "project-validation")
+            .await
+            .is_none());
     }
 }

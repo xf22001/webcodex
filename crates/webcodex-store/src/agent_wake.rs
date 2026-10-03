@@ -1,20 +1,24 @@
 use super::agent_attention::{require_agent_attention_event_for_wake, AgentAttentionSource};
 use super::agent_task::{
-    replace_agent_task_attempt_controller_in_transaction, AGENT_TASK_ENDPOINT_DISPATCH_GRACE_MS,
-    AGENT_TASK_ENDPOINT_TAKEOVER_LEASE_MS,
+    clear_endpoint_execution_bindings_for_endpoint_loss_in_transaction,
+    fence_agent_task_controllers_for_endpoint_loss,
+    replace_agent_task_attempt_controller_in_transaction, AttemptAuthority,
+    AGENT_TASK_ENDPOINT_DISPATCH_GRACE_MS, AGENT_TASK_ENDPOINT_TAKEOVER_LEASE_MS,
 };
 use super::agent_wait::{
     require_agent_wait_for_wake, resume_agent_wait_for_wake_in_transaction,
     verify_agent_wait_resumed_for_consumed_wake, AgentWaitMode,
 };
-use super::communication::lookup_idempotent_resource;
 use super::communication::{
-    allocate_identity, digest_text, load_agent, new_proof, now_unix_ms,
-    read_conversation_in_connection, record_idempotent_resource, require_current_endpoint,
-    store_error, validate_communication_principal, validate_id, validate_idempotency_key,
-    validate_proof, AgentEndpointRecord, CommunicationPrincipal, CommunicationStoreError,
+    load_agent, read_conversation_in_connection, require_current_endpoint, AgentEndpointRecord,
     ConversationAccess, ConversationSummaryRecord, DurableAgentIdentity, AGENT_ENDPOINT_ID_PREFIX,
     CONVERSATION_ID_PREFIX, DURABLE_AGENT_ID_PREFIX,
+};
+use super::store_primitives::lookup_idempotent_resource;
+use super::store_primitives::{
+    allocate_identity, digest_text, new_proof, now_unix_ms, record_idempotent_resource,
+    store_error, validate_communication_principal, validate_id, validate_idempotency_key,
+    validate_proof, CommunicationPrincipal, CommunicationStoreError,
 };
 use super::Database;
 use rusqlite::{
@@ -2602,16 +2606,15 @@ fn bind_agent_task_wake_carrier(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(store_error)?;
-    replace_agent_task_attempt_controller_in_transaction(
-        transaction,
+    let authority = AttemptAuthority::validated(
         principal,
         task_id,
         task_attempt_id,
         &wake.target_agent_id,
         &attempt_fence,
         attempt_controller_generation,
-        now,
     )?;
+    replace_agent_task_attempt_controller_in_transaction(transaction, principal, authority, now)?;
     let changed = transaction
         .execute(
             "UPDATE wc_agent_task_endpoint_executions
@@ -2858,80 +2861,6 @@ fn agent_task_wake_is_dispatchable(
     Ok(dispatchable)
 }
 
-fn fence_agent_task_controllers_for_endpoint_loss(
-    transaction: &Transaction<'_>,
-    agent_id: &str,
-    endpoint_id: &str,
-    endpoint_controller_generation: i64,
-    now: i64,
-) -> Result<(), CommunicationStoreError> {
-    let controllers = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT t.owner_principal_kind, t.owner_principal_digest,
-                        e.task_id, e.attempt_id, a.assignee_agent_id,
-                        a.attempt_fence, a.attempt_controller_generation
-                 FROM wc_agent_task_endpoint_executions e
-                 JOIN wc_agent_wakes w ON w.wake_id = e.wake_id
-                 JOIN wc_agent_tasks t ON t.task_id = e.task_id
-                 JOIN wc_agent_task_attempts a
-                   ON a.task_id = e.task_id AND a.attempt_id = e.attempt_id
-                 WHERE e.endpoint_id = ?1 AND e.endpoint_controller_generation = ?2
-                   AND w.target_agent_id = ?3 AND w.trigger_kind = 'agent_task_attempt'
-                   AND t.latest_attempt_id = a.attempt_id AND t.state = 'active'
-                   AND a.assignee_agent_id = ?3 AND a.state = 'active'
-                   AND a.lease_expires_at_unix_ms > ?4",
-            )
-            .map_err(store_error)?;
-        let rows = statement
-            .query_map(
-                params![endpoint_id, endpoint_controller_generation, agent_id, now],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                    ))
-                },
-            )
-            .map_err(store_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(store_error)?;
-        rows
-    };
-
-    for (
-        principal_kind,
-        principal_digest,
-        task_id,
-        attempt_id,
-        assignee_agent_id,
-        attempt_fence,
-        attempt_controller_generation,
-    ) in controllers
-    {
-        let principal = CommunicationPrincipal {
-            kind: principal_kind,
-            digest: principal_digest,
-        };
-        replace_agent_task_attempt_controller_in_transaction(
-            transaction,
-            &principal,
-            &task_id,
-            &attempt_id,
-            &assignee_agent_id,
-            &attempt_fence,
-            attempt_controller_generation,
-            now,
-        )?;
-    }
-    Ok(())
-}
-
 pub(super) fn reconcile_wakes_for_endpoint_loss(
     transaction: &Transaction<'_>,
     agent_id: &str,
@@ -2958,26 +2887,14 @@ pub(super) fn reconcile_wakes_for_endpoint_loss(
             now,
         )?;
     }
-    transaction
-        .execute(
-            "UPDATE wc_agent_task_endpoint_executions
-             SET endpoint_id = NULL, endpoint_controller_generation = NULL,
-                 updated_at_unix_ms = MAX(updated_at_unix_ms, ?4)
-             WHERE endpoint_id = ?1 AND endpoint_controller_generation = ?2
-               AND wake_id IN (
-                   SELECT wake_id FROM wc_agent_wakes
-                   WHERE target_agent_id = ?3 AND trigger_kind = 'agent_task_attempt'
-                     AND (?5 != 0 OR state = 'claimed')
-               )",
-            params![
-                endpoint_id,
-                controller_generation,
-                agent_id,
-                now,
-                fence_task_controller as i64,
-            ],
-        )
-        .map_err(store_error)?;
+    clear_endpoint_execution_bindings_for_endpoint_loss_in_transaction(
+        transaction,
+        agent_id,
+        endpoint_id,
+        controller_generation,
+        now,
+        fence_task_controller,
+    )?;
     transaction
         .execute(
             "UPDATE wc_agent_wake_attempts
@@ -3257,7 +3174,7 @@ fn wake_envelope(
             terminal_task_state.as_str(),
         ),
             AgentAttentionSource::GoalWorkflowStalled { workflow_session_id, .. } => format!(
-                "WebCodex Goal workflow stall continuation.\nagent_id={}\nendpoint_id={}\ncontroller_generation={}\nwake_id={}\nconsume_token={}\ngoal_id={}\nsession_id={}\n\nBootstrap this exact Wake with bootstrap_agent_conversation; immediately consume_agent_wake. Then get_goal(goal_id) and session_handoff_summary(session_id) for the exact correlated Workflow Session. Continue the latest checkpoint/current step using current authorized Job/Project state as needed. A vanished turn does not prove failure: never repeat an uncertain effect. Checkpoint with checkpoint_goal as work progresses; fresh verification/review precedes explicit update_goal completion. Stop if terminal or its controller changed.\n",
+                "WebCodex Goal workflow stall continuation.\nagent_id={}\nendpoint_id={}\ncontroller_generation={}\nwake_id={}\nconsume_token={}\ngoal_id={}\nsession_id={}\n\nBootstrap this exact Wake with bootstrap_agent_conversation; immediately consume_agent_wake. Then get_goal(goal_id) and read_session_handoff(session_id) for the exact correlated Workflow Session. Continue the latest checkpoint/current step using current authorized Job/Project state as needed. A vanished turn does not prove failure: never repeat an uncertain effect. Checkpoint with checkpoint_goal as work progresses; fresh verification/review precedes explicit update_goal completion. Stop if terminal or its controller changed.\n",
                 wake.target_agent_id, endpoint_id, controller_generation, wake.wake_id,
                 consume_token, event.goal_id, workflow_session_id,
             ),

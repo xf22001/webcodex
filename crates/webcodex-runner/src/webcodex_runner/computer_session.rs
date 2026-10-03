@@ -6,8 +6,6 @@
 use super::computer::handle_computer_operation_with_runtime;
 use super::{err_cmd, CommandResult};
 #[cfg(any(target_os = "macos", windows, test))]
-use crate::artifact_policy::MAX_MCP_IMAGE_BYTES;
-#[cfg(any(target_os = "macos", windows, test))]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,6 +13,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(any(target_os = "macos", windows, test))]
 use webcodex_computer::{ComputerConfig, ComputerRuntime};
+#[cfg(any(target_os = "macos", windows, test))]
+use webcodex_core::artifact_policy::MAX_MCP_IMAGE_BYTES;
 use webcodex_core::runner_operation::RunnerComputerOperation;
 #[cfg(any(target_os = "macos", windows, test))]
 use webcodex_core::runner_operation::RunnerComputerOperationKind;
@@ -405,6 +405,8 @@ fn write_frame(stream: &mut impl Write, bytes: &[u8], max: usize) -> Result<(), 
 }
 
 fn validate_dir(dir: &Path, helper: bool) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = helper;
     let meta =
         std::fs::symlink_metadata(dir).map_err(|e| format!("computer session directory: {e}"))?;
     if !meta.is_dir() || meta.file_type().is_symlink() {

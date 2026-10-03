@@ -122,6 +122,15 @@ pub trait ToolCallAuditProjection {
 impl ToolCallAuditProjection for ToolCall {
     fn session_log_arguments(&self) -> Value {
         match self {
+            Self::OpenWebcodexWorkbench { .. } => serde_json::json!({"workbench_open":true}),
+            Self::SearchWebcodexResources {
+                kind,
+                offset,
+                limit,
+                ..
+            } => serde_json::json!({"kind":kind,"offset":offset,"limit":limit}),
+            Self::ReadWebcodexResource { .. } => serde_json::json!({"resource_read":true}),
+
             #[cfg(feature = "experimental-code-mode")]
             Self::CodeModeExec {
                 project,
@@ -567,8 +576,9 @@ impl ToolCallAuditProjection for ToolCall {
                 "project": project,
                 "cwd": cwd,
                 "adapter": adapter,
-                "packages_present": scope.is_some(),
+                "packages_present": scope.as_ref().is_some_and(|scope| !scope.packages.is_empty()),
                 "package_count": scope.as_ref().map(|scope| scope.packages.len()).unwrap_or_default(),
+                "all_packages": scope.as_ref().is_some_and(|scope| scope.all_packages),
                 "timeout_secs": timeout_secs,
             }),
             Self::ProjectValidate {
@@ -585,8 +595,9 @@ impl ToolCallAuditProjection for ToolCall {
                 "cwd": cwd,
                 "action": action,
                 "adapter": adapter,
-                "packages_present": scope.is_some(),
+                "packages_present": scope.as_ref().is_some_and(|scope| !scope.packages.is_empty()),
                 "package_count": scope.as_ref().map(|scope| scope.packages.len()).unwrap_or_default(),
+                "all_packages": scope.as_ref().is_some_and(|scope| scope.all_packages),
                 "test_options_present": test.is_some(),
                 "filter_present": test.as_ref().is_some_and(|options| options.filter.is_some()),
                 "require_tests": test.as_ref().and_then(|options| options.require_tests),
@@ -757,6 +768,7 @@ impl ToolCallAuditProjection for ToolCall {
                 )
             }
             Self::ListGoals {
+                query: _,
                 lifecycle,
                 offset,
                 limit,
@@ -1057,21 +1069,7 @@ impl ToolCallAuditProjection for ToolCall {
                     "idempotency_key": idempotency_key,
                 }),
             ),
-            #[cfg(feature = "legacy-gpt-actions")]
-            Self::AttachAgentEndpoint {
-                agent_id,
-                host,
-                client_attachment_id,
-                idempotency_key,
-            } => typed_communication_request_audit(
-                CommunicationRequestAudit::AttachEndpoint,
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "host": host,
-                    "client_attachment_id": client_attachment_id,
-                    "idempotency_key": idempotency_key,
-                }),
-            ),
+
             Self::PresentAgentContinuation {
                 agent_continuation_ref,
                 agent_id,
@@ -1707,6 +1705,19 @@ impl ToolCallAuditProjection for ToolCall {
                 "destination_path": destination_path,
                 "overwrite": overwrite,
             }),
+            Self::AcceptArtifactHandoff {
+                grant_id,
+                destination_project,
+                destination_path,
+                overwrite,
+                idempotency_key,
+            } => serde_json::json!({
+                "grant_id": grant_id,
+                "destination_project": destination_project,
+                "destination_path": destination_path,
+                "overwrite": overwrite,
+                "idempotency_key_present": !idempotency_key.is_empty(),
+            }),
             Self::ProjectArtifact {
                 project,
                 path,
@@ -2090,6 +2101,7 @@ impl ToolCallAuditProjection for ToolCall {
             Self::FinishCodingTask {
                 project,
                 session_id,
+                outputs,
                 summary_only,
                 include_diff,
                 include_workspace,
@@ -2099,6 +2111,7 @@ impl ToolCallAuditProjection for ToolCall {
             } => serde_json::json!({
                 "project": project,
                 "session_id": session_id,
+                "outputs": outputs,
                 "summary_only": summary_only,
                 "include_diff": include_diff,
                 "include_workspace": include_workspace,

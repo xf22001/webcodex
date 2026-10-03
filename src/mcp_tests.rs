@@ -129,19 +129,20 @@ fn mcp_job_audit_correlation_keeps_only_stable_job_identity() {
 }
 
 #[test]
-fn work_result_app_internal_tools_do_not_become_window_activity() {
+fn work_result_app_internal_tools_do_not_start_live_window_activity() {
     for tool in [
         "present_work_result",
-        "work_result_state",
-        "work_result_activity_detail",
-        "work_result_send_message",
-        "changes_file_diff",
+        "work_result_thread_panel",
+        "get_work_result_state",
+        "read_work_result_activity_detail",
+        "send_work_result_message",
+        "read_changed_file_diff",
     ] {
         assert!(work_result_app_internal_tool(Some(tool)), "{tool}");
     }
     for tool in [
-        "runtime_status",
-        "current_window_activity",
+        "get_runtime_status",
+        "read_current_window_activity",
         "observe_jobs",
         "read_files",
     ] {
@@ -278,6 +279,8 @@ mod artifact_export;
 mod computer_app;
 #[path = "mcp_tests/conformance.rs"]
 mod conformance;
+#[path = "mcp_tests/execution_feedback.rs"]
+mod execution_feedback;
 #[path = "mcp_tests/file_import.rs"]
 mod file_import;
 #[path = "mcp_tests/goal_plan_app.rs"]
@@ -300,6 +303,8 @@ mod plugin_tools;
 mod protocol;
 #[path = "mcp_tests/request_policy.rs"]
 mod request_policy;
+#[path = "mcp_tests/resource_references.rs"]
+mod resource_references;
 #[path = "mcp_tests/response.rs"]
 mod response_tests;
 #[path = "mcp_tests/result_app.rs"]
@@ -435,4 +440,39 @@ fn readiness_audit_correlation_retains_exact_jobs_without_guessing_project() {
     assert_eq!(correlation.observed_job_ids, vec!["wc_job_A", "wc_job_B"]);
     assert!(correlation.resolved_project.is_none());
     assert!(correlation.async_job_id.is_none());
+}
+
+#[path = "mcp_tests/workbench_app.rs"]
+mod workbench_app;
+
+#[path = "mcp_tests/resource_mentions.rs"]
+mod resource_mentions;
+
+#[path = "mcp_tests/retired_app_resources.rs"]
+mod retired_app_resources;
+
+// Stateless App policy fixture. Window-aware carrier tests keep their own explicit identity.
+async fn handle_with_app_policy(
+    runtime: &ToolRuntime,
+    request: JsonRpcRequest,
+    auth: Option<&crate::auth::AuthContext>,
+    enabled: bool,
+) -> McpOutcome {
+    let protocol_era = super::inferred_protocol_era(&request);
+    super::handle_mcp_request_with_lifecycle(
+        runtime,
+        request,
+        auth,
+        protocol_era,
+        super::HostFileImportTrust::Untrusted,
+        None,
+        None,
+        None,
+        crate::model_surface::effective_mcp_compact_schemas(
+            crate::config::mcp_compact_schemas_override(),
+        ),
+        enabled,
+        None,
+    )
+    .await
 }

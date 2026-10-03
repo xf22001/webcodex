@@ -40,6 +40,7 @@ impl ToolRuntime {
                 offset,
             } => self.list_project_files(project, path, limit, offset).await,
             ToolCall::ListProjectTrackedFiles {
+                query,
                 project,
                 session_id: _,
                 path,
@@ -48,7 +49,7 @@ impl ToolRuntime {
                 limit,
                 offset,
             } => {
-                self.list_project_tracked_files(project, path, globs, depth, limit, offset)
+                self.list_project_tracked_files(project, path, globs, query, depth, limit, offset)
                     .await
             }
             ToolCall::ProjectOverview {
@@ -83,10 +84,14 @@ impl ToolRuntime {
                     (None, Some(queries)) if !queries.is_empty() && queries.len() <= 8 => queries,
                     (Some(_), Some(_)) => {
                         return ToolResult::err(
-                            "search_and_read accepts query or queries, not both",
+                            "search_file_context accepts query or queries, not both",
                         )
                     }
-                    _ => return ToolResult::err("search_and_read requires query or 1..8 queries"),
+                    _ => {
+                        return ToolResult::err(
+                            "search_file_context requires query or 1..8 queries",
+                        )
+                    }
                 };
                 match project_resolution {
                     Some(Ok(resolved)) => {
@@ -156,6 +161,24 @@ impl ToolRuntime {
                 )
                 .await
             }
+            ToolCall::AcceptArtifactHandoff {
+                grant_id,
+                destination_project,
+                destination_path,
+                overwrite,
+                idempotency_key,
+            } => {
+                self.accept_artifact_handoff(
+                    grant_id,
+                    destination_project,
+                    destination_path,
+                    overwrite,
+                    idempotency_key,
+                    auth,
+                    transport,
+                )
+                .await
+            }
             ToolCall::ProjectArtifact {
                 project,
                 path,
@@ -191,10 +214,12 @@ impl ToolRuntime {
                         if suggested_call
                             .get("tool")
                             .and_then(serde_json::Value::as_str)
-                            == Some("read_project_artifact")
+                            == Some("read_project_artifact_chunk")
                         {
-                            suggested_call
-                                .insert("tool".to_string(), serde_json::json!("project_artifact"));
+                            suggested_call.insert(
+                                "tool".to_string(),
+                                serde_json::json!("inspect_project_artifact"),
+                            );
                             if let Some(arguments) = suggested_call
                                 .get_mut("arguments")
                                 .and_then(serde_json::Value::as_object_mut)
@@ -210,7 +235,7 @@ impl ToolRuntime {
                 super::ProjectArtifactAction::Image => {
                     if !matches!(transport, SessionTransport::Mcp) {
                         ToolResult::err_with_output(
-                            "project_artifact action=image requires MCP native-image transport",
+                            "inspect_project_artifact action=image requires MCP native-image transport",
                             serde_json::json!({
                                 "error_kind": "unsupported_transport",
                                 "action": "image",
@@ -234,7 +259,7 @@ impl ToolRuntime {
                 super::ProjectArtifactAction::Export => {
                     if !matches!(transport, SessionTransport::Mcp) {
                         ToolResult::err_with_output(
-                            "project_artifact action=export requires Stateless MCP 2026 ResourceLink transport",
+                            "inspect_project_artifact action=export requires Stateless MCP 2026 ResourceLink transport",
                             serde_json::json!({
                                 "error_kind": "unsupported_transport",
                                 "action": "export",
@@ -249,7 +274,7 @@ impl ToolRuntime {
                             }
                             Some(Err(error)) => error.into_tool_result(),
                             None => ToolResult::err(
-                                "project_artifact action=export requires an exact resolved Runner project",
+                                "inspect_project_artifact action=export requires an exact resolved Runner project",
                             ),
                         }
                     }

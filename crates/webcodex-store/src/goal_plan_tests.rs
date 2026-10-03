@@ -1,6 +1,6 @@
-use super::communication::{CommunicationPrincipal, COMMUNICATION_PRINCIPAL_DIGEST_PREFIX};
 use super::goal::{GoalLifecycle, GoalPatch, NewGoal};
 use super::goal_plan::*;
+use super::store_primitives::{CommunicationPrincipal, COMMUNICATION_PRINCIPAL_DIGEST_PREFIX};
 use super::Database;
 use rusqlite::params;
 
@@ -358,7 +358,7 @@ fn goal_plan_malformed_persistence_fails_closed_for_reads_lists_and_mutations() 
             "goal_store_unavailable"
         );
         assert_eq!(
-            db.list_goals(&owner, None, 0, 10).unwrap_err().code(),
+            db.list_goals(&owner, None, None, 0, 10).unwrap_err().code(),
             "goal_store_unavailable"
         );
         assert_eq!(

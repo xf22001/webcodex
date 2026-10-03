@@ -65,7 +65,7 @@ def stage(args: argparse.Namespace) -> dict:
         raise StageError("built_at must be a positive Unix timestamp")
     if args.platform not in PLATFORM_ARCH:
         raise StageError(f"unsupported macOS Desktop platform: {args.platform!r}")
-    if args.signing_mode not in {"adhoc", "developer-id"}:
+    if args.signing_mode not in {"adhoc", "self-signed", "developer-id"}:
         raise StageError(f"unsupported macOS signing mode: {args.signing_mode!r}")
 
     expected_host, expected_binary_arch = PLATFORM_ARCH[args.platform]
@@ -84,7 +84,7 @@ def stage(args: argparse.Namespace) -> dict:
 
     runtime_dir = output_dir / "resources" / "webcodex-runtime"
     runtime_dir.mkdir(parents=True)
-    short_source = args.source_sha[:12].lower()
+    source_identity = args.source_sha.lower()
     resources: dict[str, str] = {}
     files: dict[str, dict[str, object]] = {}
     try:
@@ -101,7 +101,7 @@ def stage(args: argparse.Namespace) -> dict:
 
             actual_version = run_line([str(source), "--version"])
             expected_version = (
-                f"{name} {args.version} (commit {short_source}, dirty=false, built_at={args.built_at})"
+                f"{name} {args.version} (commit {source_identity}, dirty=false, built_at={args.built_at})"
             )
             if actual_version != expected_version:
                 raise StageError(
@@ -135,7 +135,8 @@ def stage(args: argparse.Namespace) -> dict:
             }
 
         macos: dict[str, object] = {}
-        if args.signing_mode == "adhoc":
+        if args.signing_mode in {"adhoc", "self-signed"}:
+            # Self-signed finalization restores pinned requirements after Tauri.
             macos["signingIdentity"] = "-"
         overlay = {
             "version": args.version,
@@ -179,7 +180,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--source-sha", required=True)
     result.add_argument("--built-at", type=int, required=True)
     result.add_argument("--platform", choices=tuple(PLATFORM_ARCH), required=True)
-    result.add_argument("--signing-mode", choices=("adhoc", "developer-id"), required=True)
+    result.add_argument("--signing-mode", choices=("adhoc", "self-signed", "developer-id"), required=True)
     result.add_argument("--output-dir", type=Path, required=True)
     return result
 

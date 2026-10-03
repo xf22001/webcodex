@@ -90,7 +90,7 @@ fn runtime(depot: &Depot) -> Option<Arc<ToolRuntime>> {
 // observation correlation, not client liveness evidence or authority. No other
 // arguments, Goal body, or Host binding are copied into the activity ledger.
 fn goal_plan_observation_id(tool_name: Option<&str>, params: &Value) -> Option<String> {
-    if tool_name != Some("goal_plan_sync") {
+    if tool_name != Some("sync_goal_plan") {
         return None;
     }
     let id = params.pointer("/arguments/goal_id")?.as_str()?;
@@ -106,11 +106,17 @@ fn work_result_app_internal_tool(tool_name: Option<&str>) -> bool {
     matches!(
         tool_name,
         Some(
-            "present_work_result"
-                | "work_result_state"
-                | "work_result_activity_detail"
-                | "work_result_send_message"
-                | "changes_file_diff"
+            "search_mentions"
+                | "open_webcodex_workbench"
+                | "search_webcodex_resources"
+                | "read_webcodex_resource"
+                | "list_sessions"
+                | "present_work_result"
+                | "work_result_thread_panel"
+                | "get_work_result_state"
+                | "read_work_result_activity_detail"
+                | "send_work_result_message"
+                | "read_changed_file_diff"
         )
     )
 }
@@ -725,11 +731,14 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     // represented as executed actions.
     let audit = if request.method == "tools/call" && request.id.is_some() {
         let audit = ActionAudit::start(req, depot, "/mcp", "toolsCall");
-        let audit = if window_activity_visible {
-            audit.with_window(window.identity.as_ref(), Some(&server_trace_id))
-        } else {
-            audit
-        };
+        // Presentation stays out of live activity, but its durable Window binding
+        // is required when the Host later opens the empty-argument thread panel.
+        let audit =
+            if window_activity_visible || tool_name.as_deref() == Some("present_work_result") {
+                audit.with_window(window.identity.as_ref(), Some(&server_trace_id))
+            } else {
+                audit
+            };
         Some((
             audit,
             tool_name.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -1230,8 +1239,7 @@ async fn handle_mcp_request_with_lifecycle(
     correlation_out: Option<&mut crate::tool_runtime::ToolCallCorrelation>,
 ) -> McpOutcome {
     let stateless_2026 = protocol_era == McpProtocolEra::Stateless2026;
-    let resource_read_bypasses_runtime_read = stateless_2026
-        && request.method == "resources/read"
+    let resource_read_bypasses_runtime_read = request.method == "resources/read"
         && resources::resource_read_bypasses_runtime_read(&request.params);
     let mcp_app_enabled =
         resources::mcp_app_enabled(server_mcp_apps_enabled, stateless_2026, &request.params);
@@ -1262,6 +1270,8 @@ async fn handle_mcp_request_with_lifecycle(
                 | "tools/list"
                 | "tools/call"
                 | "notifications/initialized"
+                | "resources/list"
+                | "resources/read"
         )
     {
         return scope_forbidden(
@@ -1309,10 +1319,10 @@ async fn handle_mcp_request_with_lifecycle(
             return tools::handle_list(id, auth, stateless_2026, compact_schemas, mcp_app_enabled)
                 .await;
         }
-        "resources/list" if stateless_2026 && runtime_resource_method => {
+        "resources/list" if runtime_resource_method => {
             return resources::handle_list(runtime, id, mcp_app_enabled);
         }
-        "resources/read" if stateless_2026 && runtime_resource_method => {
+        "resources/read" if runtime_resource_method => {
             return resources::handle_read(
                 runtime,
                 request.params,

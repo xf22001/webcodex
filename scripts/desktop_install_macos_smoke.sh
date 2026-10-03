@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --dmg <path> --version <version> --source-sha <40hex> --built-at <unix> --platform <darwin-x64|darwin-arm64> --stage-metadata <path> --signing-mode <adhoc|developer-id> [--evidence <path>]" >&2
+  echo "usage: $0 --dmg <path> --version <version> --source-sha <40hex> --built-at <unix> --platform <darwin-x64|darwin-arm64> --stage-metadata <path> --signing-mode <adhoc|self-signed|developer-id> [--evidence <path>]" >&2
   exit 2
 }
 
@@ -37,7 +37,7 @@ case "$platform" in
   darwin-arm64) expected_host=arm64; expected_arch=arm64 ;;
   *) echo "unsupported Desktop platform: $platform" >&2; exit 1 ;;
 esac
-case "$signing_mode" in adhoc|developer-id) ;; *) echo "invalid signing mode" >&2; exit 1 ;; esac
+case "$signing_mode" in adhoc|self-signed|developer-id) ;; *) echo "invalid signing mode" >&2; exit 1 ;; esac
 [ "$(uname -m)" = "$expected_host" ] || { echo "Desktop smoke requires native $expected_host host" >&2; exit 1; }
 [ -f "$dmg" ] && [ ! -L "$dmg" ] || { echo "DMG is missing or not a regular file: $dmg" >&2; exit 1; }
 [ -f "$stage_metadata" ] && [ ! -L "$stage_metadata" ] || { echo "stage metadata is missing: $stage_metadata" >&2; exit 1; }
@@ -93,12 +93,12 @@ for name, item in files.items():
         raise SystemExit(f"source/staged input digest mismatch: {name}")
 PY
 
-short_source="$(printf '%s' "${source_sha:0:12}" | tr '[:upper:]' '[:lower:]')"
+source_identity="$(printf '%s' "$source_sha" | tr '[:upper:]' '[:lower:]')"
 for name in webcodex webcodex-server webcodex-runner; do
   binary="$runtime_dir/$name"
   [ -f "$binary" ] && [ ! -L "$binary" ] && [ -x "$binary" ] || { echo "bundled runtime missing: $name" >&2; exit 1; }
   actual="$("$binary" --version | head -n 1)"
-  expected="$name $version (commit $short_source, dirty=false, built_at=$built_at)"
+  expected="$name $version (commit $source_identity, dirty=false, built_at=$built_at)"
   [ "$actual" = "$expected" ] || { echo "unexpected bundled runtime identity for $name" >&2; exit 1; }
   actual_arch="$(/usr/bin/lipo -archs "$binary")"
   [ "$actual_arch" = "$expected_arch" ] || { echo "unexpected bundled runtime architecture for $name: $actual_arch" >&2; exit 1; }

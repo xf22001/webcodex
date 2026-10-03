@@ -490,7 +490,7 @@ impl ToolRuntime {
                 correlation: Default::default(),
             };
         }
-        if request.tool_name == "goal_plan_sync" && !capabilities.goal_plan_app {
+        if request.tool_name == "sync_goal_plan" && !capabilities.goal_plan_app {
             return ToolCallOutcome {
                 success: false,
                 result: None,
@@ -506,7 +506,9 @@ impl ToolRuntime {
         }
         if matches!(
             request.tool_name.as_str(),
-            "work_result_state" | "work_result_activity_detail" | "work_result_send_message"
+            "get_work_result_state"
+                | "read_work_result_activity_detail"
+                | "send_work_result_message"
         ) && !capabilities.work_result_app
         {
             return ToolCallOutcome {
@@ -522,7 +524,7 @@ impl ToolRuntime {
                 correlation: Default::default(),
             };
         }
-        if request.tool_name == "changes_file_diff" && !capabilities.work_result_app {
+        if request.tool_name == "read_changed_file_diff" && !capabilities.work_result_app {
             return ToolCallOutcome {
                 success: false,
                 result: None,
@@ -538,14 +540,14 @@ impl ToolRuntime {
         }
         if matches!(
             request.tool_name.as_str(),
-            "agent_continuation_bind"
-                | "agent_continuation_recover_endpoint"
-                | "agent_continuation_state"
-                | "agent_continuation_wake_acquire"
-                | "agent_continuation_wake_prepare"
-                | "agent_continuation_wake_finish"
-                | "agent_continuation_unbind"
-                | "agent_wait_state"
+            "bind_agent_continuation"
+                | "recover_agent_continuation_endpoint"
+                | "get_agent_continuation_state"
+                | "acquire_agent_continuation_wake"
+                | "prepare_agent_continuation_wake"
+                | "finish_agent_continuation_wake"
+                | "unbind_agent_continuation"
+                | "get_agent_wait_state"
         ) && !capabilities.agent_continuation_app
         {
             return ToolCallOutcome {
@@ -563,11 +565,11 @@ impl ToolRuntime {
         }
         if matches!(
             request.tool_name.as_str(),
-            "job_terminal_continuation_bind"
-                | "job_terminal_continuation_state"
-                | "job_terminal_continuation_prepare"
-                | "job_terminal_continuation_finish"
-                | "job_terminal_continuation_unbind"
+            "bind_job_terminal_continuation"
+                | "get_job_terminal_continuation_state"
+                | "prepare_job_terminal_continuation"
+                | "finish_job_terminal_continuation"
+                | "unbind_job_terminal_continuation"
         ) && !capabilities.agent_continuation_app
         {
             return ToolCallOutcome {
@@ -1102,10 +1104,17 @@ impl ToolRuntime {
         // Preserve the concrete business Session for final presentation and
         // bounded ActionAudit evidence. The generic recorder remains independent
         // provenance and Window affinity never becomes execution or Session authority.
-        let business_session_id = call.session_id().map(str::to_string);
+        let business_session_id = match &call {
+            // Presentation has an explicit business selector, but deliberately
+            // has no generic Session recorder/lifecycle target.
+            ToolCall::PresentWorkResult { session_id, .. } => session_id.as_deref(),
+            _ => call.session_id(),
+        }
+        .map(str::to_string);
         // Permission is evaluated once inside dispatch (pre-exec gate). Kernel
         // only reuses the attached decision for the outer recording session —
         // never re-evaluate (no second request id / inconsistent outcome).
+        let execution_started = std::time::Instant::now();
         let (mut result, result_projection, mut correlation) = self
             .dispatch_with_auth_transport_options_and_metadata_with_recording_mode_and_context_with_result_projection(
                 call,
@@ -1123,6 +1132,15 @@ impl ToolRuntime {
                 return_timing,
             )
             .await;
+        crate::tool_request_trace::record_phase_latency(
+            "canonical_execution",
+            execution_started,
+            if result.success {
+                "completed"
+            } else {
+                "failed"
+            },
+        );
         if result.success {
             if let Some(code) = input_normalization {
                 result.output["input_normalization"] =
@@ -1322,8 +1340,8 @@ fn collaboration_session_tool(tool_name: &str) -> bool {
             | "observe_session_messages"
             | "resolve_session_message"
             | "complete_session_message"
-            | "session_discussion_summary"
-            | "session_handoff_summary"
+            | "read_session_discussion_summary"
+            | "read_session_handoff"
     )
 }
 
@@ -1398,8 +1416,11 @@ mod tests {
         assert!(business_object
             .keys()
             .all(|key| !key.starts_with("__webcodex_")));
-        crate::tool_runtime::ToolCall::from_tool_name("tool_manifest", business_arguments.clone())
-            .expect("typed ToolCall parsing must accept business-only arguments");
+        crate::tool_runtime::ToolCall::from_tool_name(
+            "read_tool_manifest",
+            business_arguments.clone(),
+        )
+        .expect("typed ToolCall parsing must accept business-only arguments");
 
         let invocation_metadata = ToolInvocationMetadata {
             ack_session_message_ids: vec![guidance.message_id],
@@ -1410,7 +1431,7 @@ mod tests {
         let outcome = runtime
             .call_tool_with_invocation_metadata(
                 ToolCallRequest {
-                    tool_name: "tool_manifest".to_string(),
+                    tool_name: "read_tool_manifest".to_string(),
                     arguments: business_arguments,
                 },
                 ToolCallContext {
@@ -1659,9 +1680,9 @@ mod tests {
             oauth(&["project:write", "job:run", "mcp:local"]),
         ] {
             for tool in [
-                "coding_agent_start",
-                "coding_agent_observe",
-                "coding_agent_cancel",
+                "start_coding_agent",
+                "observe_coding_agent",
+                "cancel_coding_agent",
             ] {
                 assert_eq!(
                     check_runtime_tool_scope(Some(&insufficient), tool),
@@ -1675,13 +1696,13 @@ mod tests {
         }
         let run_only = oauth(&["coding_agent:run"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&run_only), "coding_agent_start"),
+            check_runtime_tool_scope(Some(&run_only), "start_coding_agent"),
             Err(ToolCallErrorStatus::InsufficientScope {
                 required_scope: Some(crate::auth::SCOPE_PROJECT_WRITE),
                 description: "missing required scope: project:write".to_string(),
             })
         );
-        for tool in ["coding_agent_observe", "coding_agent_cancel"] {
+        for tool in ["observe_coding_agent", "cancel_coding_agent"] {
             assert_eq!(
                 check_runtime_tool_scope(Some(&run_only), tool),
                 Ok(()),
@@ -1690,7 +1711,7 @@ mod tests {
         }
         let start_allowed = oauth(&["coding_agent:run", "project:write"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&start_allowed), "coding_agent_start"),
+            check_runtime_tool_scope(Some(&start_allowed), "start_coding_agent"),
             Ok(())
         );
     }
@@ -1748,44 +1769,44 @@ mod tests {
 
     #[test]
     fn computer_gateway_outer_scopes_are_minimal_and_action_neutral() {
-        assert_eq!(check_runtime_tool_scope(None, "computer_control"), Ok(()));
+        assert_eq!(check_runtime_tool_scope(None, "control_computer"), Ok(()));
         assert!(check_runtime_tool_scope(None, "plugin_tool").is_err());
 
         let denied = oauth(&["runtime:read", "project:read"]);
-        assert!(check_runtime_tool_scope(Some(&denied), "computer_observe").is_err());
-        assert!(check_runtime_tool_scope(Some(&denied), "computer_control").is_err());
+        assert!(check_runtime_tool_scope(Some(&denied), "observe_computer").is_err());
+        assert!(check_runtime_tool_scope(Some(&denied), "control_computer").is_err());
 
         let observe = oauth(&["computer:read"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&observe), "computer_observe"),
+            check_runtime_tool_scope(Some(&observe), "observe_computer"),
             Ok(())
         );
-        assert!(check_runtime_tool_scope(Some(&observe), "computer_control").is_err());
+        assert!(check_runtime_tool_scope(Some(&observe), "control_computer").is_err());
 
         let control = oauth(&["computer:control"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&control), "computer_control"),
+            check_runtime_tool_scope(Some(&control), "control_computer"),
             Ok(())
         );
-        assert!(check_runtime_tool_scope(Some(&control), "computer_observe").is_err());
+        assert!(check_runtime_tool_scope(Some(&control), "observe_computer").is_err());
 
         let launch = oauth(&["computer:launch"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&launch), "computer_control"),
+            check_runtime_tool_scope(Some(&launch), "control_computer"),
             Ok(())
         );
-        assert!(check_runtime_tool_scope(Some(&launch), "computer_observe").is_err());
+        assert!(check_runtime_tool_scope(Some(&launch), "observe_computer").is_err());
     }
 
     #[test]
     fn computer_save_snapshot_requires_project_write_and_computer_read() {
         let read_only = oauth(&["computer:read"]);
-        assert!(check_runtime_tool_scope(Some(&read_only), "computer_save_snapshot").is_err());
+        assert!(check_runtime_tool_scope(Some(&read_only), "save_computer_snapshot").is_err());
         let write_only = oauth(&["project:write"]);
-        assert!(check_runtime_tool_scope(Some(&write_only), "computer_save_snapshot").is_err());
+        assert!(check_runtime_tool_scope(Some(&write_only), "save_computer_snapshot").is_err());
         let both = oauth(&["project:write", "computer:read"]);
         assert_eq!(
-            check_runtime_tool_scope(Some(&both), "computer_save_snapshot"),
+            check_runtime_tool_scope(Some(&both), "save_computer_snapshot"),
             Ok(())
         );
     }
@@ -1802,7 +1823,7 @@ mod tests {
             })
         );
         assert_eq!(
-            check_runtime_tool_scope(Some(&pat), "runtime_status"),
+            check_runtime_tool_scope(Some(&pat), "get_runtime_status"),
             Ok(())
         );
 
@@ -1812,11 +1833,11 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            check_runtime_tool_scope(Some(&shared), "computer_observe"),
+            check_runtime_tool_scope(Some(&shared), "observe_computer"),
             Ok(())
         );
         assert_eq!(
-            check_runtime_tool_scope(Some(&shared), "computer_control"),
+            check_runtime_tool_scope(Some(&shared), "control_computer"),
             Ok(())
         );
     }

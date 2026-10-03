@@ -87,6 +87,7 @@ fn plugin_auth_with_scopes(scopes: &[&str]) -> crate::auth::AuthContext {
 
 fn plugin_tool(name: &str) -> PluginTool {
     PluginTool {
+        project_bound: false,
         name: name.to_string(),
         title: Some("Repository Search".to_string()),
         description: Some("Search repository symbols".to_string()),
@@ -1696,6 +1697,7 @@ async fn generic_runtime_plugin_gateway_list_describe_call_and_error_certainty_s
     assert!(matches!(
         call_request.plugin_gateway,
         Some(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             ref provider_id,
             ref provider_instance_id,
             ref name,
@@ -1896,7 +1898,10 @@ async fn provider_tool_names_never_enter_outer_mcp_inventory() {
         "runner-instance-a",
         "repo-tools-a",
         "provider-instance-a",
-        vec![plugin_tool("safe_delete"), plugin_tool("runtime_status")],
+        vec![
+            plugin_tool("safe_delete"),
+            plugin_tool("get_runtime_status"),
+        ],
     )
     .await;
     register_plugin_runner(
@@ -1921,7 +1926,7 @@ async fn provider_tool_names_never_enter_outer_mcp_inventory() {
     assert_eq!(
         names
             .iter()
-            .filter(|name| **name == "runtime_status")
+            .filter(|name| **name == "get_runtime_status")
             .count(),
         1
     );
@@ -2038,7 +2043,7 @@ async fn tool_manifest_returns_sparse_static_plugin_tool_contract_without_runner
             "tools/call",
             Some(json!(7061)),
             mcp_2026_params(json!({
-                "name": "tool_manifest",
+                "name": "read_tool_manifest",
                 "arguments": {
                     "tool_name": crate::plugin_gateway::PLUGIN_TOOL_NAME,
                     "include_recommended_flows": false,
@@ -2050,7 +2055,7 @@ async fn tool_manifest_returns_sparse_static_plugin_tool_contract_without_runner
     )
     .await;
     let McpOutcome::Ok(value) = outcome else {
-        panic!("tool_manifest(plugin_tool) must succeed without any Runner inventory");
+        panic!("read_tool_manifest(plugin_tool) must succeed without any Runner inventory");
     };
     let output = &value["result"]["structuredContent"]["output"];
     assert_eq!(output["name"], crate::plugin_gateway::PLUGIN_TOOL_NAME);
@@ -2245,6 +2250,7 @@ async fn same_tool_name_is_legal_across_runners_and_providers_and_bindings_dispa
         assert!(matches!(
             request.plugin_gateway,
             Some(PluginGatewayRequest::ToolsCall {
+            project_target: None,
                 ref provider_id,
                 ref provider_instance_id,
                 ref name,
@@ -2424,6 +2430,7 @@ async fn plugin_tool_reload_describe_call_binds_exact_dynamic_provider_and_forge
     let call_request =
         wait_for_plugin_request(&runtime.runner_registry, "runner-a", "runner-instance-a").await;
     let Some(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_instance_id,
         name,
         arguments,
@@ -2475,6 +2482,7 @@ async fn plugin_tool_reload_describe_call_binds_exact_dynamic_provider_and_forge
     assert!(matches!(
         replacement_request.plugin_gateway,
         Some(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             ref provider_instance_id,
             ..
         }) if provider_instance_id == "dynamic-provider-instance"
@@ -2628,6 +2636,7 @@ async fn plugin_binding_a_never_retargets_across_reload_and_binding_b_still_call
     assert!(matches!(
         request_a.plugin_gateway,
         Some(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             ref provider_instance_id,
             ref name,
             ..
@@ -2660,6 +2669,7 @@ async fn plugin_binding_a_never_retargets_across_reload_and_binding_b_still_call
     let request_b =
         wait_for_plugin_request(&runtime.runner_registry, "runner-a", "runner-instance-a").await;
     let Some(PluginGatewayRequest::ToolsCall {
+        project_target: None,
         provider_instance_id,
         name,
         arguments,
@@ -2912,6 +2922,7 @@ async fn plugin_binding_runner_replacement_and_schema_change_fail_closed() {
     assert!(matches!(
         schema_request.plugin_gateway,
         Some(PluginGatewayRequest::ToolsCall {
+            project_target: None,
             ref provider_instance_id,
             ..
         }) if provider_instance_id == "dynamic-provider-instance"

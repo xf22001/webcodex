@@ -44,8 +44,8 @@ class MacosReleaseEvidenceTests(unittest.TestCase):
             self.write_evidence(platform, {
                 "schema_version": 1,
                 "platform": platform,
-                "signing_mode": "developer-id",
-                "notarized": True,
+                "signing_mode": "self-signed",
+                "notarized": False,
                 "dmg_sha256": hashlib.sha256(data).hexdigest(),
                 "runtime": {binary: {"runtime_input_sha256": "a" * 64, "bundled_signed_sha256": "b" * 64}
                             for binary in ("webcodex", "webcodex-server", "webcodex-runner")},
@@ -68,19 +68,35 @@ class MacosReleaseEvidenceTests(unittest.TestCase):
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode == 0, expected_success, result.stderr)
 
-    def test_formal_release_accepts_developer_id_and_current_digest_fields(self) -> None:
+    def test_formal_release_accepts_self_signed_without_notarization(self) -> None:
         self.verify(True)
 
-    def test_verification_build_accepts_only_adhoc_without_notarization(self) -> None:
+    def test_verification_build_accepts_the_same_adhoc_evidence(self) -> None:
         self.env["BUILD_KIND"] = "verification"
         for platform in ("darwin-arm64", "darwin-x64"):
-            self.update(platform, signing_mode="adhoc", notarized=False)
+            self.update(platform, signing_mode="adhoc")
         self.verify(True)
-        self.env["BUILD_KIND"] = "release"
+
+    def test_formal_release_rejects_unexpected_developer_id_evidence(self) -> None:
+        self.update(signing_mode="developer-id", notarized=True)
         self.verify(False)
 
-    def test_formal_release_rejects_missing_notarization(self) -> None:
+    def test_formal_release_rejects_silent_adhoc_fallback(self) -> None:
+        self.update(signing_mode="adhoc")
+        self.verify(False)
+        self.env["MACOS_SIGNING_MODE"] = "adhoc"
+        self.verify(False)
+
+    def test_explicit_developer_id_requires_notarization(self) -> None:
+        self.env["MACOS_SIGNING_MODE"] = "developer-id"
+        for platform in ("darwin-arm64", "darwin-x64"):
+            self.update(platform, signing_mode="developer-id", notarized=True)
+        self.verify(True)
         self.update(notarized=False)
+        self.verify(False)
+
+    def test_self_signed_cannot_claim_notarization(self) -> None:
+        self.update(notarized=True)
         self.verify(False)
 
     def test_bad_dmg_digest_is_rejected(self) -> None:

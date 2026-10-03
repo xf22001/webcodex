@@ -1,12 +1,12 @@
-//! Tests for `session_handoff_summary` — read-only structured handoff tool.
+//! Tests for `read_session_handoff` — read-only structured handoff tool.
 
 use super::super::*;
 use super::support::*;
 use crate::auth::AuthContext;
 use crate::runner_protocol::RunnerCapabilities;
-use crate::tool_runtime::handoff::{
-    apply_compact_workflow_outcomes, VALIDATION_IDENTITY_REUSE_ACTION,
-};
+use crate::tool_runtime::closeout_facts::{Observation, WorkspaceFacts};
+use crate::tool_runtime::closeout_projection::{closeout_facts, install_closeout_decision};
+use crate::tool_runtime::handoff::VALIDATION_IDENTITY_REUSE_ACTION;
 use crate::tool_runtime::kernel::{ToolCallContext, ToolCallRequest, ToolTransport};
 use crate::tool_runtime::sessions::SessionTransport;
 use crate::tool_runtime::validation_events::validation_summary_for_session;
@@ -39,7 +39,19 @@ fn closeout_projection_classifies_workspace_conflicts_as_hard_blockers() {
         "suggested_next_actions": []
     });
 
-    apply_compact_workflow_outcomes(&mut output, true, None);
+    let facts = closeout_facts(
+        Observation::Observed(WorkspaceFacts {
+            clean: Some(false),
+            conflicts: Some(1),
+            non_git: false,
+        }),
+        None,
+        &output["jobs"],
+        &output["validation"],
+        &output["tool_failures"],
+        &output["review_evidence"],
+    );
+    install_closeout_decision(&mut output, &facts, &[]);
 
     assert!(output["hard_blockers"]
         .as_array()
@@ -60,19 +72,17 @@ fn closeout_projection_classifies_workspace_conflicts_as_hard_blockers() {
 
 #[tokio::test]
 async fn session_handoff_summary_is_known_and_in_specs() {
-    assert!(is_known_tool_name("session_handoff_summary"));
+    assert!(is_known_tool_name("read_session_handoff"));
     let specs = registered_tool_specs();
     assert!(
-        specs.iter().any(|s| s.name == "session_handoff_summary"),
-        "session_handoff_summary must appear in tool_specs"
+        specs.iter().any(|s| s.name == "read_session_handoff"),
+        "read_session_handoff must appear in tool_specs"
     );
     assert!(
         specs.iter().all(|spec| is_known_tool_name(&spec.name)),
         "tool_specs must remain a subset of known parser names"
     );
-    assert!(
-        crate::tool_runtime::metadata::lookup_tool_metadata("session_handoff_summary").is_some()
-    );
+    assert!(crate::tool_runtime::metadata::lookup_tool_metadata("read_session_handoff").is_some());
     // tool_manifest session category must include the new tool.
     let runtime = test_runtime();
     let manifest = runtime
@@ -89,8 +99,8 @@ async fn session_handoff_summary_is_known_and_in_specs() {
         .as_array()
         .expect("manifest tools array");
     assert!(
-        tools.iter().any(|t| t["name"] == "session_handoff_summary"),
-        "session category must include session_handoff_summary: {:?}",
+        tools.iter().any(|t| t["name"] == "read_session_handoff"),
+        "session category must include read_session_handoff: {:?}",
         tools
     );
 }
@@ -365,7 +375,7 @@ async fn failure_history_read_only_failure_is_non_actionable_in_handoff() {
     let result = call_recorded_tool(
         &runtime,
         &sid,
-        "job_tail",
+        "read_job_tail",
         json!({"job_id": "missing-job"}),
         None,
     )
@@ -385,7 +395,7 @@ async fn failure_history_read_only_failure_is_non_actionable_in_handoff() {
     );
     assert_eq!(
         handoff.output["unexpected_failed_tool_calls"][0]["tool_name"],
-        "job_tail"
+        "read_job_tail"
     );
     assert_reason_list_not_contains(
         &handoff.output["verdict"],
@@ -410,7 +420,7 @@ async fn failure_history_checkpoint_create_proven_no_change_is_non_actionable_in
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "workspace_checkpoint_create",
+        "create_workspace_checkpoint",
         json!({"project": "agent:test:checkpoint"}),
         false,
         json!({
@@ -867,13 +877,13 @@ async fn direct_typed_dispatch_preserves_failure_expectation_metadata() {
     let unexpected_success = call_typed_tool_with_metadata_and_agent(
         &runtime,
         "direct-mixed",
-        "show_changes",
+        "read_workspace_changes",
         json!({
             "project": &project,
             "session_id": &sid,
             "include_diff": false,
             "expected_failure": true,
-            "assertion_name": "direct show_changes expected failure"
+            "assertion_name": "direct read_workspace_changes expected failure"
         }),
         Some(auth.clone()),
     )
@@ -917,7 +927,8 @@ async fn direct_typed_dispatch_preserves_failure_expectation_metadata() {
         .iter()
         .find(|event| {
             event.kind == "tool_call_finished"
-                && event.assertion_name.as_deref() == Some("direct show_changes expected failure")
+                && event.assertion_name.as_deref()
+                    == Some("direct read_workspace_changes expected failure")
         })
         .expect("unexpected success finished event");
     assert_eq!(success_event.status.as_deref(), Some("succeeded"));
@@ -1624,13 +1635,13 @@ async fn generic_call_runtime_tool_preserves_flattened_failure_expectations() {
     let unexpected_success = call_kernel_tool_with_agent(
         &runtime,
         "generic-expect",
-        "show_changes",
+        "read_workspace_changes",
         json!({
             "project": &project,
             "session_id": &sid,
             "include_diff": false,
             "expected_failure": true,
-            "assertion_name": "generic show_changes expected failure"
+            "assertion_name": "generic read_workspace_changes expected failure"
         }),
         None,
         Some(auth.clone()),
@@ -1689,7 +1700,8 @@ async fn generic_call_runtime_tool_preserves_flattened_failure_expectations() {
         .iter()
         .find(|event| {
             event.kind == "tool_call_finished"
-                && event.assertion_name.as_deref() == Some("generic show_changes expected failure")
+                && event.assertion_name.as_deref()
+                    == Some("generic read_workspace_changes expected failure")
         })
         .expect("unexpected success finished event");
     assert_eq!(success_finished.status.as_deref(), Some("succeeded"));
@@ -1911,7 +1923,7 @@ async fn session_handoff_defaults_to_bounded_recovery_brief() {
     let result = runtime
         .dispatch(
             ToolCall::from_tool_name(
-                "session_handoff_summary",
+                "read_session_handoff",
                 json!({"session_id": session.session_id}),
             )
             .unwrap(),
@@ -2306,7 +2318,7 @@ async fn session_handoff_diagnostic_warns_with_review_evidence_when_validation_n
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "show_changes",
+        "read_workspace_changes",
         json!({"project": "agent:eval:demo", "include_diff": false}),
         true,
         json!({}),
@@ -2330,7 +2342,11 @@ async fn session_handoff_diagnostic_warns_with_review_evidence_when_validation_n
     assert_eq!(result.output["review_evidence"]["hygiene_review_count"], 0);
     assert_eq!(
         result.output["review_evidence"]["tools"],
-        json!(["read_files", "search_project_texts", "show_changes"])
+        json!([
+            "read_files",
+            "search_project_texts",
+            "read_workspace_changes"
+        ])
     );
     assert_review_evidence_tools_safe(&result.output["review_evidence"]);
     let verdict = &result.output["verdict"];
@@ -3475,7 +3491,7 @@ async fn session_handoff_summary_output_is_bounded() {
 }
 
 // =========================================================================
-// 11. Metadata / MCP / OpenAPI consistency
+// 11. Metadata / MCP consistency
 // =========================================================================
 
 #[test]
@@ -3483,8 +3499,8 @@ fn session_handoff_summary_metadata_and_mcp_consistency() {
     // readOnlyHint must be true.
     let spec = registered_tool_specs()
         .into_iter()
-        .find(|s| s.name == "session_handoff_summary")
-        .expect("session_handoff_summary spec");
+        .find(|s| s.name == "read_session_handoff")
+        .expect("read_session_handoff spec");
     assert_eq!(spec.annotations["readOnlyHint"], true);
     assert_eq!(spec.annotations["destructiveHint"], false);
     assert_eq!(spec.annotations["openWorldHint"], false);
@@ -3493,30 +3509,30 @@ fn session_handoff_summary_metadata_and_mcp_consistency() {
         .expect("handoff input properties");
     assert!(
         input_props.contains_key("include_validation"),
-        "session_handoff_summary input schema should expose include_validation"
+        "read_session_handoff input schema should expose include_validation"
     );
     assert!(
         input_props.contains_key("diagnostic"),
-        "session_handoff_summary input schema should expose diagnostic"
+        "read_session_handoff input schema should expose diagnostic"
     );
     let output_props = spec.output_schema["properties"]["output"]["properties"]
         .as_object()
         .expect("handoff output properties");
     assert!(
         output_props.contains_key("validation"),
-        "session_handoff_summary output schema should expose validation"
+        "read_session_handoff output schema should expose validation"
     );
     assert!(
         output_props.contains_key("permissions"),
-        "session_handoff_summary output schema should expose permissions"
+        "read_session_handoff output schema should expose permissions"
     );
     assert!(
         output_props.contains_key("tool_failures"),
-        "session_handoff_summary output schema should expose tool_failures"
+        "read_session_handoff output schema should expose tool_failures"
     );
     assert!(
         output_props.contains_key("verdict"),
-        "session_handoff_summary output schema should expose verdict"
+        "read_session_handoff output schema should expose verdict"
     );
     let description = spec.description.to_lowercase();
     for phrase in [
@@ -3527,12 +3543,12 @@ fn session_handoff_summary_metadata_and_mcp_consistency() {
     ] {
         assert!(
             description.contains(phrase),
-            "session_handoff_summary description should mention {phrase}: {description}"
+            "read_session_handoff description should mention {phrase}: {description}"
         );
     }
 
     // Metadata: read-only, runtime:read scope.
-    let metadata = crate::tool_runtime::metadata::lookup_tool_metadata("session_handoff_summary")
+    let metadata = crate::tool_runtime::metadata::lookup_tool_metadata("read_session_handoff")
         .expect("metadata");
     assert_eq!(
         metadata.effect,
@@ -3544,39 +3560,6 @@ fn session_handoff_summary_metadata_and_mcp_consistency() {
         metadata.authority,
         crate::tool_runtime::metadata::ToolAuthorityPolicy::Require("runtime:read")
     );
-
-    #[cfg(feature = "legacy-gpt-actions")]
-    {
-        let openapi = crate::openapi::build_openapi_spec();
-        let action = &openapi["paths"]["/api/actions/session_handoff_summary"]["post"];
-        assert_eq!(action["operationId"], "session_handoff_summary");
-        let properties = action["requestBody"]["content"]["application/json"]["schema"]
-            ["properties"]
-            .as_object()
-            .unwrap();
-        for field in [
-            "session_id",
-            "include_validation",
-            "include_workspace",
-            "include_checkpoints",
-            "diagnostic",
-        ] {
-            assert!(
-                properties.contains_key(field),
-                "session_handoff_summary missing {field}"
-            );
-        }
-        for field in [
-            "expected_failure",
-            "expected_failure_kind",
-            "assertion_name",
-        ] {
-            assert!(
-                !properties.contains_key(field),
-                "unexpected Action field {field}"
-            );
-        }
-    }
 }
 
 // =========================================================================
@@ -3823,6 +3806,7 @@ async fn finish_coding_task_summary_only_no_hygiene(
         runtime_for_task
             .dispatch_with_auth(
                 ToolCall::FinishCodingTask {
+                    outputs: Vec::new(),
                     project,
                     session_id,
                     summary_only: true,
@@ -3863,7 +3847,7 @@ async fn handoff_summary(runtime: &ToolRuntime, session_id: &str) -> ToolResult 
     runtime
         .dispatch(
             ToolCall::from_tool_name(
-                "session_handoff_summary",
+                "read_session_handoff",
                 json!({
                     "session_id": session_id,
                     "include_workspace": false,
@@ -3880,7 +3864,7 @@ async fn handoff_diagnostic(runtime: &ToolRuntime, session_id: &str) -> ToolResu
     runtime
         .dispatch(
             ToolCall::from_tool_name(
-                "session_handoff_summary",
+                "read_session_handoff",
                 json!({
                     "session_id": session_id,
                     "include_workspace": false,
@@ -3893,8 +3877,8 @@ async fn handoff_diagnostic(runtime: &ToolRuntime, session_id: &str) -> ToolResu
         .await
 }
 
-/// Dispatch `session_handoff_summary` through the agent path, completing any
-/// agent shell requests (from the internal `show_changes` call) locally.
+/// Dispatch `read_session_handoff` through the agent path, completing any
+/// agent shell requests (from the internal `read_workspace_changes` call) locally.
 async fn dispatch_handoff_with_agent(
     runtime: &ToolRuntime,
     client_id: &str,
@@ -4070,12 +4054,12 @@ fn assert_review_evidence_tools_safe(review_evidence: &Value) {
                 "read_files"
                     | "list_project_files"
                     | "search_project_texts"
-                    | "git_diff_hunks"
-                    | "git_review_summary"
-                    | "show_changes"
-                    | "git_status"
-                    | "workspace_hygiene_check"
-                    | "project_overview"
+                    | "read_git_diff_hunks"
+                    | "read_git_review_summary"
+                    | "read_workspace_changes"
+                    | "get_git_status"
+                    | "check_workspace_hygiene"
+                    | "read_project_overview"
             ),
             "unexpected review evidence tool name {tool}"
         );
@@ -4102,7 +4086,7 @@ async fn review_evidence_git_review_summary_counts_as_mapping_not_diff_review() 
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "git_review_summary",
+        "read_git_review_summary",
         json!({
             "project": "agent:eval:demo",
             "base_commit": "a".repeat(40),
@@ -4128,13 +4112,13 @@ async fn review_evidence_git_review_summary_counts_as_mapping_not_diff_review() 
     assert_eq!(review["read_only_inspection_count"], 1);
     assert_eq!(review["diff_review_count"], 0);
     assert_eq!(review["total"], 1);
-    assert_eq!(review["tools"], json!(["git_review_summary"]));
+    assert_eq!(review["tools"], json!(["read_git_review_summary"]));
     assert_review_evidence_tools_safe(review);
 
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "git_diff_hunks",
+        "read_git_diff_hunks",
         json!({
             "project": "agent:eval:demo",
             "base_commit": "a".repeat(40),
@@ -4170,7 +4154,7 @@ async fn review_evidence_git_review_summary_counts_as_mapping_not_diff_review() 
     assert_eq!(review["total"], 2);
     assert_eq!(
         review["tools"],
-        json!(["git_review_summary", "git_diff_hunks"])
+        json!(["read_git_review_summary", "read_git_diff_hunks"])
     );
     assert_review_evidence_tools_safe(review);
 }
@@ -4186,7 +4170,7 @@ async fn review_evidence_show_changes_without_diff_does_not_count_diff_review() 
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "show_changes",
+        "read_workspace_changes",
         json!({"project": "agent:eval:demo", "include_diff": false}),
         true,
         json!({}),
@@ -4208,7 +4192,7 @@ async fn review_evidence_show_changes_without_diff_does_not_count_diff_review() 
     assert_eq!(review["workspace_review_count"], 1);
     assert_eq!(review["diff_review_count"], 0);
     assert_eq!(review["total"], 1);
-    assert_eq!(review["tools"], json!(["show_changes"]));
+    assert_eq!(review["tools"], json!(["read_workspace_changes"]));
 }
 
 #[tokio::test]
@@ -4223,7 +4207,7 @@ async fn review_evidence_show_changes_with_diff_counts_workspace_and_diff() {
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "show_changes",
+        "read_workspace_changes",
         json!({"project": "agent:eval:demo", "include_diff": true}),
         true,
         json!({}),
@@ -4245,7 +4229,7 @@ async fn review_evidence_show_changes_with_diff_counts_workspace_and_diff() {
     assert_eq!(review["workspace_review_count"], 1);
     assert_eq!(review["diff_review_count"], 1);
     assert_eq!(review["total"], 1);
-    assert_eq!(review["tools"], json!(["show_changes"]));
+    assert_eq!(review["tools"], json!(["read_workspace_changes"]));
 
     let events = runtime
         .sessions
@@ -4254,11 +4238,13 @@ async fn review_evidence_show_changes_with_diff_counts_workspace_and_diff() {
         .events;
     let finished = events
         .iter()
-        .find(|event| event.kind == "tool_call_finished" && event.tool_name == "show_changes")
-        .expect("finished show_changes event");
+        .find(|event| {
+            event.kind == "tool_call_finished" && event.tool_name == "read_workspace_changes"
+        })
+        .expect("finished read_workspace_changes event");
     assert!(
         finished.diff_review_like,
-        "finished show_changes(include_diff=true) must persist diff_review_like=true"
+        "finished read_workspace_changes(include_diff=true) must persist diff_review_like=true"
     );
     assert!(
         finished.input_summary.is_none(),
@@ -4278,7 +4264,7 @@ async fn review_evidence_mixed_diff_workspace_and_hygiene_counts() {
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "show_changes",
+        "read_workspace_changes",
         json!({"project": "agent:eval:demo", "include_diff": true}),
         true,
         json!({}),
@@ -4286,7 +4272,7 @@ async fn review_evidence_mixed_diff_workspace_and_hygiene_counts() {
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "git_diff_hunks",
+        "read_git_diff_hunks",
         json!({"project": "agent:eval:demo"}),
         true,
         json!({}),
@@ -4294,7 +4280,7 @@ async fn review_evidence_mixed_diff_workspace_and_hygiene_counts() {
     record_handoff_tool_event(
         &runtime,
         &sid,
-        "workspace_hygiene_check",
+        "check_workspace_hygiene",
         json!({"project": "agent:eval:demo"}),
         true,
         json!({}),
@@ -4319,7 +4305,11 @@ async fn review_evidence_mixed_diff_workspace_and_hygiene_counts() {
     assert_eq!(review["hygiene_review_count"], 1);
     assert_eq!(
         review["tools"],
-        json!(["show_changes", "git_diff_hunks", "workspace_hygiene_check"])
+        json!([
+            "read_workspace_changes",
+            "read_git_diff_hunks",
+            "check_workspace_hygiene"
+        ])
     );
     assert_review_evidence_tools_safe(review);
 }
@@ -4336,7 +4326,7 @@ fn session_event_omitted_optional_fields_still_deserialize() {
         "kind": "tool_call_finished",
         "timestamp": 1,
         "transport": "api",
-        "tool_name": "show_changes",
+        "tool_name": "read_workspace_changes",
         "project": null,
         "resolved_project": null,
         "risk_class": "read_only",
@@ -4359,7 +4349,7 @@ fn session_event_omitted_optional_fields_still_deserialize() {
     }"#;
     let event: SessionEvent =
         serde_json::from_str(legacy).expect("legacy SessionEvent must keep deserializing");
-    assert_eq!(event.tool_name, "show_changes");
+    assert_eq!(event.tool_name, "read_workspace_changes");
     assert!(event.input_summary.is_none());
     assert_eq!(event.status.as_deref(), Some("succeeded"));
     assert!(
@@ -4423,7 +4413,7 @@ async fn handoff_marks_basis_incomplete_when_session_changes_during_workspace_re
                 runtime
                     .dispatch(
                         ToolCall::from_tool_name(
-                            "session_handoff_summary",
+                            "read_session_handoff",
                             json!({"session_id": sid}),
                         )
                         .unwrap(),

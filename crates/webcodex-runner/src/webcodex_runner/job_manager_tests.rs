@@ -342,13 +342,20 @@ fn heartbeat_worker_keeps_fixed_cadence_across_signals_and_exits_on_shutdown() {
         interval,
     );
 
+    assert!(
+        wait_until(Duration::from_secs(1), || lock_unpoison(&jobs)[job_id]
+            .snapshot
+            .update_seq
+            >= 2),
+        "heartbeat worker must establish its first cadence before the signal check"
+    );
     std::thread::sleep(Duration::from_millis(180));
     signal.notify();
     assert!(
         wait_until(Duration::from_millis(220), || lock_unpoison(&jobs)[job_id]
             .snapshot
             .update_seq
-            >= 2),
+            >= 3),
         "ordinary delivery signals must not postpone the fixed heartbeat cadence"
     );
 
@@ -6188,4 +6195,24 @@ fn assert_local_job_stdin_isolated(test_name: &str, validation: bool) {
         String::from_utf8_lossy(&stderr)
     );
     assert!(String::from_utf8_lossy(&stdout).contains("1 passed"));
+}
+
+#[test]
+fn project_all_packages_cargo_activity_retains_native_progress() {
+    let mut step = ShellJobValidationStep {
+        name: "check".into(),
+        program: "cargo".into(),
+        args: vec!["check".into(), "--all-targets".into(), "--workspace".into()],
+        env: Vec::new(),
+    };
+    assert_eq!(
+        cargo_activity_from_stderr(&step, "Checking member v0.1.0\n"),
+        Some(ShellJobActivity {
+            state: ShellJobActivityState::Working,
+            phase: ShellJobActivityPhase::CargoChecking,
+            source: ShellJobActivitySource::CargoOutput,
+        })
+    );
+    step.args.extend(["-p".into(), "member".into()]);
+    assert!(cargo_activity_from_stderr(&step, "Checking member v0.1.0\n").is_none());
 }

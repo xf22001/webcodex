@@ -29,7 +29,6 @@ Start with the goal that matches what you are trying to do.
 - [MCP](MCP.md) — Bearer, query-token fallback, OAuth, private tunnel, and MCP protocol reference
 - [Authentication](AUTH_MODEL.md) — detailed credential and authority boundaries
 - [Deployment](DEPLOYMENT.md) — stable HTTPS origins, self-hosting, and production networking
-- [GPT Actions](GPT_ACTIONS.md) — optional OpenAPI-based Custom GPT integration
 
 ## I need help
 
@@ -47,6 +46,7 @@ Start with the goal that matches what you are trying to do.
 ## I want to contribute or release WebCodex
 
 - [Desktop development](DESKTOP_DEVELOPMENT.md) — run Desktop from source and build/test native Windows/macOS packages
+- [Sponsorship and project support](SPONSORSHIP.md) — community sponsorship, infrastructure support, partnerships, and recognition principles
 
 The `docs/agent/` pages below are maintainer/internal contracts. They intentionally
 contain protocol fields, compatibility names, and implementation invariants that
@@ -63,5 +63,5 @@ ordinary users should not need to learn.
 - [Authority model](agent/permission-model.md)
 - [Session model](agent/session-model.md)
 - [Manual multi-window collaboration](agent/manual-window-collaboration.md)
-- [OpenAPI guidelines](agent/openapi-guidelines.md)
+- [OpenAPI guidelines](agent/runtime-api-guidelines.md)
 - [Release process](agent/release-process.md)

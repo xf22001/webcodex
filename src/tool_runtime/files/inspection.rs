@@ -1,5 +1,18 @@
 use super::*;
 
+/// Physical file-read capability. It owns only the Runner transport needed for
+/// target-fenced reads, response validation and cancellation, not runtime state.
+#[derive(Clone)]
+pub(crate) struct ProjectFileReader {
+    runner_registry: std::sync::Arc<crate::runner_http::RunnerRegistry>,
+}
+
+impl ProjectFileReader {
+    pub(crate) fn new(runner_registry: std::sync::Arc<crate::runner_http::RunnerRegistry>) -> Self {
+        Self { runner_registry }
+    }
+}
+
 /// Dropping the last singleflight waiter must also remove its queued request.
 /// Other waiters retain the shared future, so one caller timing out cannot
 /// cancel their physical read. This guard also covers ordinary read cancellation.
@@ -686,19 +699,22 @@ impl ToolRuntime {
         else {
             return read_file_failure(ReadFileReason::RunnerUnavailable, Some(&path));
         };
-        self.read_one_validated_project_file(
-            &resolved.config,
-            runner_project_id,
-            &runner.runner_instance_id,
-            path,
-            start_line,
-            limit,
-            with_line_numbers,
-            None,
-        )
-        .await
+        ProjectFileReader::new(self.runner_registry.clone())
+            .read_one_validated_project_file(
+                &resolved.config,
+                runner_project_id,
+                &runner.runner_instance_id,
+                path,
+                start_line,
+                limit,
+                with_line_numbers,
+                None,
+            )
+            .await
     }
+}
 
+impl ProjectFileReader {
     pub(crate) async fn read_one_resolved_project_file(
         &self,
         project: &ProjectConfig,
@@ -821,7 +837,9 @@ impl ToolRuntime {
             }
         }
     }
+}
 
+impl ToolRuntime {
     // -------------------------------------------------------------------------
     // Project instructions auto-load (best-effort, session-start guidance)
     // -------------------------------------------------------------------------
@@ -1154,10 +1172,20 @@ impl ToolRuntime {
         project: String,
         path: Option<String>,
         globs: Option<Vec<String>>,
+        query: Option<String>,
         depth: Option<usize>,
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> ToolResult {
+        if query
+            .as_ref()
+            .is_some_and(|q| q.chars().count() > 200 || q.contains('\0'))
+        {
+            return list_tracked_error(
+                "invalid_query",
+                "query must be at most 200 characters without NUL".to_string(),
+            );
+        }
         let scope_input = path.as_deref().unwrap_or("").trim().to_string();
         if !scope_input.is_empty() && scope_input != "." {
             if let Err(error) = validate_project_relative_path(&scope_input) {
@@ -1269,12 +1297,19 @@ impl ToolRuntime {
         let (bounded_raw, producer_budget_hit) = bounded_tracked_source(&raw);
         let (paths, unterminated_record) = super::file_listing::parse_nul_separated(bounded_raw);
         let list_truncated = producer_budget_hit || unterminated_record;
-        let listing =
-            super::file_listing::build_listing(&paths, &scope, &globs, depth, limit, offset);
+        let listing = super::file_listing::build_listing_with_query(
+            &paths,
+            &scope,
+            &globs,
+            query.as_deref(),
+            depth,
+            limit,
+            offset,
+        );
         ToolResult::ok(listing.to_json(&project, &scope, list_truncated))
     }
 
-    /// `project_overview`: deterministic, bounded project metadata routed to
+    /// `read_project_overview`: deterministic, bounded project metadata routed to
     /// the owning Runner. The server validates inputs and parses the structured
     /// response but never reads the Runner host's project path.
     pub(crate) async fn project_overview(
@@ -1335,12 +1370,12 @@ impl ToolRuntime {
                         Ok(Value::Object(output)) => Value::Object(output),
                         Ok(_) => {
                             return ToolResult::err(
-                                "Runner project_overview returned a non-object payload",
+                                "Runner read_project_overview returned a non-object payload",
                             )
                         }
                         Err(error) => {
                             return ToolResult::err(format!(
-                                "Runner project_overview returned invalid JSON: {error}"
+                                "Runner read_project_overview returned invalid JSON: {error}"
                             ))
                         }
                     };
@@ -1349,7 +1384,7 @@ impl ToolRuntime {
                     || output["scan"]["limit"] != limit
                 {
                     return ToolResult::err(
-                        "Runner project_overview response did not match the requested bounds",
+                        "Runner read_project_overview response did not match the requested bounds",
                     );
                 }
                 output["project"] = json!(project);
@@ -1359,15 +1394,15 @@ impl ToolRuntime {
                 response
                     .error
                     .or(response.stderr)
-                    .unwrap_or_else(|| "Runner project_overview failed".to_string()),
+                    .unwrap_or_else(|| "Runner read_project_overview failed".to_string()),
             ),
             Ok(Err(_)) => {
                 self.runner_registry.cancel_request(&request_id).await;
-                ToolResult::err("Runner project_overview waiter was dropped")
+                ToolResult::err("Runner read_project_overview waiter was dropped")
             }
             Err(_) => {
                 self.runner_registry.cancel_request(&request_id).await;
-                ToolResult::err("timed out waiting for Runner project_overview")
+                ToolResult::err("timed out waiting for Runner read_project_overview")
             }
         }
     }
@@ -1956,7 +1991,7 @@ mod tests {
                 "risk": u64::MAX
             },
             "highest_priority": "high",
-            "suggested_next_tool": "session_discussion_summary"
+            "suggested_next_tool": "read_session_discussion_summary"
         });
         let serialized = serde_json::to_vec(&result).unwrap();
         assert!(
