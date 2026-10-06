@@ -144,14 +144,15 @@ jobs:
               rustc --version --verbose
               cargo --version --verbose
 
-              cargo build --locked --release -p webcodex -p webcodex-cli -p webcodex-runner
+              cargo build --locked --release -p webcodex -p webcodex-cli -p webcodex-runner -p webcodex-openai-tunnel --bin webcodex-tunnel
 
               mkdir -p dist/webcodex-${{ matrix.arch }}
               cp target/release/webcodex dist/webcodex-${{ matrix.arch }}/
               cp target/release/webcodex-server dist/webcodex-${{ matrix.arch }}/
               cp target/release/webcodex-runner dist/webcodex-${{ matrix.arch }}/
+              cp target/release/webcodex-tunnel dist/webcodex-${{ matrix.arch }}/
 
-              for name in webcodex webcodex-server webcodex-runner; do
+              for name in webcodex webcodex-server webcodex-runner webcodex-tunnel; do
                 binary="target/release/$name"
                 if ! readelf -h "$binary" | grep -F "Machine:" | grep -Fq "${{ matrix.elf_machine }}"; then
                   echo "Unexpected ELF architecture for $binary" >&2
@@ -172,7 +173,7 @@ jobs:
 
               tar -C "dist/webcodex-${{ matrix.arch }}" \
                 -czf "dist/webcodex-${{ matrix.arch }}.tar.gz" \
-                webcodex webcodex-server webcodex-runner
+                webcodex webcodex-server webcodex-runner webcodex-tunnel
             '
 
       - uses: actions/upload-artifact@v4
