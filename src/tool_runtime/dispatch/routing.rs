@@ -23,13 +23,15 @@ impl ToolRuntime {
     ) -> ToolResult {
         match call {
             ToolCall::OpenWebcodexWorkbench {
+                client_id,
                 project,
                 session_id,
             } => {
-                self.open_webcodex_workbench(project, session_id, auth)
+                self.open_webcodex_workbench(project, session_id, client_id, auth)
                     .await
             }
             ToolCall::SearchWebcodexResources {
+                client_id,
                 kind,
                 query,
                 project,
@@ -38,7 +40,7 @@ impl ToolRuntime {
                 limit,
             } => {
                 self.search_webcodex_resources(
-                    kind, query, project, session_id, offset, limit, auth,
+                    kind, query, project, session_id, offset, limit, client_id, auth,
                 )
                 .await
             }
@@ -115,13 +117,19 @@ impl ToolRuntime {
             | ToolCall::SessionDiscussionSummary { .. }
             | ToolCall::WorkOnProject { .. }
             | ToolCall::FinishCodingTask { .. }
+            | ToolCall::PresentDocx { .. }
             | ToolCall::PresentWorkResult { .. }
+            | ToolCall::PresentPdf { .. }
+            | ToolCall::ReadPdfChunk { .. }
+            | ToolCall::ReadAppArtifactChunk { .. }
             | ToolCall::WorkResultState { .. }
             | ToolCall::WorkResultActivityDetail { .. }
             | ToolCall::WorkResultSendMessage { .. }
             | ToolCall::ChangesFileDiff { .. }
             | ToolCall::SessionHandoffSummary { .. }
             | ToolCall::SessionHandoffState { .. }
+            | ToolCall::ResolveWorkspace { .. }
+            | ToolCall::UnregisterProjects { .. }
             | ToolCall::ListProjects { .. }
             | ToolCall::RegisterProject { .. }
             | ToolCall::UnregisterProject { .. }
@@ -299,6 +307,7 @@ impl ToolRuntime {
             | ToolCall::SaveProjectArtifact { .. }
             | ToolCall::TransferProjectArtifact { .. }
             | ToolCall::AcceptArtifactHandoff { .. }
+            | ToolCall::PresentSpreadsheet { .. }
             | ToolCall::ProjectArtifact { .. }
             | ToolCall::ReadProjectArtifactMetadata { .. }
             | ToolCall::ReadProjectArtifact { .. }
@@ -325,7 +334,10 @@ impl ToolRuntime {
             | ToolCall::CargoCheck { .. }
             | ToolCall::CargoTest { .. }
             | ToolCall::ProjectValidate { .. }
-            | ToolCall::GoTest { .. }) => self.dispatch_cargo_tool(call, ssh_resource, auth).await,
+            | ToolCall::GoTest { .. }) => {
+                self.dispatch_cargo_tool(call, ssh_resource, auth, structured_handoff_max_secs)
+                    .await
+            }
 
             call @ (ToolCall::RunJob { .. }
             | ToolCall::StopJob { .. }

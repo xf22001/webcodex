@@ -1,3 +1,4 @@
+use super::app_registry;
 use super::presentation;
 use super::resources;
 use super::response::{
@@ -33,18 +34,8 @@ pub(super) const WORK_RESULT_THREAD_CONTEXT_META_KEY: &str = "webcodex/workResul
 const WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME: &str = "work_result_thread_panel";
 
 fn filter_specs_for_oauth(mut specs: Vec<ToolSpec>, auth: Option<&AuthContext>) -> Vec<ToolSpec> {
-    let oauth_scope_projection = auth.is_some_and(AuthContext::is_oauth_token);
     specs.retain(|spec| {
-        let authority = crate::tool_runtime::metadata::lookup_tool_metadata(&spec.name)
-            .map(|metadata| metadata.authority);
-        matches!(
-            authority,
-            Some(webcodex_core::authority::ToolAuthorityPolicy::RequireAny(_))
-        )
-        .then(|| check_runtime_tool_scope(auth, &spec.name).is_ok())
-        .unwrap_or_else(|| {
-            !oauth_scope_projection || check_runtime_tool_scope(auth, &spec.name).is_ok()
-        })
+        crate::tool_runtime::kernel::runtime_tool_scope_allows_discovery(auth, &spec.name)
     });
     specs
 }
@@ -359,7 +350,7 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
             // ChatGPT rejects private/App-only tools with rendering resources.
             attach_app_metadata(
                 &mut thread_entrypoint,
-                resources::MCP_WORK_RESULT_UI_RESOURCE_URI,
+                app_registry::MCP_WORK_RESULT_UI_RESOURCE_URI,
             );
             attach_openai_thread_entrypoint(&mut thread_entrypoint);
             tools.push(thread_entrypoint);
@@ -368,6 +359,7 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
             crate::tool_runtime::goal_plan_app_tool_specs()
                 .into_iter()
                 .chain(crate::tool_runtime::work_result_app_tool_specs())
+                .chain(crate::tool_runtime::artifact_app_tool_specs())
                 .chain(crate::tool_runtime::agent_continuation_app_tool_specs())
                 .chain(crate::tool_runtime::job_terminal_continuation_app_tool_specs())
                 .collect(),
@@ -757,6 +749,7 @@ pub(super) fn add_stateless_workflow_recorder_metadata(payload: &mut Value) {
             tool_name,
             Some(
                 "sync_goal_plan"
+                    | "read_pdf_chunk"
                     | "get_work_result_state"
                     | "read_changed_file_diff"
                     | "search_mentions"
@@ -1344,36 +1337,11 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
             meta.insert("openai/fileParams".to_string(), json!(["openaiFileIdRefs"]));
         }
     }
-    if app_enabled && tool_name == "open_webcodex_workbench" {
-        attach_app_metadata(&mut value, resources::MCP_WORKBENCH_UI_RESOURCE_URI);
-        value["title"] = json!("Projects & Resources");
-        if let Some(meta) = tool_meta_object(&mut value) {
-            meta.insert(
-                "openai/ui".into(),
-                json!({"entrypoints":[{"type":"global"},{"type":"thread"}]}),
-            );
+    if app_enabled {
+        if let Some(app) = app_registry::for_tool(&tool_name) {
+            attach_app_metadata(&mut value, app.uri);
+            app.add_tool_metadata(&mut value);
         }
-    }
-    if app_enabled && presentation::tool_supports_result_app(&tool_name) {
-        attach_app_metadata(&mut value, resources::MCP_RESULT_UI_RESOURCE_URI);
-    }
-    if app_enabled && presentation::tool_supports_work_result_app(&tool_name) {
-        attach_app_metadata(&mut value, resources::MCP_WORK_RESULT_UI_RESOURCE_URI);
-    }
-    if app_enabled && presentation::tool_supports_goal_plan_app(&tool_name) {
-        attach_app_metadata(&mut value, resources::MCP_GOAL_PLAN_UI_RESOURCE_URI);
-    }
-    if app_enabled && presentation::tool_supports_agent_continuation_app(&tool_name) {
-        attach_app_metadata(
-            &mut value,
-            resources::MCP_AGENT_CONTINUATION_UI_RESOURCE_URI,
-        );
-    }
-    if app_enabled && presentation::tool_supports_job_terminal_continuation_app(&tool_name) {
-        attach_app_metadata(
-            &mut value,
-            resources::MCP_JOB_TERMINAL_CONTINUATION_UI_RESOURCE_URI,
-        );
     }
     attach_job_terminal_resume_suggested_call_schema(&tool_name, app_enabled, &mut value);
     if compact {
@@ -2049,7 +2017,12 @@ pub(super) struct McpInvocationEnvelope {
 fn mcp_invocation_envelope_supported_fields(tool: &str) -> Vec<&'static str> {
     if matches!(
         tool,
-        "sync_goal_plan" | "get_work_result_state" | "read_changed_file_diff" | "search_mentions"
+        "sync_goal_plan"
+            | "get_work_result_state"
+            | "read_pdf_chunk"
+            | "read_app_artifact_chunk"
+            | "read_changed_file_diff"
+            | "search_mentions"
     ) || tool == WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME
         || is_host_continuation_app_tool_name(tool)
     {
@@ -2298,6 +2271,7 @@ pub(super) async fn handle_call(
                     None,
                     None,
                     Some(10),
+                    None,
                     auth,
                 )
                 .await;
@@ -2846,6 +2820,12 @@ pub(super) async fn handle_call(
             None => json!({"project": binding.project}),
         };
     }
+    let app_only_artifact_read = server_mcp_apps_enabled
+        && stateless_2026
+        && matches!(
+            params.name.as_str(),
+            "read_pdf_chunk" | "read_app_artifact_chunk"
+        );
     let app_only_work_result_state =
         work_result_app_admitted && params.name == "get_work_result_state";
     let app_only_work_result_activity_detail =
@@ -2872,6 +2852,7 @@ pub(super) async fn handle_call(
                 | "open_webcodex_workbench"
         );
     let direct_denied = !workbench_view_call
+        && !app_only_artifact_read
         && !app_only_goal_plan_sync
         && !app_only_work_result_state
         && !app_only_work_result_activity_detail
@@ -3026,6 +3007,7 @@ pub(super) async fn handle_call(
                 trace_diagnostics: trace_diagnostics_capable,
                 goal_plan_app: goal_plan_app_capable,
                 work_result_app: work_result_app_capable,
+                artifact_app: server_mcp_apps_enabled && stateless_2026,
                 agent_continuation_app: agent_continuation_app_capable,
             },
         )
@@ -3120,7 +3102,15 @@ pub(super) async fn handle_call(
             )
         }
     };
-    if workbench_view_call
+    // Direct calls may omit discovery UI capabilities. Deliver the canonical identity
+    // privately as well, matching the generic App artifact transport's Host envelopes.
+    if server_mcp_apps_enabled && params.name == "present_spreadsheet" {
+        if let Some(structured) = result.get("structuredContent").cloned() {
+            result["_meta"]["webcodex/spreadsheetSource"] = structured;
+        }
+    }
+    if app_only_artifact_read
+        || workbench_view_call
         || (app_only_work_result_state && !work_result_thread_panel)
         || app_only_work_result_activity_detail
         || app_only_work_result_send_message
@@ -3135,6 +3125,21 @@ pub(super) async fn handle_call(
         // These tools are ModelHidden/app-visible only, so ordinary model tool
         // results retain the compact text fallback.
         attach_app_tool_content_fallback(&mut result);
+    }
+    if app_enabled && params.name == "present_docx" {
+        if let Some(structured) = result.get("structuredContent").cloned() {
+            let meta = result
+                .as_object_mut()
+                .unwrap()
+                .entry("_meta")
+                .or_insert_with(|| json!({}));
+            meta["webcodex/docxDocument"] = structured;
+        }
+    }
+    if app_enabled && params.name == "present_pdf" {
+        if let Some(structured) = result.get("structuredContent").cloned() {
+            result["_meta"]["webcodex/pdfDocument"] = structured;
+        }
     }
     if (app_enabled && params.name == "present_work_result") || work_result_thread_panel {
         // Initial model-originated presentation keeps normal model content compact.
@@ -3167,6 +3172,14 @@ pub(super) async fn handle_call(
     }
     if app_enabled {
         presentation::attach_result_app_presentation(&params.name, &mut result);
+        if let (Some(expectation), Some(presentation)) = (
+            outcome.correlation.failure_expectation_result.as_ref(),
+            result
+                .pointer_mut("/_meta/webcodex~1presentation")
+                .and_then(Value::as_object_mut),
+        ) {
+            presentation.insert("failure_expectation_result".to_string(), json!(expectation));
+        }
     }
     let model_ergonomics = model_ergonomics_completion.as_ref().and_then(|completion| {
         result

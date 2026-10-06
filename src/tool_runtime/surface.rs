@@ -51,6 +51,7 @@ const TOOL_MANIFEST_CANONICAL_KEYS: &[&str] = &[
     "contract",
     "category",
     "intent",
+    "query",
     "available_intents",
     "filtered",
     "categories_requested",
@@ -143,7 +144,15 @@ fn strip_code_mode_schema_noise(value: &mut Value) {
             for key in ["description", "title", "examples", "$comment"] {
                 object.remove(key);
             }
+            if object.get("default").is_some_and(Value::is_null) {
+                object.remove("default");
+            }
             for (key, nested) in object.iter_mut() {
+                // These contain instance data, not schemas. A literal object
+                // can legitimately have a business key named "description".
+                if matches!(key.as_str(), "const" | "enum" | "default") {
+                    continue;
+                }
                 if matches!(
                     key.as_str(),
                     "properties"
@@ -254,12 +263,20 @@ fn collect_code_mode_output_fields(
         if CODE_MODE_USEFUL_OUTPUT_FIELD_NAMES.contains(&name.as_str()) {
             fields.insert(path.clone());
         }
-        let nested_prefix = if schema_can_be_array(child) {
-            format!("{path}[]")
-        } else {
-            path
-        };
-        collect_code_mode_output_fields(child, &nested_prefix, depth + 1, fields);
+        // Describe decision-bearing values, not every implementation detail of
+        // diagnostics or generated follow-up arguments. Keep collection item
+        // paths and validation freshness; other structured values stay whole.
+        if matches!(
+            name.as_str(),
+            "output" | "items" | "matches" | "files" | "source_state"
+        ) {
+            let nested_prefix = if schema_can_be_array(child) {
+                format!("{path}[]")
+            } else {
+                path
+            };
+            collect_code_mode_output_fields(child, &nested_prefix, depth + 1, fields);
+        }
     }
 }
 
@@ -283,51 +300,56 @@ fn code_mode_output_fields(schema: &Value) -> Vec<String> {
         rank(left).cmp(&rank(right)).then_with(|| left.cmp(right))
     });
     fields.truncate(CODE_MODE_OUTPUT_FIELDS_PER_TOOL_MAX);
+    // The common ToolResult envelope is declared once, not repeated per tool.
     fields
+        .into_iter()
+        .filter_map(|path| path.strip_prefix("output.").map(str::to_owned))
+        .collect()
 }
 
 #[cfg(feature = "experimental-code-mode")]
 fn code_mode_usage_examples(stage: CodeModeCallableStage) -> Vec<Value> {
-    let mut examples = vec![
-        json!({
-            "name": "adaptive_search_then_read",
-            "source": r#"const search = await tools.search_project_texts({queries:[{pattern:"CanonicalOrchestrationHost",pattern_mode:"literal",limit:8}]});
+    // Each stage has its own complete example. Repeating read-only examples
+    // in every wider stage spends the bounded manifest on duplicate guidance.
+    match stage {
+        CodeModeCallableStage::ReadOnly => vec![
+            json!({
+                "name": "adaptive_search_then_read",
+                "source": r#"const search = await tools.search_project_texts({queries:[{pattern:"CanonicalOrchestrationHost",pattern_mode:"literal",limit:8}]});
 const matches = search.output.items?.[0]?.output?.matches ?? [];
-const detail = await tools.read_files({items:matches.slice(0,3).map(m=>({path:m.path,start_line:m.read_hint.start_line,limit:m.read_hint.limit}))});
-text({matches:matches.map(m=>({path:m.path,line:m.line,preview:m.preview})),files:detail.output.items?.map(i=>({path:i.path,text:i.output?.text,read_revision:i.output?.read_revision}))});"#,
-        }),
-        json!({
-            "name": "independent_observations",
-            "source": r#"const [status, detail] = await Promise.all([
-  tools.git_status({}),
+if (matches.length) {
+  const detail = await tools.read_files({items:matches.slice(0,3).map(m=>({path:m.path,start_line:m.read_hint.start_line,limit:m.read_hint.limit}))});
+  text({matches,files:detail.output.items});
+} else text({matches:[]});"#,
+            }),
+            json!({
+                "name": "independent_observations",
+                "source": r#"const [status, detail] = await Promise.all([
+  tools.get_git_status({}),
   tools.read_files({items:[{path:"src/tool_runtime/code_mode.rs",start_line:1,limit:80}]})
 ]);
 text({status:status.output?.stdout,file:detail.output.items?.[0]?.output?.text});"#,
-        }),
-    ];
-    match stage {
-        CodeModeCallableStage::ReadOnly => {}
-        CodeModeCallableStage::Validation => examples.push(json!({
+            }),
+        ],
+        CodeModeCallableStage::Validation => vec![json!({
             "name": "validation_job_handoff",
-            "source": r#"const check = await tools.cargo_check({});
+            "source": r#"const check = await tools.project_validate({action:"check"});
 if (check.output?.execution_state === "pending") {
   text({execution_state:"pending",continuation:check.output.continuation});
 } else {
   text({passed:check.output?.passed,failure_kind:check.output?.failure_kind,diagnostics:check.output?.diagnostics});
 }"#,
-        })),
-        CodeModeCallableStage::GuardedEdit => examples.push(json!({
+        })],
+        CodeModeCallableStage::GuardedEdit => vec![json!({
             "name": "guarded_edit_then_validation",
-            "source": r#"const path = "src/example.rs";
-const read = await tools.read_files({items:[{path,start_line:1,limit:120}]});
-const revision = read.output.items?.[0]?.output?.read_revision;
-const edit = await tools.edit_project_files({changes:[{kind:"edit",path,expected_read_revision:revision,edits:[{kind:"replace_exact",old_text:"old",new_text:"new"}]}]});
-if (!edit.success || typeof edit.output?.state_changed !== "boolean") throw new Error("inspect edit recovery before validating");
-const check = await tools.cargo_check({});
-text({state_changed:edit.output.state_changed,call_success:check.success,source_state:check.output?.source_state,pending:check.output?.execution_state==="pending"});"#,
-        })),
+            "source": r#"const path="src/example.rs";
+const read=await tools.read_files({items:[{path}]});
+const edit=await tools.edit_project_files({changes:[{kind:"edit",path,expected_read_revision:read.output.items[0].output.read_revision,edits:[{kind:"replace_exact",old_text:"old",new_text:"new"}]}]});
+if (!edit.success || typeof edit.output?.changed!=="boolean") throw Error("Inspect recovery");
+const check=await tools.project_validate({action:"check"});
+text({changed:edit.output.changed,success:check.success,source_state:check.output?.source_state,continuation:check.output?.continuation});"#,
+        })],
     }
-    examples
 }
 
 #[cfg(feature = "experimental-code-mode")]
@@ -364,7 +386,9 @@ fn code_mode_callable_contract(
     }
     let projection = json!({
         "kind": "code_mode_callable_contract",
-        "version": 1,
+        "version": 2,
+        "result_envelope": ["success", "output", "error"],
+        "output_fields_scope": "output",
         "stage": stage.as_str(),
         "entry_tool": stage.entry_tool(),
         "authority": "presentation_only",
@@ -377,12 +401,28 @@ fn code_mode_callable_contract(
         "examples": code_mode_usage_examples(stage),
         "bounds": {
             "hard_max_bytes": CODE_MODE_CALLABLE_CONTRACT_HARD_MAX_BYTES,
-            "description_max_chars": TOOL_MANIFEST_SELECTION_DESCRIPTION_MAX_CHARS,
             "output_fields_per_tool_max": CODE_MODE_OUTPUT_FIELDS_PER_TOOL_MAX,
         },
     });
     let bytes = serialized_json_len(&projection).expect("Value serialization is infallible");
     if bytes > CODE_MODE_CALLABLE_CONTRACT_HARD_MAX_BYTES {
+        #[cfg(test)]
+        eprintln!(
+            "CODE_MODE_PROJECTION_OVERFLOW stage={} bytes={} per_tool={:?}",
+            stage.as_str(),
+            bytes,
+            projection["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| (
+                    tool["tool"].as_str().unwrap(),
+                    serialized_json_len(tool).unwrap(),
+                    serialized_json_len(&tool["input"]).unwrap(),
+                    serialized_json_len(&tool["output_fields"]).unwrap(),
+                ))
+                .collect::<Vec<_>>()
+        );
         return Err(ToolResult::err_with_output(
             "code mode callable projection exceeded its hard model-surface bound",
             json!({
@@ -411,13 +451,24 @@ pub(crate) fn recommended_flows() -> Vec<&'static str> {
         .collect()
 }
 
-fn tool_manifest_specs(capabilities: ToolProtocolCapabilities) -> Vec<ToolDescriptor> {
+fn tool_manifest_specs(
+    capabilities: ToolProtocolCapabilities,
+    auth: Option<&crate::auth::AuthContext>,
+) -> Vec<ToolDescriptor> {
     let mut specs = registered_tool_descriptors();
     specs.extend(
         stateless_operator_extension_tool_descriptors()
             .into_iter()
-            .filter(|spec| tool_manifest_extension_capability_allows(&spec.name, capabilities)),
+            .filter(|spec| {
+                tool_manifest_extension_capability_allows(&spec.name, capabilities)
+                    && super::kernel::check_runtime_tool_scope(auth, &spec.name).is_ok()
+            }),
     );
+    // Internal catalog projections have no caller and retain the complete
+    // model surface. Operator extensions above always need explicit authority.
+    if auth.is_some() {
+        specs.retain(|spec| super::kernel::runtime_tool_scope_allows_discovery(auth, &spec.name));
+    }
     specs
 }
 
@@ -593,18 +644,22 @@ impl ToolRuntime {
     /// ResponseTooLargeError.
     pub(super) async fn tool_manifest(
         &self,
+        auth: Option<&crate::auth::AuthContext>,
         tool_name: Option<String>,
         category: Option<String>,
         intent: Option<String>,
         include_recommended_flows: bool,
         include_risk_summary: bool,
+        query: Option<String>,
+        limit: Option<usize>,
         protocol_capabilities: ToolProtocolCapabilities,
     ) -> ToolResult {
         if let Some(tool_name) = tool_name {
-            if category.is_some() || intent.is_some() {
+            if category.is_some() || intent.is_some() || query.is_some() {
                 return tool_manifest_exact_filter_conflict_result();
             }
             return match self.tool_manifest_exact_payload(
+                auth,
                 &tool_name,
                 include_recommended_flows,
                 include_risk_summary,
@@ -614,12 +669,15 @@ impl ToolRuntime {
                 Err(result) => result,
             };
         }
-        match self.tool_manifest_payload(
-            category,
+        match self.tool_manifest_payload_for_categories(
+            auth,
+            category.map(|category| vec![category]),
             intent,
+            limit,
             include_recommended_flows,
             include_risk_summary,
             protocol_capabilities,
+            query,
         ) {
             Ok(payload) => ToolResult::ok(payload),
             Err(result) => result,
@@ -628,6 +686,7 @@ impl ToolRuntime {
 
     fn tool_manifest_exact_payload(
         &self,
+        auth: Option<&crate::auth::AuthContext>,
         raw_tool_name: &str,
         include_recommended_flows: bool,
         include_risk_summary: bool,
@@ -637,14 +696,14 @@ impl ToolRuntime {
         if tool_name.is_empty() {
             return Err(unknown_tool_manifest_tool_result(tool_name));
         }
-        let specs = tool_manifest_specs(protocol_capabilities);
+        let specs = tool_manifest_specs(protocol_capabilities, auth);
         let specialist_specs = exact_manifest_specialist_tool_descriptors();
         let tool_count = specs.len();
-        let Some(spec) = specs
-            .iter()
-            .chain(specialist_specs.iter())
-            .find(|spec| spec.name == tool_name)
-        else {
+        let Some(spec) = specs.iter().chain(specialist_specs.iter()).find(|spec| {
+            spec.name == tool_name
+                && (auth.is_none()
+                    || super::kernel::runtime_tool_scope_allows_discovery(auth, &spec.name))
+        }) else {
             return Err(unknown_tool_manifest_tool_result(tool_name));
         };
         let category = runtime_tool_category(spec.name.as_str());
@@ -729,12 +788,14 @@ impl ToolRuntime {
             return Ok(self.compact_tool_manifest_payload());
         }
         self.tool_manifest_payload_for_categories(
+            None,
             categories,
             intent,
             limit,
             true,
             true,
             ToolProtocolCapabilities::default(),
+            None,
         )
     }
 
@@ -747,23 +808,27 @@ impl ToolRuntime {
         protocol_capabilities: ToolProtocolCapabilities,
     ) -> Result<Value, ToolResult> {
         self.tool_manifest_payload_for_categories(
+            None,
             category.map(|category| vec![category]),
             intent,
             None,
             include_recommended_flows,
             include_risk_summary,
             protocol_capabilities,
+            None,
         )
     }
 
     fn tool_manifest_payload_for_categories(
         &self,
+        auth: Option<&crate::auth::AuthContext>,
         categories: Option<Vec<String>>,
         intent: Option<String>,
         limit: Option<usize>,
         include_recommended_flows: bool,
         include_risk_summary: bool,
         protocol_capabilities: ToolProtocolCapabilities,
+        query: Option<String>,
     ) -> Result<Value, ToolResult> {
         let resolved_intent = match intent {
             None => None,
@@ -775,7 +840,7 @@ impl ToolRuntime {
             },
         };
 
-        let specs = tool_manifest_specs(protocol_capabilities);
+        let specs = tool_manifest_specs(protocol_capabilities, auth);
         let tool_count = specs.len();
         let categories_requested = normalize_tool_manifest_categories(categories);
         let category = categories_requested
@@ -788,15 +853,49 @@ impl ToolRuntime {
         let available_intents = available_tool_manifest_intent_names();
 
         // Apply optional intent ranking, then optional category filter, then limit.
-        let filtered_specs: Vec<&ToolDescriptor> =
+        let mut filtered_specs: Vec<&ToolDescriptor> =
             filter_manifest_specs(&specs, resolved_intent, categories_requested.as_ref());
+        if query
+            .as_deref()
+            .is_some_and(|q| q.chars().count() > 200 || q.chars().any(char::is_control))
+        {
+            return Err(ToolResult::err("invalid_discovery_query"));
+        }
+        let query = query
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty());
+        if let Some(query) = query.as_deref() {
+            let terms = query.split_whitespace().collect::<Vec<_>>();
+            filtered_specs.retain(|spec| {
+                let haystack = format!(
+                    "{} {} {}",
+                    spec.name,
+                    runtime_tool_category(&spec.name),
+                    spec.description
+                )
+                .to_lowercase();
+                terms.iter().all(|term| haystack.contains(term))
+            });
+            // Exact names and name matches beat incidental words in safety prose.
+            let name_query = terms.join("_");
+            filtered_specs.sort_by_key(|spec| {
+                (
+                    spec.name != name_query,
+                    !terms.iter().all(|term| spec.name.contains(term)),
+                    spec.name.as_str(),
+                )
+            });
+        }
+        let limit = limit.or_else(|| query.as_ref().map(|_| 20));
         let filtered_count = filtered_specs.len();
         let requested_limit = limit;
         let limit = limit.map(|limit| limit.clamp(1, 100));
         let truncated = limit.is_some_and(|limit| filtered_count > limit);
         let limit_applied = requested_limit.is_some();
-        let filtered =
-            categories_requested.is_some() || resolved_intent.is_some() || limit.is_some();
+        let filtered = categories_requested.is_some()
+            || resolved_intent.is_some()
+            || limit.is_some()
+            || query.is_some();
         let intent_name = resolved_intent.map(|intent| intent.name);
         let returned_specs: Vec<&ToolDescriptor> = match limit {
             Some(limit) => filtered_specs.into_iter().take(limit).collect(),
@@ -819,6 +918,7 @@ impl ToolRuntime {
             "contract": Value::Null,
             "category": category,
             "intent": intent_name,
+            "query": query,
             "available_intents": available_intents,
             "filtered": filtered,
             "categories_requested": categories_requested,
@@ -836,7 +936,7 @@ impl ToolRuntime {
         }
 
         if include_recommended_flows {
-            output["recommended_flows"] = Value::Array(if filtered {
+            output["recommended_flows"] = Value::Array(if filtered || auth.is_some() {
                 tool_manifest_recommended_flows_for_visible_tools(
                     returned_specs.iter().map(|spec| spec.name.as_str()),
                 )
@@ -914,10 +1014,10 @@ fn unknown_tool_manifest_tool_result(tool_name: &str) -> ToolResult {
 
 fn tool_manifest_exact_filter_conflict_result() -> ToolResult {
     ToolResult::err_with_output(
-        "read_tool_manifest tool_name cannot be combined with category or intent",
+        "read_tool_manifest tool_name cannot be combined with category, intent or query",
         json!({
             "code": "tool_manifest_exact_filter_conflict",
-            "message": "tool_name selects one exact contract; omit category and intent",
+            "message": "tool_name selects one exact contract; omit category, intent and query",
         }),
     )
 }
@@ -1429,6 +1529,31 @@ where
 #[cfg(all(test, feature = "experimental-code-mode"))]
 mod code_mode_projection_tests {
     use super::*;
+
+    #[test]
+    fn schema_noise_compaction_preserves_literal_data_and_validation_constraints() {
+        let literal = json!({"description":"business data","title":"literal","default":null});
+        let mut schema = json!({
+            "type":"object", "description":"schema prose", "default":null,
+            "additionalProperties":false, "required":["value"],
+            "properties":{
+                "value":{"type":"object","const":literal,"enum":[literal],"default":literal},
+                "count":{"type":"integer","minimum":1,"maximum":16,"default":8}
+            }
+        });
+        strip_code_mode_schema_noise(&mut schema);
+        assert!(schema.get("description").is_none());
+        assert!(schema.get("default").is_none());
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["value"]));
+        assert_eq!(schema["properties"]["value"]["const"], literal);
+        assert_eq!(schema["properties"]["value"]["enum"], json!([literal]));
+        assert_eq!(schema["properties"]["value"]["default"], literal);
+        assert_eq!(
+            schema["properties"]["count"],
+            json!({"type":"integer","minimum":1,"maximum":16,"default":8})
+        );
+    }
 
     #[test]
     fn schema_noise_compaction_preserves_business_property_names() {

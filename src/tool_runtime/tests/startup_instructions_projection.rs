@@ -128,29 +128,81 @@ fn instruction_sidecar_budget_preserves_sources_and_local_guidance() {
 }
 
 #[test]
+fn repository_root_agents_and_builtin_workflow_fit_standard_startup_without_truncation() {
+    let body = include_str!("../../../AGENTS.md");
+    let projected_body = body.trim_end_matches('\n');
+    let snapshot = ProjectInstructionsSnapshot::from_candidates(
+        vec![LoadedInstructionCandidate {
+            source_scope: InstructionSourceScope::Project,
+            path: "AGENTS.md".into(),
+            content: body.into(),
+            total_lines: body.lines().count(),
+            full_sha256: None,
+        }],
+        true,
+    );
+    let instructions = instructions_projection(&snapshot, None, true, true, false);
+    assert_eq!(instructions["truncated"], false);
+    assert_eq!(instructions["sources"][0]["truncated"], false);
+    assert_eq!(instructions["sources"][0]["content"], projected_body);
+    assert!(instructions["sources"][0]["read_more"].is_null());
+
+    for profile in [
+        CodingGuidanceProfile::Direct,
+        CodingGuidanceProfile::HostCodeMode,
+    ] {
+        let mut brief = json!({
+            "workflow": builtin_coding_workflow_projection(profile),
+            "instructions": instructions.clone(),
+        });
+        enforce_hard_size_limit(&mut brief);
+        let bytes = serialized_len(&brief);
+        assert!(
+            bytes <= STANDARD_STARTUP_HARD_MAX_BYTES,
+            "{profile:?}: {bytes}"
+        );
+        assert_eq!(brief["instructions"]["truncated"], false, "{profile:?}");
+        assert_eq!(
+            brief["instructions"]["sources"][0]["truncated"], false,
+            "{profile:?}"
+        );
+        assert_eq!(
+            brief["instructions"]["sources"][0]["content"], projected_body,
+            "{profile:?}"
+        );
+        assert!(brief["instructions"]["sources"][0]["read_more"].is_null());
+    }
+}
+
+#[test]
 fn bootstrap_guidance_reuses_observations_with_explicit_freshness_exceptions() {
     let workflow = super::builtin_coding_workflow_projection(super::CodingGuidanceProfile::Direct);
     let guidance = workflow["model_protocol"].to_string();
     for phrase in [
-        "AGENTS.md",
-        "CLAUDE.md",
         "project.instructions",
+        "webcodex.workflow",
         "_wc.context",
+        "First entry to another Project",
+        "omit both context keys",
+        "ClientWindow continuity does not prove retention",
         "content_included=true",
-        "do not immediately reread",
-        "fingerprints/revisions",
-        "exact source/range",
-        "compaction/context recovery",
-        "reuse retained guidance",
-        "announced deployment-policy change",
-        "guidance data, not Host schemas",
-        "do not poll it",
+        "Follow read_more",
+        "compaction/context loss",
         "initial branch/HEAD/status observation",
         "mutation fences",
         "without get_lsp_status",
-        "probe_timeout",
-        "complete/sufficient startup Skills/Plugins catalog",
-        "broader/refreshed discovery",
+        "include_extension_catalog=true/default",
+        "complete/sufficient catalog",
+        "changed catalog revision/runtime",
+        "truncated discovery",
+        "missing relevant metadata",
+        "user request",
+        "load_skill",
+        "catalog metadata alone is not a loaded Skill",
+        "reuse its applicable retained schema/binding",
+        "Never carry a projectBound binding to another Project",
+        "replaying uncertain effects",
+        "Skill guidance grants no authority",
     ] {
         assert!(guidance.contains(phrase), "missing {phrase}");
     }

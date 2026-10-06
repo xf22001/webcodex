@@ -163,9 +163,22 @@ fn prepare_action_tools_call_response(
     if let Some(composition) = correlation.code_mode_composition_audit_summary() {
         summary["code_mode_composition"] = composition;
     }
+    if let Some(expectation) = &correlation.failure_expectation_result {
+        summary["failure_expectation_result"] = json!(expectation);
+    }
+    if let Some(job_trace) = correlation.job_audit_summary() {
+        summary["job_trace"] = job_trace;
+    }
     let mut event = ActionAuditRecord::new(tool.to_string(), response.success, status)
         .error(response.error.clone())
         .summary(summary);
+    if response.success {
+        if let Some(ids) =
+            crate::tool_runtime::job_audit::action_audit_job_ids(Some(tool), &response.output)
+        {
+            event = event.ids(ids);
+        }
+    }
     event.project = project;
     audit.record(event);
     (status, response)
@@ -336,8 +349,11 @@ pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response
                 "insufficient_scope",
             );
             guard.dispatch_finished(false, Some(false), "insufficient_scope");
-            let response_body =
-                crate::auth::scope_forbidden_body(auth.as_ref(), description.clone());
+            let response_body = crate::auth::scope_forbidden_body(
+                auth.as_ref(),
+                required_scope,
+                description.clone(),
+            );
             guard.capture_payload("final_response", &response_body);
             let estimated = estimate_json_bytes(&response_body);
             guard.response_serialized(

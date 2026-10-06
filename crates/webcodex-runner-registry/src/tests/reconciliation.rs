@@ -664,7 +664,10 @@ async fn go_project_validation_is_fenced_again_at_job_admission() {
             assert!(result.is_ok(), "{result:?}");
         } else {
             let error = result.unwrap_err();
+            assert!(error.starts_with("capability_unavailable:"), "{error}");
+            assert!(error.contains(&format!("Runner `{CLIENT_ID}`")), "{error}");
             assert!(error.contains("project_go_single_module_v1"), "{error}");
+            assert!(error.contains("upgrade that Runner"), "{error}");
             assert!(registry.list_jobs(Some(10)).await.is_empty());
         }
     }
@@ -692,7 +695,11 @@ async fn project_test_options_are_fenced_again_at_job_admission() {
         let result = registry.start_job_with_metadata(start_request("validation"), "tester".into(), metadata).await;
         if supported { assert!(result.is_ok(), "{result:?}"); }
         else {
-            assert!(result.unwrap_err().contains("project_validation_test_options_v1"));
+            let error = result.unwrap_err();
+            assert!(error.starts_with("capability_unavailable:"), "{error}");
+            assert!(error.contains(&format!("Runner `{CLIENT_ID}`")), "{error}");
+            assert!(error.contains("project_validation_test_options_v1"), "{error}");
+            assert!(error.contains("upgrade that Runner"), "{error}");
             assert!(registry.list_jobs(Some(10)).await.is_empty());
         }
     }
@@ -2862,6 +2869,45 @@ fn job_inventory_accepts_bash_login_shell_context() {
     validate_job_inventory(CLIENT_ID, &[project_summary()], &inventory).unwrap();
 }
 
+#[tokio::test]
+async fn job_inventory_recovers_python_script_without_changing_semantic_identity() {
+    let mut snapshot = standalone_snapshot("python-reconnect", "running");
+    snapshot.context.shell = Some("python".to_string());
+    snapshot.context.structured_execution = Some(
+        crate::runner_protocol::ShellJobStructuredExecutionMetadata {
+            execution_source: "run_script".to_string(),
+            language: Some(ShellScriptLanguage::Python),
+            script_bytes: Some(24),
+            arg_count: 0,
+            stdin_present: false,
+            validation_identity: None,
+            validation_tool: None,
+            assertion_name: None,
+        },
+    );
+    let inventory = ShellJobInventory {
+        active_complete: true,
+        jobs: vec![snapshot.clone()],
+    };
+    validate_job_inventory(CLIENT_ID, &[project_summary()], &inventory).unwrap();
+    // A fresh Server must accept the retained Python Job at registration,
+    // rather than kill an otherwise healthy Runner on reconnect.
+    register(&RunnerRegistry::default(), INSTANCE_A, inventory).await;
+    for shell in ["python3", "python.exe", "unknown"] {
+        snapshot.context.shell = Some(shell.to_string());
+        let error = validate_job_inventory(
+            CLIENT_ID,
+            &[project_summary()],
+            &ShellJobInventory {
+                active_complete: true,
+                jobs: vec![snapshot.clone()],
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("shell is invalid"), "{error}");
+    }
+}
+
 #[test]
 fn job_inventory_accepts_javascript_structured_script_context() {
     let mut javascript = standalone_snapshot("javascript-running", "running");
@@ -3901,9 +3947,11 @@ async fn project_validation_python_pytest_capability_rechecked_at_job_admission(
         if supported {
             assert!(result.is_ok(), "{result:?}");
         } else {
-            assert!(result
-                .unwrap_err()
-                .contains("project_validation_python_pytest_v1"));
+            let error = result.unwrap_err();
+            assert!(error.starts_with("capability_unavailable:"), "{error}");
+            assert!(error.contains(&format!("Runner `{CLIENT_ID}`")), "{error}");
+            assert!(error.contains("project_validation_python_pytest_v1"), "{error}");
+            assert!(error.contains("upgrade that Runner"), "{error}");
             assert!(registry.list_jobs(Some(10)).await.is_empty());
         }
     }

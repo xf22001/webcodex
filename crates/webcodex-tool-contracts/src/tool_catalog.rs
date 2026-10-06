@@ -60,10 +60,12 @@ pub fn model_visible_recommended_flows() -> impl Iterator<Item = &'static ToolRe
 pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     ToolRecommendedFlow {
         name: "discovery",
-        summary: "Discovery: if the user gives an exact Runner client_id, use get_runtime_status/list_projects for that Runner before treating it as absent. Otherwise use bounded runtime/project discovery, then batch-capable structured search/read.",
+        summary: "Discovery: if the user gives an exact Runner client_id, resolve its registered path/query before treating it as absent. Use resolve_workspace without Session creation, get_runtime_status/list_projects for that Runner, Workbench for explicit context, and list_runners only for an unknown machine.",
         manifest_purpose:
-            "Exact Runner targeting: with client_id use get_runtime_status(client_id=...) or list_projects(client_id=...); use list_runners only for broad fleet discovery, then inspect/search the resolved project.",
+            "Exact Runner targeting: resolve_workspace locates registered paths without Session creation; get_runtime_status(client_id=...) inspects health and list_projects(client_id=...) lists candidates. Use list_runners for an unknown machine. Ambiguity needs explicit choice, never automatic first-match selection.",
         tools: &[
+            "resolve_workspace",
+            "open_webcodex_workbench",
             "get_runtime_status",
             "list_runners",
             "list_projects",
@@ -174,8 +176,7 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
         tools: &[
             "read_files",
             "edit_project_files",
-            "cargo_check",
-            "cargo_test",
+            "project_validate",
             "review_changes",
             "finish_coding_task",
         ],
@@ -206,15 +207,12 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     ToolRecommendedFlow {
         name: "validate",
         summary:
-            "Validate: use structured validators when their canonical diagnostics, evidence/test-count, validation identity, or same-execution Job semantics help; native execution is first-class when the command is outside or awkward for that contract.",
+            "Validate: use structured validators when their canonical diagnostics, evidence/test-count, validation identity, or same-execution Job semantics help; native execution is first-class when the command is outside or awkward for that contract. Prefer project_validate for portable common validation.",
         manifest_purpose:
-            "For portable project validation, prefer project_validate; dependency_policy.mode=locked prevents adapter-managed dependency selection updates for check/test without implying offline execution. Use cargo_fmt/cargo_check/cargo_test/go_test for advanced ecosystem options when their canonical argv, parsed diagnostics, validation identity, test-count proof, min_tests/require_tests, bounded projection, or same-execution Job handoff materially helps. Native validation is first-class when the command is outside or awkward for that structured contract: prefer run_process for one literal-argv executable, run_shell when shell grammar/output shaping is required, and run_script for program-like supported scripts. Keep independent failure/permission boundaries separate. cargo_fmt check=false retains ensure-format mutation truth; check=true stays read-only.",
+            "For portable project validation, prefer project_validate; dependency_policy.mode=locked prevents adapter-managed dependency selection updates for check/test without implying offline execution. Keep cargo_fmt for explicit formatting semantics; cargo_check/cargo_test/go_test remain exact-name advanced specialists rather than ordinary routing choices. Native validation is first-class when the command is outside or awkward for that structured contract: prefer run_process for one literal-argv executable, run_shell when shell grammar/output shaping is required, and run_script for program-like supported scripts. Keep independent failure/permission boundaries separate. cargo_fmt check=false retains ensure-format mutation truth; check=true stays read-only.",
         tools: &[
             "project_validate",
-    "cargo_fmt",
-            "cargo_check",
-            "cargo_test",
-            "go_test",
+            "cargo_fmt",
             "observe_jobs",
             "read_validation_summary",
             "run_process",
@@ -312,12 +310,10 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
     "run_script",
     "run_shell",
     "observe_jobs",
-    // Common structured validation with evidence semantics.
+    // Portable common validation plus explicit formatting semantics. Ecosystem
+    // validators remain exact-name advanced specialists rather than ordinary coding choices.
     "project_validate",
     "cargo_fmt",
-    "cargo_check",
-    "cargo_test",
-    "go_test",
     #[cfg(feature = "experimental-code-mode")]
     "execute_effectful_code_mode",
     // Primary ordinary review plus authoritative hygiene/closeout.
@@ -332,15 +328,29 @@ pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
 /// behavior, policy, permissions, execution, or finish verdict semantics.
 pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
     ToolManifestIntent {
+        name: "maintenance",
+        purpose: "Locate exact Runners/Projects, inspect health and cached Git, then explicitly preview or mutate registration/configuration. No automatic cleanup or Session creation.",
+        tools: &["resolve_workspace", "list_runners", "list_projects", "get_runtime_status",
+            "open_webcodex_workbench", "get_git_status", "check_runner_config",
+            "unregister_projects", "unregister_project", "reload_runner_config"],
+    },
+    ToolManifestIntent {
+        name: "resources",
+        purpose: "Explicit Project/Session context and bounded file, Goal and artifact references; not execution or implicit authority.",
+        tools: &["open_webcodex_workbench", "resolve_workspace", "search_webcodex_resources",
+            "read_webcodex_resource", "list_sessions", "read_project_overview", "inspect_project_artifact"],
+    },
+
+    ToolManifestIntent {
         name: "coding",
         purpose: "Default coding loop: start, inspect, make reliable scoped changes, validate, review, report.",
         tools: CODING_INTENT_TOOL_NAMES,
     },
     ToolManifestIntent {
         name: "audit",
-        purpose: "Review/audit without Project mutation or command execution: establish bounded Workflow context, inspect, read git history/diff, check hygiene, finish or handoff.",
+        purpose: "Read-only audit: locate existing work, inspect code/Git and hygiene without creating a Workflow Session. Native observations may run read-only commands.",
         tools: &[
-            "work_on_project",
+            "resolve_workspace",
             "read_project_overview",
             "list_project_tracked_files",
             "read_files",
@@ -352,7 +362,6 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
             "read_git_log",
             "review_changes",
             "check_workspace_hygiene",
-            "finish_coding_task",
             "read_session_handoff",
             "read_validation_summary",
             "read_tool_manifest",
@@ -398,9 +407,7 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
             "get_git_status",
             "check_workspace_hygiene",
             "project_validate",
-    "cargo_fmt",
-            "cargo_check",
-            "cargo_test",
+            "cargo_fmt",
             "read_validation_summary",
             "observe_jobs",
             "list_jobs",
@@ -414,6 +421,9 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
         tools: &[
             "read_tool_manifest",
             "list_tools",
+            "resolve_workspace",
+            "open_webcodex_workbench",
+            "search_webcodex_resources",
             "get_runtime_status",
             "list_runners",
             "list_projects",

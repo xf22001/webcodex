@@ -31,7 +31,7 @@ async fn workbench_app_descriptor_accepts_empty_input_and_preserves_existing_car
         assert_eq!(
             launcher.pointer("/_meta/ui/resourceUri"),
             enabled.then_some(&json!(
-                super::super::resources::MCP_WORKBENCH_UI_RESOURCE_URI
+                super::super::app_registry::MCP_WORKBENCH_UI_RESOURCE_URI
             ))
         );
         let card = tools
@@ -46,7 +46,7 @@ async fn workbench_app_descriptor_accepts_empty_input_and_preserves_existing_car
             .iter()
             .any(|tool| tool["name"] == "read_webcodex_resource"));
     }
-    let outcome=handle_with_app_policy(&runtime,serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":super::super::resources::MCP_WORKBENCH_UI_RESOURCE_URI,"_meta":stateless_ui_meta()}})).unwrap(),None,true).await;
+    let outcome=handle_with_app_policy(&runtime,serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":super::super::app_registry::MCP_WORKBENCH_UI_RESOURCE_URI,"_meta":stateless_ui_meta()}})).unwrap(),None,true).await;
     let McpOutcome::Ok(value) = outcome else {
         panic!("workbench resource failed")
     };
@@ -61,13 +61,47 @@ async fn workbench_app_descriptor_accepts_empty_input_and_preserves_existing_car
 }
 
 #[tokio::test]
+async fn compact_discovery_advertises_keyword_lookup_and_keeps_workbench_presentation_route() {
+    for enabled in [false, true] {
+        let McpOutcome::Ok(value) =
+            crate::mcp::tools::handle_list(Some(json!(1)), None, true, true, enabled).await
+        else {
+            panic!("compact tools list failed")
+        };
+        let tools = value["result"]["tools"].as_array().unwrap();
+        let manifest = tools
+            .iter()
+            .find(|tool| tool["name"] == "read_tool_manifest")
+            .unwrap();
+        let description = manifest["description"].as_str().unwrap();
+        assert!(description.contains("query/category/intent"));
+        assert!(description.contains("tool_name"));
+        assert!(manifest["inputSchema"]["properties"].get("query").is_some());
+        assert!(manifest["inputSchema"]["properties"].get("limit").is_some());
+        for name in ["resolve_workspace", "unregister_projects"] {
+            assert!(
+                !tools.iter().any(|tool| tool["name"] == name),
+                "new maintenance tools stay Gateway"
+            );
+        }
+    }
+    let definition = webcodex_tool_contracts::tool_definitions()
+        .find(|definition| definition.name == "open_webcodex_workbench")
+        .unwrap();
+    assert_eq!(
+        definition.adaptive_runtime_direct.unwrap().reason,
+        webcodex_tool_contracts::ToolDirectReason::Presentation
+    );
+}
+
+#[tokio::test]
 async fn empty_workbench_keeps_goal_access_when_project_domain_is_unavailable() {
     let runtime = ToolRuntime::new_for_tests();
     let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ApiToken);
     auth.username = Some("resource-owner".into());
     auth.scopes = vec![crate::auth::SCOPE_COMMUNICATION_READ.into()];
     let result = runtime
-        .open_webcodex_workbench(None, None, Some(&auth))
+        .open_webcodex_workbench(None, None, None, Some(&auth))
         .await;
     assert!(result.success);
     assert!(result.output["project"].is_null());
@@ -78,7 +112,7 @@ async fn empty_workbench_keeps_goal_access_when_project_domain_is_unavailable() 
     assert_eq!(result.output["projects"]["items"], json!([]));
     assert!(
         !runtime
-            .open_webcodex_workbench(None, Some("wc_sess_unselected".into()), Some(&auth))
+            .open_webcodex_workbench(None, Some("wc_sess_unselected".into()), None, Some(&auth))
             .await
             .success
     );

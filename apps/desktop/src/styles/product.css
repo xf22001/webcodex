@@ -191,6 +191,8 @@
 .setup-overview { margin-bottom: var(--ui-space-4); }
 .project-picker-card, .form-card, .detail-card { border-color: var(--ui-border-subtle); box-shadow: none; }
 .project-picker-card { min-height: 76px; }
+.project-picker-card code { overflow-wrap: anywhere; }
+.project-picker-card .setup-project-actions { display: flex; flex-wrap: wrap; }
 .provider-option label, .setup-choice-card { border-color: var(--ui-border-subtle); }
 .provider-option.selected label { border-color: var(--ui-accent); }
 
@@ -309,6 +311,8 @@
 
 /* Runtime operations and observations. */
 .shell-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-block: 14px; }
+.device-invitation { min-width: 0; overflow-wrap: anywhere; }
+.device-invitation li { margin-block: 10px; }
 .shell-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .shell-subsection { border-top: 1px solid var(--ui-border-subtle); padding-block: 20px; }
 .shell-subsection > label { display: block; margin-block: 12px 6px; font-size: 14px; font-weight: 600; }
@@ -366,6 +370,9 @@
 .activity-view-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px 24px; padding-bottom: 20px; border-bottom: 1px solid var(--ui-border-subtle); }
 .activity-view-toolbar .activity-project-filter { margin: 0; flex: 1 1 330px; min-width: 0; }
 .activity-view-toolbar .project-picker { width: min(280px, 100%); }
+.activity-session-filter { flex: 1 1 230px; max-width: 320px; min-width: 0; }
+.activity-session-filter-help { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-block: 12px; }
+.activity-session-filter-help .field-help { flex: 1 1 300px; margin: 0; }
 .activity-counts { display: flex; gap: 12px 20px; flex-wrap: wrap; color: var(--ui-text-secondary); font-size: 14px; }
 .activity-counts strong { margin-left: 5px; color: var(--ui-text-primary); }
 .activity-work-row { display: flex; align-items: flex-start; gap: 14px; width: 100%; min-width: 0; text-align: left; padding: 22px 8px; border: 0; border-bottom: 1px solid var(--ui-border-subtle); background: transparent; color: inherit; cursor: pointer; }
@@ -396,7 +403,7 @@
 [data-webcodex-page="activity"] .activity-row strong { font-size: 15px; line-height: 1.6; }
 @media (max-width: 600px) {
   .activity-view-toolbar { align-items: stretch; }
-  .activity-view-toolbar .activity-project-filter { flex: 1 1 100%; }
+  .activity-view-toolbar .activity-project-filter, .activity-view-toolbar .activity-session-filter { flex: 1 1 100%; max-width: none; }
   .activity-work-row { gap: 8px; padding-inline: 0; }
   .activity-work-icon { flex-basis: 20px; }
   .activity-work-copy .session-row-heading { flex-wrap: wrap; }
@@ -478,3 +485,27 @@
 .connection-recovery > p { margin: 10px 0 16px; font-size: 14px; }
 .connection-recovery .connection-impact { margin: 16px 0 0; color: var(--ui-text-secondary); }
 @media (max-width: 768px) { .dashboard-shortcuts { grid-template-columns: 1fr; gap: 12px; } .dashboard-shortcuts > button { padding: 20px; } .connection-profile { padding: 20px; } }
+
+/* Translated labels can take several lines; controls own their full text height. */
+.sidebar .nav-label { min-width: 0; flex: 1; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+.sidebar nav button { height: auto; padding-block: 10px; }
+.sidebar nav kbd, .settings-navigation svg, .extensions-navigation svg { flex-shrink: 0; }
+.sidebar-status strong, .sidebar-status span { overflow-wrap: anywhere; }
+.sidebar-status .sidebar-service-state { white-space: normal; }
+.page-heading-row, .dashboard-heading-actions, .extension-apply-bar { flex-wrap: wrap; }
+.page-heading-row > :first-child { min-width: 0; }
+.page-section h1, .page-section h2, .page-section h3,
+.settings-navigation > button, .extensions-navigation > button { overflow-wrap: anywhere; }
+.primary-button, .secondary-button, .danger-button { max-width: 100%; height: auto; padding-block: 9px; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; gap: 6px; }
+.primary-button svg, .secondary-button svg, .danger-button svg { flex-shrink: 0; }
+.mantine-Button-root.primary-button, .mantine-Button-root.secondary-button, .mantine-Button-root.danger-button { height: auto; }
+.mantine-Button-label { height: auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.settings-content, .extensions-content, .settings-navigation, .extensions-navigation { min-width: 0; }
+.setting-row > div, .permission-row > div { min-width: 0; overflow-wrap: anywhere; }
+.settings-page .setting-row select, .settings-page .accent-picker { flex-shrink: 0; max-width: 100%; }
+.workspace-status-strip > div { min-width: 0; overflow-wrap: anywhere; }
+.workspace-badge { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .sidebar nav button { padding-block: 0; }
+}
+.sidebar .nav-label, .settings-navigation > button, .extensions-navigation > button { hyphens: auto; }

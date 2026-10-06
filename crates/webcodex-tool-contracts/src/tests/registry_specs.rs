@@ -17,7 +17,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "fresh session",
         "not fresh model context",
         "fresh/uncertain model context",
-        "re-observes instruction files",
+        "re-observes instructions",
         "exact checkout resume",
         "session_id alone",
         "an explicit project must match",
@@ -26,11 +26,13 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "active accessible session",
         "never guess",
         "_wc.context",
-        "agents.md/claude.md",
-        "do not immediately reread",
-        "reuse workspace state",
-        "available semantic navigation",
-        "sufficient skills/plugins",
+        "include_extension_catalog=true/default",
+        "first entry to another project: request its instructions",
+        "omit those context keys",
+        "reuse current workflow across projects",
+        "include_extension_catalog=false only with its complete/sufficient retained skills/plugins",
+        "refresh changed/incomplete/lost context or on user request",
+        "clientwindow does not prove retention",
         "project.instructions",
         "webcodex.workflow",
         "guidance_profile",
@@ -42,6 +44,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "mode=worktree",
         "exact git base",
         "project authority",
+        "read_more",
     ] {
         assert!(
             work_on_project_desc.contains(phrase),
@@ -229,10 +232,11 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     }
     let list_files_desc = desc("list_project_files");
     for phrase in [
-        "deterministic page",
-        "next_offset",
-        "complete directory source",
-        "retained-tail truncation fails closed",
+        "live project directory",
+        "next_call",
+        "offsets are not snapshots",
+        "older runners",
+        "fail closed",
     ] {
         assert!(
             list_files_desc.contains(phrase),
@@ -256,11 +260,10 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let show_changes_desc = desc("read_workspace_changes");
     for phrase in [
-        "specialist workspace projection",
-        "explicit discovery",
-        "presentation",
-        "session signals",
-        "closeout internals",
+        "workspace summary",
+        "staged/unstaged/untracked",
+        "without a patch by default",
+        "not a complete staged patch",
         "ordinary code review uses review_changes",
     ] {
         assert!(
@@ -273,8 +276,9 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let git_review_summary_desc = desc("read_git_review_summary");
     for phrase in [
-        "specialist exact committed-range review map",
-        "explicit discovery",
+        "exact committed git range",
+        "without returning patch bodies",
+        "incomplete coverage",
         "ordinary review uses review_changes",
         "read-only",
     ] {
@@ -285,12 +289,13 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     }
     let git_diff_hunks_desc = git_diff_hunks.description.to_lowercase();
     for phrase in [
-        "specialist exact diff paging core",
-        "explicit discovery",
-        "review_changes internals",
+        "bounded git diff hunks",
+        "cached=true selects staged changes",
+        "omission selects unstaged changes",
+        "base_commit+head_commit",
+        "use review_changes",
         "source fences",
         "bounded page/hunk continuation",
-        "path/range projection",
         "safe recovery",
     ] {
         assert!(
@@ -1120,5 +1125,35 @@ fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
             &spec.input_schema,
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn extension_descriptions_distinguish_catalog_body_and_binding_reuse() {
+    let specs = registered_tool_specs();
+    let skill = &spec_named(&specs, "load_skill").description;
+    for phrase in [
+        "same Project",
+        "new task/Session alone",
+        "changed revisions",
+        "missing/truncated body",
+        "context loss/uncertainty",
+        "Catalog metadata is not the Skill body",
+        "Guidance grants no authority",
+    ] {
+        assert!(skill.contains(phrase), "load_skill missing {phrase}");
+    }
+    let plugin = &spec_named(&specs, "plugin_tool").description;
+    for phrase in [
+        "selection metadata",
+        "not an input schema or binding",
+        "reuse both while retained",
+        "exact Runner/provider/tool and bound Project",
+        "another call/task/Session",
+        "Never reuse a projectBound binding for another Project",
+        "not permission to replay an effect",
+        "Unknown outcomes still require reconciliation",
+    ] {
+        assert!(plugin.contains(phrase), "plugin_tool missing {phrase}");
     }
 }

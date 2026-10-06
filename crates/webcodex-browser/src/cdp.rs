@@ -19,6 +19,9 @@ const MAX_CDP_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CDP_LIST_BYTES: usize = 256 * 1024;
 const DOM_CONTROL_INDEX_DEPTH: i32 = 32;
 
+mod frames;
+use frames::{frame_documents, frame_fence};
+
 pub(crate) trait BackendFactory: Send + Sync {
     fn available(&self) -> bool;
     fn launch(&self) -> BrowserResult<Box<dyn BrowserBackend>>;
@@ -28,6 +31,12 @@ pub(crate) trait BrowserBackend: Send {
     fn pages(&mut self) -> BrowserResult<Vec<BackendPage>>;
     fn new_page(&mut self) -> BrowserResult<String>;
     fn snapshot(&mut self, target_id: &str, max_depth: u32) -> BrowserResult<BackendSnapshot>;
+    fn validate_frame_fence(&mut self, _target_id: &str, _fence: &str) -> BrowserResult<()> {
+        Err(BrowserError::not_started(
+            "stale_element",
+            "Frame document is unavailable",
+        ))
+    }
     fn screenshot(&mut self, target_id: &str) -> BrowserResult<BackendScreenshot>;
     fn console(
         &mut self,
@@ -100,6 +109,7 @@ pub(crate) struct BackendNode {
     pub(crate) read_only: Option<bool>,
     pub(crate) backend_node_id: Option<i64>,
     pub(crate) capability: ControlCapability,
+    pub(crate) frame_fence: Option<String>,
     /// Light-DOM `<option>` of a `<select>` that admits `select_option`.
     /// Compact snapshots keep the label and value, and still issue no element id.
     pub(crate) select_choice: bool,
@@ -109,6 +119,8 @@ pub(crate) struct BackendNode {
 pub(crate) struct BackendSnapshot {
     pub(crate) document_id: String,
     pub(crate) nodes: Vec<BackendNode>,
+    /// Frame collection omitted source nodes; compaction cannot recover them.
+    pub(crate) source_incomplete: bool,
     pub(crate) truncated: bool,
 }
 
@@ -842,12 +854,83 @@ impl BrowserBackend for CdpBackend {
         )
         .ok()
         .and_then(|document| document.get("root").cloned());
-        let (nodes, truncated) = project_ax_nodes(&raw_nodes, dom_root.as_ref());
+        if dom_root.is_none()
+            && frame_tree
+                .pointer("/frameTree/childFrames")
+                .and_then(Value::as_array)
+                .is_some_and(|frames| !frames.is_empty())
+        {
+            return Err(BrowserError::not_started(
+                "frame_document_unavailable",
+                "Frame classification unavailable; observe again",
+            ));
+        }
+        let (mut nodes, mut truncated) = project_ax_nodes(&raw_nodes, dom_root.as_ref());
+        let mut source_incomplete = false;
+        if let Some(root) = dom_root.as_ref() {
+            let documents = frame_documents(&frame_tree, root);
+            let fence = frame_fence(&frame_tree, root);
+            for (index, (frame_id, document)) in documents.iter().take(32).enumerate() {
+                let accessibility = cdp_call_on_websocket_until(
+                    &mut websocket,
+                    &mut self.next_id,
+                    "Accessibility.getFullAXTree",
+                    json!({"frameId": frame_id, "depth": max_depth.clamp(1, 32)}),
+                    false,
+                    deadline,
+                )?;
+                let raw = accessibility
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let (mut children, child_truncated) = project_ax_nodes(&raw, Some(document));
+                for node in &mut children {
+                    node.frame_fence = Some(fence.clone());
+                    if let Some(key) = &mut node.group_key {
+                        *key = format!("{frame_id}:{key}");
+                    }
+                }
+                nodes.extend(children);
+                truncated |= child_truncated;
+                // Bound aggregation across frames, including non-actionable content.
+                if nodes.len() >= MAX_SNAPSHOT_NODES {
+                    source_incomplete = index + 1 < documents.len();
+                    break;
+                }
+            }
+            source_incomplete |= documents.len() > 32;
+            if !documents.is_empty() {
+                let current = read_frame_fence(&mut websocket, &mut self.next_id, deadline)?;
+                if current != fence {
+                    return Err(BrowserError::not_started(
+                        "stale_element",
+                        "Frame changed during snapshot; observe again",
+                    ));
+                }
+            }
+        }
         Ok(BackendSnapshot {
             document_id,
             nodes,
+            source_incomplete,
             truncated,
         })
+    }
+
+    fn validate_frame_fence(&mut self, target_id: &str, fence: &str) -> BrowserResult<()> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let endpoint = self.page_endpoint_until(target_id, deadline)?;
+        let mut websocket = open_loopback_websocket(&endpoint, deadline)?;
+        if read_frame_fence(&mut websocket, &mut self.next_id, deadline)? != fence {
+            let mut error = BrowserError::not_started(
+                "stale_element",
+                "Frame changed; observe a fresh snapshot",
+            );
+            error.recovery_action = Some("snapshot");
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn screenshot(&mut self, target_id: &str) -> BrowserResult<BackendScreenshot> {
@@ -1447,6 +1530,33 @@ fn viewport_dimension(metrics: &Value, pointer: &str) -> u32 {
         .clamp(1.0, 4096.0) as u32
 }
 
+fn read_frame_fence(
+    websocket: &mut WebSocket<TcpStream>,
+    next_id: &mut u64,
+    deadline: Instant,
+) -> BrowserResult<String> {
+    let tree = cdp_call_on_websocket_until(
+        websocket,
+        next_id,
+        "Page.getFrameTree",
+        json!({}),
+        false,
+        deadline,
+    )?;
+    let dom = cdp_call_on_websocket_until(
+        websocket,
+        next_id,
+        "DOM.getDocument",
+        json!({"depth": DOM_CONTROL_INDEX_DEPTH, "pierce": true}),
+        false,
+        deadline,
+    )?;
+    let root = dom
+        .get("root")
+        .ok_or_else(|| BrowserError::not_started("stale_element", "Frame document unavailable"))?;
+    Ok(frame_fence(&tree, root))
+}
+
 fn parse_ax_snapshot_nodes(raw_nodes: &[Value]) -> (Vec<BackendNode>, bool) {
     let raw_by_id = raw_nodes
         .iter()
@@ -1499,6 +1609,7 @@ fn parse_ax_snapshot_nodes(raw_nodes: &[Value]) -> (Vec<BackendNode>, bool) {
             disabled,
             read_only,
             backend_node_id,
+            frame_fence: None,
             capability: ControlCapability::default(),
             select_choice: false,
         });
@@ -1527,6 +1638,8 @@ struct DomControlFacts {
     host_input_type: Option<String>,
     host_label: Option<String>,
     host_value: Option<String>,
+    host_disabled: Option<bool>,
+    host_read_only: Option<bool>,
 }
 
 struct ShadowHost {
@@ -1535,6 +1648,8 @@ struct ShadowHost {
     input_type: Option<String>,
     label: Option<String>,
     value: Option<String>,
+    disabled: Option<bool>,
+    read_only: Option<bool>,
 }
 
 fn apply_dom_capabilities(
@@ -1549,7 +1664,11 @@ fn apply_dom_capabilities(
         .filter_map(|node| node.backend_node_id)
         .collect::<HashSet<_>>();
     for node in nodes.iter_mut() {
-        node.capability = capability_for_ax_node(node, index.as_ref(), &private_descendants);
+        node.capability = gate_published_capability(
+            capability_for_ax_node(node, index.as_ref(), &private_descendants),
+            node.disabled,
+            node.read_only,
+        );
     }
     // Promote only when the DOM index proves the owner and the accessibility
     // tree did not already expose that owner. The added node uses the owner's
@@ -1578,12 +1697,20 @@ fn apply_dom_capabilities(
         if known_ids.contains(&host_backend_node_id) {
             continue;
         }
-        let host_capability = capability_for_element(
+        let raw_host_capability = capability_for_element(
             facts.host_local_name.as_deref().unwrap_or(""),
             facts.host_input_type.as_deref(),
             "",
         );
-        if !host_capability.admits_any() || host_projection(facts, host_capability).is_none() {
+        let host_capability = gate_published_capability(
+            raw_host_capability,
+            facts.host_disabled,
+            facts.host_read_only,
+        );
+        // A disabled or read-only owner is still projected so the snapshot can
+        // show that state. Only an owner that would admit nothing even when
+        // enabled stays omitted.
+        if !raw_host_capability.admits_any() || host_projection(facts, host_capability).is_none() {
             continue;
         }
         match promotions
@@ -1682,6 +1809,12 @@ fn capability_for_ax_node(
     if private_descendants.contains(&backend_node_id) {
         return ControlCapability::default();
     }
+    // Month, week, and datetime-local share this role. Without the owning
+    // input type, role-only admission cannot choose set_value and must not
+    // invent click. The host is not one of its own private descendants.
+    if node.role == "DateTime" {
+        return ControlCapability::default();
+    }
     legacy_role_capability(&node.role)
 }
 
@@ -1691,6 +1824,7 @@ fn host_projection(facts: &DomControlFacts, capability: ControlCapability) -> Op
         facts.host_input_type.as_deref(),
     )?;
     Some(BackendNode {
+        frame_fence: None,
         role: role.to_string(),
         name: facts.host_label.clone(),
         description: None,
@@ -1701,8 +1835,8 @@ fn host_projection(facts: &DomControlFacts, capability: ControlCapability) -> Op
         checked: None,
         selected: None,
         required: None,
-        disabled: None,
-        read_only: None,
+        disabled: facts.host_disabled,
+        read_only: facts.host_read_only,
         backend_node_id: facts.host_backend_node_id,
         capability,
         select_choice: false,
@@ -1724,6 +1858,26 @@ fn host_role(local_name: &str, input_type: Option<&str>) -> Option<&'static str>
         ("input", "radio") => Some("radio"),
         ("input", "text" | "email" | "tel" | "url" | "search" | "password") => Some("textbox"),
         _ => None,
+    }
+}
+
+/// `Some(true)` is the only state that removes effects. `Some(false)` and
+/// `None` keep the capability already chosen from the owning element or role.
+fn gate_published_capability(
+    capability: ControlCapability,
+    disabled: Option<bool>,
+    read_only: Option<bool>,
+) -> ControlCapability {
+    if disabled == Some(true) {
+        return ControlCapability::default();
+    }
+    if read_only != Some(true) {
+        return capability;
+    }
+    ControlCapability {
+        text_input: false,
+        exact_value: false,
+        ..capability
     }
 }
 
@@ -1894,6 +2048,8 @@ fn walk_dom_controls(
                 host_input_type: host.and_then(|host| host.input_type.clone()),
                 host_label: host.and_then(|host| host.label.clone()),
                 host_value: host.and_then(|host| host.value.clone()),
+                host_disabled: host.and_then(|host| host.disabled),
+                host_read_only: host.and_then(|host| host.read_only),
             },
         );
     }
@@ -1903,6 +2059,8 @@ fn walk_dom_controls(
         input_type,
         label: element_label(node),
         value: element_value(node),
+        disabled: dom_boolean_attribute(node, "disabled"),
+        read_only: dom_boolean_attribute(node, "readonly"),
     };
     if let Some(children) = node.get("children").and_then(Value::as_array) {
         for child in children {
@@ -1914,6 +2072,13 @@ fn walk_dom_controls(
             walk_dom_controls(shadow_root, Some(&next_host), None, index);
         }
     }
+}
+
+/// HTML boolean attributes are true when present, including `disabled=""`.
+/// Absence stays `None` so a missing attribute is not treated as enabled or
+/// read-only.
+fn dom_boolean_attribute(node: &Value, name: &str) -> Option<bool> {
+    dom_attribute_raw(node, name).map(|_| true)
 }
 
 fn dom_attribute(node: &Value, name: &str) -> Option<String> {
@@ -2681,6 +2846,7 @@ mod tests {
             ax_child("picker", "button", Some(11), Some("ax-When")),
             ax_child("year", "spinbutton", Some(12), Some("ax-When")),
             ax_child("Author shadow", "button", Some(20), Some("ax-root")),
+            ax_child("Choose", "combobox", Some(40), Some("ax-root")),
             ax_child("Month", "DateTime", Some(30), Some("ax-root")),
         ];
         let (nodes, _) = project_ax_nodes(&raw_nodes, None);
@@ -2697,11 +2863,15 @@ mod tests {
             by_name["Author shadow"].capability.action_names(),
             ["click"]
         );
+        assert_eq!(by_name["Choose"].capability.action_names(), ["click"]);
         assert!(by_name["picker"].capability.action_names().is_empty());
         assert_eq!(by_name["picker"].backend_node_id, Some(11));
         assert!(by_name["year"].capability.action_names().is_empty());
         assert!(by_name["When"].capability.action_names().is_empty());
-        assert_eq!(by_name["Month"].capability.action_names(), ["click"]);
+        assert!(
+            by_name["Month"].capability.action_names().is_empty(),
+            "a DateTime host has no effect when its input type is unknown"
+        );
     }
 
     #[test]
@@ -2759,6 +2929,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn disabled_and_read_only_state_removes_only_known_unsupported_effects() {
+        let dom = json!({
+            "nodeType": 9,
+            "children": [{
+                "nodeType": 1,
+                "localName": "body",
+                "backendNodeId": 100,
+                "children": [
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 1, "attributes": ["type", "number", "disabled", ""]},
+                    {"nodeType": 1, "localName": "select", "backendNodeId": 2, "attributes": ["disabled", ""], "children": [
+                        {"nodeType": 1, "localName": "option", "backendNodeId": 3}
+                    ]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 4, "attributes": ["type", "text", "readonly", "readonly"]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 5, "attributes": ["type", "text"]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 6, "attributes": ["type", "number"]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 7, "attributes": ["type", "text"]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 8, "attributes": ["type", "number"]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 11, "attributes": ["type", "number", "readonly", ""]},
+                    {"nodeType": 1, "localName": "input", "backendNodeId": 9, "attributes": ["type", "number", "disabled", "", "aria-label", "Shadow qty"], "shadowRoots": [{
+                        "nodeType": 11,
+                        "shadowRootType": "user-agent",
+                        "children": [{"nodeType": 1, "localName": "button", "backendNodeId": 10}]
+                    }]}
+                ]
+            }]
+        });
+        let raw_nodes = vec![
+            ax_state("Qty", "spinbutton", Some(1), Some(true), None),
+            ax_state("Pick", "combobox", Some(2), Some(true), None),
+            ax_state("Alpha", "option", Some(3), None, None),
+            ax_state("Notes", "textbox", Some(4), None, Some(true)),
+            ax_state("Name", "textbox", Some(5), Some(false), Some(false)),
+            ax_state("Amount", "spinbutton", Some(6), Some(false), None),
+            ax_state("Title", "textbox", Some(7), None, None),
+            ax_state("Count", "spinbutton", Some(8), None, None),
+            ax_state("Locked", "spinbutton", Some(11), None, Some(true)),
+            ax_state("shadow-part", "button", Some(10), None, None),
+        ];
+        let (nodes, _) = project_ax_nodes(&raw_nodes, Some(&dom));
+        let by_name = nodes
+            .iter()
+            .filter_map(|node| node.name.as_deref().map(|name| (name, node)))
+            .collect::<HashMap<_, _>>();
+        let actions = |name: &str| by_name[name].capability.action_names();
+
+        assert_eq!(by_name["Qty"].disabled, Some(true));
+        assert!(actions("Qty").is_empty());
+        assert_eq!(by_name["Pick"].disabled, Some(true));
+        assert!(actions("Pick").is_empty());
+        assert!(actions("Alpha").is_empty());
+        assert!(!by_name["Alpha"].select_choice);
+        assert_eq!(by_name["Locked"].read_only, Some(true));
+        assert!(actions("Locked").is_empty());
+        assert_eq!(by_name["Notes"].read_only, Some(true));
+        assert_eq!(actions("Notes"), ["click"]);
+        assert_eq!(actions("Name"), ["click", "input_text"]);
+        assert_eq!(actions("Amount"), ["set_value"]);
+        assert_eq!(actions("Title"), ["click", "input_text"]);
+        assert_eq!(by_name["Title"].disabled, None);
+        assert_eq!(by_name["Title"].read_only, None);
+        assert_eq!(actions("Count"), ["set_value"]);
+        assert_eq!(by_name["Count"].disabled, None);
+        assert!(actions("shadow-part").is_empty());
+        let promoted = nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(9))
+            .expect("disabled owner is still projected");
+        assert_eq!(promoted.disabled, Some(true));
+        assert!(promoted.capability.action_names().is_empty());
+        assert_eq!(promoted.name.as_deref(), Some("Shadow qty"));
+
+        let (legacy, _) = project_ax_nodes(
+            &[
+                ax_state("Go", "button", Some(21), Some(true), None),
+                ax_state("Alias", "textbox", Some(22), None, Some(true)),
+                ax_state("Ok", "button", Some(23), None, None),
+            ],
+            None,
+        );
+        let legacy_actions = |name: &str| {
+            legacy
+                .iter()
+                .find(|node| node.name.as_deref() == Some(name))
+                .unwrap()
+                .capability
+                .action_names()
+        };
+        assert!(legacy_actions("Go").is_empty());
+        assert_eq!(legacy_actions("Alias"), ["click"]);
+        assert_eq!(legacy_actions("Ok"), ["click"]);
+    }
+
     fn input(backend_node_id: i64, input_type: &str, shadow_children: Value) -> Value {
         let mut node = json!({
             "nodeType": 1,
@@ -2781,6 +3044,27 @@ mod tests {
 
     fn ax(name: &str, role: &str, backend_node_id: Option<i64>) -> Value {
         ax_child(name, role, backend_node_id, None)
+    }
+
+    fn ax_state(
+        name: &str,
+        role: &str,
+        backend_node_id: Option<i64>,
+        disabled: Option<bool>,
+        read_only: Option<bool>,
+    ) -> Value {
+        let mut node = ax(name, role, backend_node_id);
+        let mut properties = Vec::new();
+        if let Some(disabled) = disabled {
+            properties.push(json!({"name": "disabled", "value": {"value": disabled}}));
+        }
+        if let Some(read_only) = read_only {
+            properties.push(json!({"name": "readonly", "value": {"value": read_only}}));
+        }
+        if !properties.is_empty() {
+            node["properties"] = json!(properties);
+        }
+        node
     }
 
     fn ax_child(

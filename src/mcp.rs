@@ -1,3 +1,4 @@
+mod app_registry;
 mod discovery;
 mod http_metadata;
 mod presentation;
@@ -60,6 +61,8 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use tokio::sync::Semaphore;
 
+#[cfg(test)]
+use app_registry::*;
 #[cfg(test)]
 use resources::*;
 #[cfg(test)]
@@ -449,15 +452,8 @@ fn mcp_tool_job_audit_correlation(
         };
     }
 
-    let promoted = output
-        .get("promoted_to_job")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !promoted && tool_name != Some("run_job") {
-        return McpToolJobAuditCorrelation::default();
-    }
     McpToolJobAuditCorrelation {
-        async_job_id: safe_audit_job_id(output.get("job_id")),
+        async_job_id: crate::tool_runtime::job_audit::execution_job_id_for_audit(tool_name, output),
         observed_job_ids: Vec::new(),
         resolved_project: None,
     }
@@ -595,7 +591,7 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             .params
             .get("uri")
             .and_then(Value::as_str)
-            .filter(|uri| resources::is_mcp_computer_app_resource_uri(uri))
+            .filter(|uri| *uri == app_registry::MCP_COMPUTER_UI_RESOURCE_URI)
             .map(str::to_string)
     } else {
         None
@@ -767,6 +763,12 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             }
             if let Some(composition) = correlation.code_mode_composition_audit_summary() {
                 summary["code_mode_composition"] = composition;
+            }
+            if let Some(expectation) = &correlation.failure_expectation_result {
+                summary["failure_expectation_result"] = json!(expectation);
+            }
+            if let Some(job_trace) = correlation.job_audit_summary() {
+                summary["job_trace"] = job_trace;
             }
             let mut event = ActionAuditRecord::new(tool.clone(), success, status)
                 .error(error)
@@ -1151,7 +1153,9 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             let estimated = estimate_json_bytes(&body);
             guard.response_serialized(403, estimated, Some(false), None, "forbidden");
             res.status_code(StatusCode::FORBIDDEN);
-            if auth.as_ref().is_some_and(AuthContext::is_oauth_token) {
+            if auth.as_ref().is_some_and(AuthContext::is_oauth_token)
+                && crate::auth::oauth_scope_denial_is_delegable(required_scope)
+            {
                 let challenge = crate::auth::oauth_insufficient_scope_challenge(required_scope);
                 if let Ok(val) = salvo::http::HeaderValue::from_str(&challenge) {
                     res.headers_mut().insert("www-authenticate", val);
@@ -1380,7 +1384,7 @@ fn scope_forbidden(
     description: impl Into<String>,
 ) -> McpOutcome {
     McpOutcome::Forbidden {
-        body: crate::auth::scope_forbidden_body(auth, description),
+        body: crate::auth::scope_forbidden_body(auth, required_scope, description),
         required_scope,
     }
 }

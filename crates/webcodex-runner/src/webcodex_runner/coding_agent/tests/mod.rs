@@ -123,7 +123,10 @@ for line in sys.stdin:
    while True: time.sleep(1)
  elif method=='session/set_config_option':
   if scenario=='slow_configs':
-   time.sleep(0.6)
+   # Three replies cross the 2s setup budget. At 0.6s a fourth RPC
+   # could be sent at 1.8s and finish during I/O cleanup: remote
+   # completion after a caller timeout does not imply extra admission.
+   time.sleep(0.75)
    k=m['params']['configId']; v=m['params']['value']; config_values[k]=v
    opts=[{'id':key,'name':key.title(),'type':'select','currentValue':config_values[key],'options':[{'value':'a','name':'A'},{'value':'b','name':'B'}]} for key in ('one','two','three','four')]
   elif scenario in ('forced_configs','forced_not_applied','forced_reset_by_caller'):
@@ -494,6 +497,7 @@ fn wait_for_proc_exit(pid: u64) {
     );
 }
 
+#[cfg(unix)]
 fn successful_start_run_id(response: &CodingAgentResponse) -> Option<String> {
     match response.payload.as_ref() {
         Some(CodingAgentResponsePayload::Start { run }) => Some(run.run_id.clone()),

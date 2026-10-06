@@ -369,6 +369,7 @@ The E2a outer tool is a conservative consequential envelope (`Execute / JobRun /
 E2a admits exactly the E1 read tools plus:
 
 ```text
+project_validate
 cargo_check
 cargo_test
 ```
@@ -381,7 +382,7 @@ Nested scheduling is owned by canonical `ToolDefinition`, not by JavaScript. `To
 
 ```text
 Denied      default, including unknown/future tools
-Sequential  cargo_check, cargo_test, edit_project_files
+Sequential  project_validate, cargo_check, cargo_test, edit_project_files
 Parallel    the exact E1 read allowlist
 ```
 
@@ -510,7 +511,7 @@ The launch marker travels in the **existing** structured validation Job metadata
 
 E2c evolves `execute_mutating_code_mode` rather than adding a fourth entry point. Its canonical envelope is `Mutate / ProjectWrite / Standard / NonIdempotent`, explicitly process-capable, with **RequireAll(project:write, job:run)**. Even an edit-only use of this experimental entry requires both scopes; direct `edit_project_files` remains the narrower choice. Each child separately retains its canonical OAuth, permission, Project/Runner, Session, validation and Job checks. The outer envelope does not grant or synthesize child authority and still is not Edit provenance.
 
-Admission is exactly the E1 read set plus `edit_project_files`, `cargo_check`, and `cargo_test`. At most one mutation attempt crosses the canonical boundary. Validators require a preceding successful, `known_result` canonical edit with boolean `state_changed`; failed or stale guards cannot be ignored by JavaScript to dispatch a validator. A successful no-op/dry-run (`state_changed=false`) permits validation of the unchanged mutable workspace, still with unproven source freshness. Receipt publication remains inside the sequential scheduling fence so a dependent validator cannot race it. The guarded-edit callable projection retains its existing stage key and derives the expanded tool set, input constraints, output fields, and ordering constraints from canonical ToolSpecs and the exact host policy.
+Admission is exactly the E1 read set plus `edit_project_files`, `project_validate`, `cargo_check`, and `cargo_test`. At most one mutation attempt crosses the canonical boundary. Validators require a preceding successful, `known_result` canonical edit with boolean `state_changed`; failed or stale guards cannot be ignored by JavaScript to dispatch a validator. A successful no-op/dry-run (`state_changed=false`) permits validation of the unchanged mutable workspace, still with unproven source freshness. Receipt publication remains inside the sequential scheduling fence so a dependent validator cannot race it. The guarded-edit callable projection retains its existing stage key and derives the expanded tool set, input constraints, output fields, and ordering constraints from canonical ToolSpecs and the exact host policy.
 
 A Job handoff or unknown consequential outcome closes further consequential work in that cell. The cell must return; the outer workflow continues only the exact `effect_receipt.children[].job_id / continuation`. No Job terminal wait runs in JavaScript. A terminal validation failure is `known_result` with `success=false`; a successful execution may have `success=true` and `source_state.freshness=unproven` or `stale`. Receipt `success` is canonical business truth, not current-source proof. The outer ToolResult's success denotes JavaScript completion, not an aggregate assertion that all children passed or the source is current.
 
@@ -523,12 +524,14 @@ const edit = await tools.edit_project_files({changes:[{
   kind:"edit", path:"src/example.rs", expected_read_revision:revision,
   edits:[{kind:"replace_exact", old_text:"old", new_text:"new"}]
 }]});
-if (!edit.success || typeof edit.output?.state_changed !== "boolean") {
+if (!edit.success || typeof edit.output?.changed !== "boolean") {
   throw new Error("Inspect the edit recovery; do not validate a rejected edit");
 }
-const check = await tools.cargo_check({});
-text({state_changed:edit.output.state_changed, call_success:check.success,
-      source_state:check.output?.source_state, job_handoff:!!check.output?.job_id});
+const check = await tools.project_validate({action:"check"});
+text({changed:edit.output.changed, call_success:check.success,
+      source_state:check.output?.source_state,
+      execution_state:check.output?.execution_state,
+      continuation:check.output?.continuation});
 ```
 
 On JS throw or frontend timeout, already-dispatched edit/validation truth survives in the same effect receipt. The existing bounded drain and actionable recovery remain; unknown outcomes fail closed and **the entire JavaScript program is never automatically retried**. A receipt continuation, not a copied or reconstructed identity in `text`, is authoritative.

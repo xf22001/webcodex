@@ -48,6 +48,7 @@ mod memory;
 mod metadata;
 mod model_workflow;
 mod observe_jobs;
+mod pdf_document;
 mod peer_collaboration;
 mod permission_gate;
 mod process;
@@ -87,3 +88,5 @@ mod work_result;
 mod write_project_file;
 
 mod external_observations;
+
+mod docx_document;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_runtime::return_timing::ToolReturnTimingPolicy;
 use webcodex_core::project_validation::*;
 
 async fn setup(grace_ms: u64) -> ToolRuntime {
@@ -34,66 +35,14 @@ async fn reply_plan(
     backend: &str,
     action: ProjectValidationAction,
 ) -> (crate::runner_protocol::RunnerRequest, String) {
-    let request = wait_for_runner_request(runtime, "project-validation").await;
-    assert_eq!(request.kind, "plan_project_validation");
-    assert!(request.command.is_empty() && request.cwd.is_none());
-    let semantic: ProjectValidationRequest =
-        serde_json::from_str(request.content.as_deref().unwrap()).unwrap();
-    assert_eq!(semantic.project_id, "agent-proj");
-    let check = match action {
-        ProjectValidationAction::FormatCheck => webcodex_validation::SemanticCheck::Format,
-        ProjectValidationAction::Check => webcodex_validation::SemanticCheck::Check,
-        ProjectValidationAction::Test => webcodex_validation::SemanticCheck::Test,
-    };
-    let operation = webcodex_validation::project_validation_operation(
-        backend,
-        check,
-        semantic
-            .scope
-            .as_ref()
-            .and_then(ProjectValidationScope::explicit_packages)
-            .map(<[String]>::to_vec),
-        semantic
-            .scope
-            .as_ref()
-            .is_some_and(ProjectValidationScope::selects_all_packages),
-    )
-    .unwrap()
-    .with_test_filter(
-        semantic
-            .test
-            .as_ref()
-            .and_then(|test| test.filter.as_deref()),
-    )
-    .unwrap();
-    let adapter = operation.adapter();
-    let step = operation.build_readonly_plan().unwrap().structured_step;
-    let validation_target_id = operation.validation_target_id(Some(".")).unwrap();
-    let plan = ProjectValidationPlan {
-        provenance: ProjectValidationProvenance {
-            request: semantic,
-            backend: backend.into(),
-            recipe_root: ".".into(),
-            root_digest: "a".repeat(64),
-            manifest_digest: "b".repeat(64),
-            invocation_digest: "c".repeat(64),
-        },
-        adapter: adapter.tool_identity().into(),
-        step,
-        validation_target_id,
-    };
-    complete_sync_shell_lifecycle(
+    super::reply_project_validation_plan(
         runtime,
         "project-validation",
-        request.request_id,
-        ShellCommandExecutionState::Completed,
-        Some(0),
-        &serde_json::to_string(&ProjectValidationPlanningResult::Ready { plan }).unwrap(),
-        "",
-        None,
+        "agent-proj",
+        backend,
+        action,
     )
-    .await;
-    poll_start_validation_job(runtime, "project-validation").await
+    .await
 }
 fn call(action: ProjectValidationAction, session_id: Option<String>) -> ToolCall {
     call_with_scope(action, session_id, None)
@@ -119,6 +68,131 @@ fn call_with_scope(
         timeout_secs: Some(60),
     }
 }
+#[tokio::test]
+async fn project_validation_dispatcher_applies_trusted_handoff_cap() {
+    let runtime = setup(1).await;
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .dispatch_cargo_tool(
+                    call(ProjectValidationAction::Check, None),
+                    None,
+                    Some(&auth_context(None, true)),
+                    Some(4),
+                )
+                .await
+        }
+    });
+    let (request, job_id) = reply_plan(&runtime, "rust", ProjectValidationAction::Check).await;
+    let validation = request
+        .job_context
+        .as_ref()
+        .and_then(|context| context.validation.as_ref())
+        .expect("project validation metadata");
+    assert_eq!(validation.sync_wait_secs, 4);
+    assert_eq!(
+        validation.effective_timeout_secs, 60,
+        "trusted return policy must not shorten execution lifetime"
+    );
+    runtime
+        .runner_registry
+        .update_job(cargo_test_update(
+            "project-validation",
+            &request.request_id,
+            &job_id,
+            "running",
+            "Checking project validation handoff\n",
+            "",
+            None,
+            running_progress("check"),
+            false,
+        ))
+        .await
+        .unwrap();
+    let result = task.await.unwrap();
+    assert!(result.success, "{result:?}");
+    assert!(
+        matches!(
+            result.output["execution_state"].as_str(),
+            Some("queued" | "running")
+        ),
+        "handoff may race the Runner running update: {result:?}"
+    );
+    assert_eq!(result.output["sync_wait_secs"], 4);
+    assert_eq!(result.output["effective_timeout_secs"], 60);
+    assert_eq!(
+        result.output["continuation"]["arguments"]["items"][0]["job_id"],
+        job_id
+    );
+}
+
+#[tokio::test]
+async fn project_validation_governance_preserves_trusted_handoff_cap() {
+    let runtime = setup(1).await;
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            let auth = auth_context(None, true);
+            let (result, _, _) = runtime
+                .dispatch_with_auth_transport_options_and_metadata_with_recording_mode_and_context_with_result_projection(
+                    call(ProjectValidationAction::Check, None),
+                    Some(&auth),
+                    crate::tool_runtime::sessions::SessionTransport::Api,
+                    Default::default(),
+                    None,
+                    true,
+                    Vec::new(),
+                    Default::default(),
+                    Default::default(),
+                    ToolReturnTimingPolicy::handoff_max_secs(4),
+                )
+                .await;
+            result
+        }
+    });
+
+    let (request, job_id) = reply_plan(&runtime, "rust", ProjectValidationAction::Check).await;
+    let validation = request
+        .job_context
+        .as_ref()
+        .and_then(|context| context.validation.as_ref())
+        .expect("project validation metadata");
+    assert_eq!(
+        validation.sync_wait_secs, 4,
+        "trusted return policy must reach project_validate through governance and routing"
+    );
+    assert_eq!(
+        validation.effective_timeout_secs, 60,
+        "return timing must not shorten project validation execution lifetime"
+    );
+
+    runtime
+        .runner_registry
+        .update_job(cargo_test_update(
+            "project-validation",
+            &request.request_id,
+            &job_id,
+            "running",
+            "Checking project validation governance handoff\n",
+            "",
+            None,
+            running_progress("check"),
+            false,
+        ))
+        .await
+        .unwrap();
+
+    let result = task.await.unwrap();
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.output["sync_wait_secs"], 4);
+    assert_eq!(result.output["effective_timeout_secs"], 60);
+    assert_eq!(
+        result.output["continuation"]["arguments"]["items"][0]["job_id"],
+        job_id
+    );
+}
+
 #[tokio::test]
 async fn project_validation_fast_rust_check_records_resolved_evidence() {
     let runtime = setup(500).await;

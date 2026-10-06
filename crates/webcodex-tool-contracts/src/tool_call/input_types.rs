@@ -77,7 +77,9 @@ impl PluginToolCall {
                 || project.len() > 512
                 || project.chars().any(char::is_control)
             {
-                return Err("project must be an exact bounded Project on action=describe".to_string());
+                return Err(
+                    "project must be an exact bounded Project on action=describe".to_string(),
+                );
             }
         }
         let valid_runner = |runner: &str| {
@@ -261,10 +263,10 @@ pub struct WorkResultFilesRequest {
     pub offset: usize,
     #[serde(default)]
     pub path: Option<String>,
-    /// Omit for file inventory or diff; content reads require an advertised path and snapshot.
+    /// Omit for inventory or diff; content/PDF reads require an advertised path and snapshot.
     #[serde(default)]
     pub view: Option<WorkResultFileView>,
-    /// UTF-8 byte position in the immutable final blob, independent of inventory offset.
+    /// Byte position in the immutable final blob, independent of inventory offset.
     #[serde(default)]
     pub byte_offset: usize,
 }
@@ -273,6 +275,8 @@ pub struct WorkResultFilesRequest {
 #[serde(rename_all = "snake_case")]
 pub enum WorkResultFileView {
     Content,
+    /// PDF bytes: at most 128 KiB per page and 20 MiB per file.
+    Pdf,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -296,6 +300,9 @@ pub struct ReadFilesItem {
     #[serde(default, deserialize_with = "deserialize_optional_read_revision")]
     pub expected_read_revision: Option<u64>,
 }
+
+/// Canonical search context ceiling shared by Runtime normalization and output schemas.
+pub const MAX_SEARCH_CONTEXT_LINES: usize = 80;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1406,7 +1413,7 @@ fn nullable_stdin_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GitReviewScopeInput {
-    /// Review the complete current workspace (tracked, staged, unstaged, and untracked state).
+    /// Net HEAD-to-worktree changes, including staged/untracked contents; not an index-only patch.
     Workspace,
     /// Review one exact committed range, resolved once to a single merge-base.
     Committed {
@@ -1417,4 +1424,25 @@ pub enum GitReviewScopeInput {
         #[schemars(regex(pattern = "^[0-9A-Fa-f]{40}$"))]
         head_commit: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectUnregisterInput {
+    /// Exact canonical Project id, not a fuzzy name or alias.
+    #[schemars(length(min = 1, max = 512))]
+    pub project: String,
+    /// Exact sha256 registration revision from list_projects full output.
+    #[schemars(length(min = 71, max = 71))]
+    #[schemars(regex(pattern = "^sha256:[0-9A-Fa-f]{64}$"))]
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerStatusFilter {
+    Any,
+    Online,
+    Offline,
+    Stale,
 }

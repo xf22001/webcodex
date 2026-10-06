@@ -306,7 +306,8 @@ impl ToolCall {
         if name == "read_tool_manifest" {
             if let Some(object) = arguments.as_object_mut() {
                 if !object.contains_key("include_recommended_flows") {
-                    let exact_lookup = object.contains_key("tool_name");
+                    let exact_lookup =
+                        object.contains_key("tool_name") || object.contains_key("query");
                     object.insert(
                         "include_recommended_flows".to_string(),
                         Value::Bool(!exact_lookup),
@@ -421,6 +422,10 @@ impl ToolCall {
             Self::StartSession { .. } => "start_session",
             Self::WorkOnProject { .. } => "work_on_project",
             Self::FinishCodingTask { .. } => "finish_coding_task",
+            Self::PresentDocx { .. } => "present_docx",
+            Self::PresentPdf { .. } => "present_pdf",
+            Self::ReadPdfChunk { .. } => "read_pdf_chunk",
+            Self::ReadAppArtifactChunk { .. } => "read_app_artifact_chunk",
             Self::PresentWorkResult { .. } => "present_work_result",
             Self::WorkResultState { .. } => "get_work_result_state",
             Self::WorkResultActivityDetail { .. } => "read_work_result_activity_detail",
@@ -580,6 +585,7 @@ impl ToolCall {
             Self::ImportConversationFilesToProject { .. } => "import_host_files",
             Self::TransferProjectArtifact { .. } => "transfer_project_artifact",
             Self::AcceptArtifactHandoff { .. } => "import_artifact_handoff",
+            Self::PresentSpreadsheet { .. } => "present_spreadsheet",
             Self::ProjectArtifact { .. } => "inspect_project_artifact",
             Self::ReadProjectArtifactMetadata { .. } => "read_project_artifact_metadata",
             Self::ReadProjectArtifact { .. } => "read_project_artifact_chunk",
@@ -601,6 +607,8 @@ impl ToolCall {
             Self::ComputerObserve(..) => "observe_computer",
             Self::ComputerControl(..) => "control_computer",
             Self::ComputerSaveSnapshot { .. } => "save_computer_snapshot",
+            Self::ResolveWorkspace { .. } => "resolve_workspace",
+            Self::UnregisterProjects { .. } => "unregister_projects",
             Self::ListProjects { .. } => "list_projects",
             Self::RegisterProject { .. } => "register_project",
             Self::UnregisterProject { .. } => "unregister_project",
@@ -695,7 +703,7 @@ impl ToolCall {
             | Self::WorkspaceCheckpointRestore { session_id, .. }
             | Self::WorkspaceCheckpointDelete { session_id, .. } => session_id.as_deref(),
             Self::SessionHandoffSummary { session_id, .. }
-            | Self::FinishCodingTask { session_id, .. } => Some(session_id.as_str()),            // Window-card presentation/refresh never becomes generic Session recorder
+            | Self::FinishCodingTask { session_id, .. } => Some(session_id.as_str()), // Window-card presentation/refresh never becomes generic Session recorder
             // evidence. An optional Session selector is association evidence only.
             Self::PresentWorkResult { .. }
             | Self::WorkResultState { .. }
@@ -778,7 +786,8 @@ impl ToolCall {
             Self::AcceptArtifactHandoff {
                 destination_project,
                 ..
-            } => Some(destination_project.as_str()),            Self::RunProcess { project, .. }
+            } => Some(destination_project.as_str()),
+            Self::RunProcess { project, .. }
             | Self::RunDetachedProcess { project, .. }
             | Self::CodingAgentStart { project, .. }
             | Self::StartAgentTaskCodingRun { project, .. }
@@ -831,6 +840,7 @@ impl ToolCall {
             | Self::SaveProjectArtifact { project, .. }
             | Self::ComputerSaveSnapshot { project, .. }
             | Self::ImportConversationFilesToProject { project, .. }
+            | Self::PresentSpreadsheet { project, .. }
             | Self::ProjectArtifact { project, .. }
             | Self::ReadProjectArtifactMetadata { project, .. }
             | Self::ReadProjectArtifact { project, .. }
@@ -858,6 +868,10 @@ impl ToolCall {
                 Some(project.as_str())
             }
             Self::FinishCodingTask { project, .. }
+            | Self::PresentDocx { project, .. }
+            | Self::PresentPdf { project, .. }
+            | Self::ReadPdfChunk { project, .. }
+            | Self::ReadAppArtifactChunk { project, .. }
             | Self::PresentWorkResult { project, .. }
             | Self::WorkResultState { project, .. }
             | Self::WorkResultActivityDetail { project, .. }

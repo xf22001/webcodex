@@ -2386,6 +2386,32 @@ fn discovery_cost(tool: &Value) -> (usize, usize, usize, usize, usize) {
     (bytes(tool), description, schema, envelope, app)
 }
 
+fn discovery_is_app_only(tool: &Value) -> bool {
+    tool.pointer("/_meta/ui/visibility")
+        .and_then(Value::as_array)
+        .is_some_and(|visibility| visibility.iter().any(|value| value == "app"))
+}
+
+fn model_visible_discovery_projection(result: &Value) -> Value {
+    let tools = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| !discovery_is_app_only(tool))
+        .cloned()
+        .map(|mut tool| {
+            // App/Host presentation metadata is transport-visible but is not part
+            // of the model-selection contract measured by this projection.
+            if let Some(object) = tool.as_object_mut() {
+                object.remove("_meta");
+                object.remove("title");
+            }
+            tool
+        })
+        .collect::<Vec<_>>();
+    json!({"tools": tools})
+}
+
 fn report_discovery_costs(tools: &[Value]) {
     let mut ranked: Vec<_> = tools
         .iter()
@@ -2464,16 +2490,21 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
     ]);
     let mut admin = scoped.clone();
     admin.scopes.push(crate::auth::SCOPE_ADMIN.to_string());
-    // Final Stateless bytes include the optional _wc envelope and gateways,
-    // not the RPC envelope. Two durable waits use Gateway and two inactive
-    // continuation presentations are hidden. Apps add 18 App-only protocol tools
-    // plus the public Work Result thread entrypoint; they are not ordinary model-tool savings.
-    for (label, auth, max_tools, max_bytes) in [
-        ("anonymous", None, 26, 65_000),
-        ("scoped", Some(&scoped), 27, 67_000),
+    // Keep two different budgets separate:
+    // - model_max_bytes measures compact model-selection descriptors only. It
+    //   excludes App-only ui.visibility=["app"] tools and Host-only _meta/title.
+    // - raw transport overhead measures the additional MCP tools/list JSON that
+    //   a Host must receive. It is not a token/context budget.
+    // present_pdf, present_spreadsheet and present_docx each add a public
+    // entrypoint even without an Apps Host. Apps also add private presentation
+    // artifact descriptors and the public Work Result thread entrypoint.
+    // Exact inventory counts remain a separate regression gate.
+    for (label, auth, max_tools, model_max_bytes) in [
+        ("anonymous", None, 28, 75_000),
+        ("scoped", Some(&scoped), 29, 78_000),
         // Interactive pipe input is a CoreWorkflow Direct tool paired with
         // run_process, so each ordinary Adaptive inventory gains one descriptor.
-        ("admin", Some(&admin), 33, 77_000),
+        ("admin", Some(&admin), 35, 90_000),
     ] {
         for app_enabled in [false, true] {
             let mut sizes = Vec::new();
@@ -2493,6 +2524,10 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
                 let count = result["tools"].as_array().unwrap().len();
                 let bytes = serde_json::to_vec(result).unwrap().len();
                 let tools = result["tools"].as_array().unwrap();
+                let model_projection = model_visible_discovery_projection(result);
+                let model_tools = model_projection["tools"].as_array().unwrap();
+                let model_count = model_tools.len();
+                let model_bytes = serde_json::to_vec(&model_projection).unwrap().len();
                 if compact {
                     let envelope: usize = tools.iter().map(|tool| discovery_cost(tool).3).sum();
                     eprintln!("MCP_ENVELOPE {label} app={app_enabled} bytes={envelope}");
@@ -2508,21 +2543,22 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
                     .iter()
                     .map(|tool| description_chars(&tool["inputSchema"]))
                     .sum();
-                eprintln!("MCP_SIZE {label} app={app_enabled} compact={compact} count={count} bytes={bytes} top_description_chars={top_chars} input_description_chars={input_chars}");
+                eprintln!("MCP_TRANSPORT_SIZE {label} app={app_enabled} compact={compact} count={count} bytes={bytes} top_description_chars={top_chars} input_description_chars={input_chars}");
+                eprintln!("MCP_MODEL_SIZE {label} app={app_enabled} compact={compact} count={model_count} bytes={model_bytes}");
                 let feature_tools = if cfg!(feature = "experimental-code-mode") {
                     3
                 } else {
                     0
                 };
-                // Work Result v3 adds bounded App-only collaboration and lazy
-                // Window activity-detail adapters alongside the existing Goal
-                // Plan/continuation/read helpers.
-                // Three readonly resource/launcher descriptors add at most 3 KiB.
-                // Apps include 18 bridge helpers, the public Work Result thread entrypoint,
-                // and Workbench Session discovery/native mentions.
-                let count_budget = max_tools + if app_enabled { 21 } else { 0 } + feature_tools;
-                let byte_budget =
-                    max_bytes + if app_enabled { 22_000 } else { 0 } + feature_tools * 4096;
+                let count_budget = max_tools + if app_enabled { 23 } else { 0 } + feature_tools;
+                let model_count_budget =
+                    max_tools + if app_enabled { 1 } else { 0 } + feature_tools;
+                let model_byte_budget =
+                    model_max_bytes + if app_enabled { 4_000 } else { 0 } + feature_tools * 4096;
+                // Raw transport includes private App bridge descriptors and Host
+                // presentation metadata. Keep a coarse overhead ceiling so transport
+                // cannot grow silently, but do not force model guidance to pay for it.
+                let transport_overhead_budget = if app_enabled { 35_000 } else { 8_000 };
                 if feature_tools == 0 {
                     assert_eq!(
                         count, count_budget,
@@ -2535,16 +2571,32 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
                         "{label} app={app_enabled}: {count} tools exceeds {count_budget}"
                     );
                 }
+                if feature_tools == 0 {
+                    assert_eq!(
+                        model_count, model_count_budget,
+                        "{label} app={app_enabled}: model-visible inventory changed"
+                    );
+                } else {
+                    assert!(
+                        model_count <= model_count_budget,
+                        "{label} app={app_enabled}: {model_count} model-visible tools exceeds {model_count_budget}"
+                    );
+                }
                 if compact {
                     assert!(
-                        bytes <= byte_budget,
-                        "{label} app={app_enabled}: compact {bytes} bytes exceeds {byte_budget}"
+                        model_bytes <= model_byte_budget,
+                        "{label} app={app_enabled}: model-visible compact {model_bytes} bytes exceeds {model_byte_budget}"
+                    );
+                    let transport_overhead = bytes.saturating_sub(model_bytes);
+                    assert!(
+                        transport_overhead <= transport_overhead_budget,
+                        "{label} app={app_enabled}: raw MCP transport overhead {transport_overhead} bytes exceeds {transport_overhead_budget}"
                     );
                 }
                 sizes.push(bytes);
             }
             let ratio = sizes[0] as f64 / sizes[1] as f64;
-            eprintln!("MCP_RATIO {label} app={app_enabled} {ratio:.4}");
+            eprintln!("MCP_TRANSPORT_RATIO {label} app={app_enabled} {ratio:.4}");
             assert!(
                 ratio <= 0.18,
                 "{label} app={app_enabled}: compact/full={ratio:.4}"
@@ -3921,12 +3973,10 @@ fn compact_bootstrap_description_teaches_explicit_context_and_reuse() {
     compact_tool(&mut tool);
     let description = tool["description"].as_str().unwrap();
     for phrase in [
-        "AGENTS.md/CLAUDE.md",
-        "_wc.context",
-        "project.instructions",
-        "webcodex.workflow",
-        "Reuse complete instruction bodies",
-        "workspace branch/HEAD/status",
+        "_wc.context=[\"project.instructions\",\"webcodex.workflow\"]",
+        "project.instructions includes AGENTS.md/CLAUDE.md",
+        "Reuse complete instructions",
+        "branch/HEAD/status",
         "semantic navigation",
         "sufficient catalogs",
         "stale/incomplete",
@@ -3965,11 +4015,21 @@ async fn compact_bootstrap_guidance_matches_advertised_context_capability() {
             modern
         );
         let description = tool["description"].as_str().unwrap();
-        assert!(description.contains("file, data, diagnostic or coding work"));
+        assert!(description.contains(if modern {
+            "File/data/diagnostic/coding work"
+        } else {
+            "file, data, diagnostic or coding work"
+        }));
         assert!(description.contains("Git optional"));
         assert!(description.contains("session_id"));
         assert!(description.contains("stale/incomplete"));
         assert_eq!(description.contains("_wc.context"), modern);
+        let extension_description = tool["inputSchema"]["properties"]["include_extension_catalog"]
+            ["description"]
+            .as_str()
+            .expect("compact extension catalog guidance");
+        assert!(extension_description.contains("Catalog true fresh/first Project"));
+        assert!(extension_description.contains("complete/sufficient retained catalog"));
         if !modern {
             assert!(description.contains("read_files"));
         }
@@ -4075,30 +4135,33 @@ async fn mcp_published_validation_success_sparse_schema_contract() {
         panic!("tools/list failed");
     };
     let tools = value["result"]["tools"].as_array().unwrap();
-    for (name, output) in [
-        ("cargo_check", json!({})),
-        ("cargo_test", json!({"tests_run_count":28})),
-        (
-            "cargo_test",
-            json!({"tests_run_count":28,"test_count_assertion":{"minimum_tests":20}}),
-        ),
-        (
-            "cargo_test",
-            json!({"tests_run_count":0,"require_tests":false}),
-        ),
-        ("cargo_test", json!({"no_run":true})),
+    let published = &tools
+        .iter()
+        .find(|tool| tool["name"] == "project_validate")
+        .expect("project_validate must be the published validation descriptor")["outputSchema"];
+    for output in [
+        json!({
+            "adapter":"cargo_check",
+            "validation_target_id":"target:0123456789abcdef01234567",
+            "source_state":{"freshness":"unproven","observed_mutation_fence":"uncrossed"}
+        }),
+        json!({
+            "adapter":"cargo_test",
+            "validation_target_id":"target:0123456789abcdef01234567",
+            "tests_run_count":28,
+            "stdout_lines":2,
+            "stdout_tail":"running 28 tests\ntest result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "source_state":{"freshness":"unproven","observed_mutation_fence":"uncrossed"}
+        }),
     ] {
-        let published = &tools.iter().find(|tool| tool["name"] == name).unwrap()["outputSchema"];
         let mut wire = json!({"success":true,"error":null,"output":output});
-        wire["output"]["source_state"] =
-            json!({"freshness":"unproven","observed_mutation_fence":"uncrossed"});
         crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&wire, published)
             .unwrap();
         wire["output"]["tests_failed"] = json!(0);
         assert!(
             crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&wire, published)
                 .is_err(),
-            "{name}"
+            "project_validate"
         );
     }
 }

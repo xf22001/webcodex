@@ -33,6 +33,8 @@ const CHANGES_DIFF_MAX_BYTES: usize = 48 * 1024;
 const CHANGES_DIFF_MAX_LINES: usize = 1200;
 const CHANGES_CONTENT_PAGE_BYTES: usize = 32 * 1024;
 const CHANGES_CONTENT_MAX_BYTES: usize = 256 * 1024;
+const CHANGES_PDF_PAGE_BYTES: usize = 128 * 1024;
+const CHANGES_PDF_MAX_BYTES: usize = 20 * 1024 * 1024;
 const CHANGES_SESSION_SUMMARY_LIMIT: usize = 0;
 const SOURCE_BYTES_MARKER: &str = "WEBCODEX_CHANGES_SOURCE_BYTES=";
 const DIFF_BYTES_MARKER: &str = "WEBCODEX_CHANGES_DIFF_BYTES=";
@@ -288,6 +290,110 @@ changes_git() {
 }
 "#;
 
+/// Build the same bounded workspace observation for direct and compound reviews.
+pub(in crate::tool_runtime) fn workspace_freeze_command(capture_review_status: bool) -> String {
+    // A private temporary index snapshots HEAD plus the complete current
+    // workspace without touching the real index/ref/worktree. Custom Git
+    // clean/process filters and fsmonitor are neutralized because this is a
+    // read-authority observation path, not repository-configured execution.
+    // `git add` may still write immutable blobs/trees to the object database;
+    // the resulting tree is intentionally unreachable observation state.
+    // Scope GIT_INDEX_FILE to a subshell: macOS sh (Bash 3.2) retains inline
+    // assignments before function calls, which would make the subsequent
+    // review status read this temporary index instead of the real index.
+    format!(
+        r#"set -eu
+LC_ALL=C; export LC_ALL
+GIT_TERMINAL_PROMPT=0; export GIT_TERMINAL_PROMPT
+umask 077
+{safe_config_setup}
+changes_git_tmp_index=$(mktemp "${{TMPDIR:-/tmp}}/webcodex-changes-index.XXXXXX")
+rm -f "$changes_git_tmp_index"
+head=""
+if changes_git rev-parse --verify HEAD >/dev/null 2>&1; then
+  head=$(changes_git rev-parse --verify HEAD)
+fi
+tree=$(
+  set -e
+  GIT_INDEX_FILE="$changes_git_tmp_index"; export GIT_INDEX_FILE
+  if [ -n "$head" ]; then
+    changes_git read-tree "$head"
+  else
+    changes_git read-tree --empty
+  fi
+  changes_git add -A -- .
+  changes_git write-tree
+)
+printf 'WEBCODEX_WORKSPACE_HEAD=%s\nWEBCODEX_WORKSPACE_TREE=%s\n' "$head" "$tree"
+{review_status}
+"#,
+        safe_config_setup = CHANGES_GIT_SAFE_CONFIG_SETUP,
+        // Porcelain v2 includes branch identity, staged object ids, modes,
+        // conflicts and untracked classification. The frozen worktree alone
+        // cannot fence metadata/diffs after staging or a same-HEAD switch.
+        // Keep this in the same Runner request and do not refresh the real index.
+        review_status = if capture_review_status {
+            r#"changes_git_review_status_tmp=$(mktemp "${TMPDIR:-/tmp}/webcodex-review-status.XXXXXX")
+changes_git --no-optional-locks status --porcelain=v2 --branch --untracked-files=all --ignore-submodules=none >"$changes_git_review_status_tmp"
+status_fingerprint=$(changes_git hash-object --no-filters -- "$changes_git_review_status_tmp")
+printf 'WEBCODEX_WORKSPACE_STATUS=%s\n' "$status_fingerprint""#
+        } else {
+            ""
+        },
+    )
+}
+
+pub(in crate::tool_runtime) fn parse_workspace_freeze(
+    stdout: &str,
+    capture_review_status: bool,
+) -> Result<(Option<String>, String, Option<String>), ToolResult> {
+    let mut head = None;
+    let mut tree = None;
+    let mut status_fingerprint = None;
+    for line in stdout.lines() {
+        if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_HEAD=") {
+            if !value.is_empty() {
+                if !valid_git_object_id(value) {
+                    return Err(changes_runtime_error(
+                        "changes_snapshot_failed",
+                        "Git returned an invalid workspace HEAD id",
+                    ));
+                }
+                head = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_TREE=") {
+            tree = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_STATUS=") {
+            if !valid_git_object_id(value) {
+                return Err(changes_runtime_error(
+                    "changes_snapshot_failed",
+                    "Git returned an invalid review status fingerprint",
+                ));
+            }
+            status_fingerprint = Some(value.to_string());
+        }
+    }
+    let Some(tree) = tree else {
+        return Err(changes_runtime_error(
+            "changes_snapshot_failed",
+            "Git did not return a frozen workspace tree id",
+        ));
+    };
+    if !valid_git_object_id(&tree) {
+        return Err(changes_runtime_error(
+            "changes_snapshot_failed",
+            "Git returned an invalid frozen workspace tree id",
+        ));
+    }
+    if capture_review_status && status_fingerprint.is_none() {
+        return Err(changes_runtime_error(
+            "changes_snapshot_failed",
+            "Git did not return workspace review status",
+        ));
+    }
+    Ok((head, tree, status_fingerprint))
+}
+
 impl ToolRuntime {
     /// Cheap closeout eligibility probe. It intentionally does not freeze a
     /// snapshot or generate diff bodies: only the explicit presentation call
@@ -477,7 +583,11 @@ exit 0
         if request.offset > MAX_STORED_CHANGES_FILES
             || (request.view.is_some() && request.path.is_none())
             || (request.view.is_none() && request.byte_offset != 0)
-            || request.byte_offset >= CHANGES_CONTENT_MAX_BYTES
+            || request.byte_offset
+                >= match request.view {
+                    Some(webcodex_tool_contracts::WorkResultFileView::Pdf) => CHANGES_PDF_MAX_BYTES,
+                    _ => CHANGES_CONTENT_MAX_BYTES,
+                }
             || request
                 .path
                 .as_deref()
@@ -583,11 +693,18 @@ exit 0
             let Some(file) = snapshot.files.iter().find(|file| file.path == path) else {
                 return changes_identity_error("changes_snapshot_path_not_allowed");
             };
-            if request.view.is_some() {
-                return match self
-                    .frozen_changes_file_content(&snapshot, file, request.byte_offset)
-                    .await
-                {
+            if let Some(view) = request.view {
+                let page = match view {
+                    webcodex_tool_contracts::WorkResultFileView::Content => {
+                        self.frozen_changes_file_content(&snapshot, file, request.byte_offset)
+                            .await
+                    }
+                    webcodex_tool_contracts::WorkResultFileView::Pdf => {
+                        self.frozen_changes_file_pdf(&snapshot, file, request.byte_offset)
+                            .await
+                    }
+                };
+                return match page {
                     Ok(content) => ToolResult::ok(json!({"work_result_files": content})),
                     Err(result) => result,
                 };
@@ -730,57 +847,13 @@ exit 0
         project: &str,
         capture_review_status: bool,
     ) -> Result<(Option<String>, String, Option<String>), ToolResult> {
-        // A private temporary index snapshots HEAD plus the complete current
-        // workspace without touching the real index/ref/worktree. Custom Git
-        // clean/process filters and fsmonitor are neutralized because this is a
-        // read-authority observation path, not repository-configured execution.
-        // `git add` may still write immutable blobs/trees to the object database;
-        // the resulting tree is intentionally unreachable observation state.
-        // Scope GIT_INDEX_FILE to a subshell: macOS sh (Bash 3.2) retains inline
-        // assignments before function calls, which would make the subsequent
-        // review status read this temporary index instead of the real index.
-        let script = format!(
-            r#"set -eu
-LC_ALL=C; export LC_ALL
-GIT_TERMINAL_PROMPT=0; export GIT_TERMINAL_PROMPT
-umask 077
-{safe_config_setup}
-changes_git_tmp_index=$(mktemp "${{TMPDIR:-/tmp}}/webcodex-changes-index.XXXXXX")
-rm -f "$changes_git_tmp_index"
-head=""
-if changes_git rev-parse --verify HEAD >/dev/null 2>&1; then
-  head=$(changes_git rev-parse --verify HEAD)
-fi
-tree=$(
-  set -e
-  GIT_INDEX_FILE="$changes_git_tmp_index"; export GIT_INDEX_FILE
-  if [ -n "$head" ]; then
-    changes_git read-tree "$head"
-  else
-    changes_git read-tree --empty
-  fi
-  changes_git add -A -- .
-  changes_git write-tree
-)
-printf 'WEBCODEX_WORKSPACE_HEAD=%s\nWEBCODEX_WORKSPACE_TREE=%s\n' "$head" "$tree"
-{review_status}
-"#,
-            safe_config_setup = CHANGES_GIT_SAFE_CONFIG_SETUP,
-            // Porcelain v2 includes branch identity, staged object ids, modes,
-            // conflicts and untracked classification. The frozen worktree alone
-            // cannot fence metadata/diffs after staging or a same-HEAD switch.
-            // Keep this in the same Runner request and do not refresh the real index.
-            review_status = if capture_review_status {
-                r#"changes_git_review_status_tmp=$(mktemp "${TMPDIR:-/tmp}/webcodex-review-status.XXXXXX")
-changes_git --no-optional-locks status --porcelain=v2 --branch --untracked-files=all --ignore-submodules=none >"$changes_git_review_status_tmp"
-status_fingerprint=$(changes_git hash-object --no-filters -- "$changes_git_review_status_tmp")
-printf 'WEBCODEX_WORKSPACE_STATUS=%s\n' "$status_fingerprint""#
-            } else {
-                ""
-            },
-        );
         let output = self
-            .run_project_internal_posix_script_capture(project, script.to_string(), 60, None)
+            .run_project_internal_posix_script_capture(
+                project,
+                workspace_freeze_command(capture_review_status),
+                60,
+                None,
+            )
             .await
             .map_err(|error| changes_runtime_error("changes_snapshot_failed", error))?;
         if output.exit_code != Some(0) || output.stdout_truncated {
@@ -789,51 +862,7 @@ printf 'WEBCODEX_WORKSPACE_STATUS=%s\n' "$status_fingerprint""#
                 "Git could not freeze the workspace tree",
             ));
         }
-        let mut head = None;
-        let mut tree = None;
-        let mut status_fingerprint = None;
-        for line in output.stdout.lines() {
-            if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_HEAD=") {
-                if !value.is_empty() {
-                    if !valid_git_object_id(value) {
-                        return Err(changes_runtime_error(
-                            "changes_snapshot_failed",
-                            "Git returned an invalid workspace HEAD id",
-                        ));
-                    }
-                    head = Some(value.to_string());
-                }
-            } else if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_TREE=") {
-                tree = Some(value.to_string());
-            } else if let Some(value) = line.strip_prefix("WEBCODEX_WORKSPACE_STATUS=") {
-                if !valid_git_object_id(value) {
-                    return Err(changes_runtime_error(
-                        "changes_snapshot_failed",
-                        "Git returned an invalid review status fingerprint",
-                    ));
-                }
-                status_fingerprint = Some(value.to_string());
-            }
-        }
-        let Some(tree) = tree else {
-            return Err(changes_runtime_error(
-                "changes_snapshot_failed",
-                "Git did not return a frozen workspace tree id",
-            ));
-        };
-        if !valid_git_object_id(&tree) {
-            return Err(changes_runtime_error(
-                "changes_snapshot_failed",
-                "Git returned an invalid frozen workspace tree id",
-            ));
-        }
-        if capture_review_status && status_fingerprint.is_none() {
-            return Err(changes_runtime_error(
-                "changes_snapshot_failed",
-                "Git did not return workspace review status",
-            ));
-        }
-        Ok((head, tree, status_fingerprint))
+        parse_workspace_freeze(&output.stdout, capture_review_status)
     }
 
     pub(crate) async fn freeze_final_workspace_tree(
@@ -958,36 +987,10 @@ dd if="$tmp" bs=1 count={CHANGES_METADATA_SOURCE_BYTES} 2>/dev/null
         if file.binary == Some(true) {
             return Ok(unavailable("binary"));
         }
-        // Resolve exactly one immutable entry; never read a live filesystem path
-        // or execute filters. Check the exact path before using its object id.
-        let script = format!(
-            "git --no-pager ls-tree -z {} -- {}",
-            snapshot.final_tree,
-            shell_single_quote(&format!(":(literal){}", file.path))
-        );
-        let entry = self
-            .run_project_internal_posix_script_capture(&snapshot.project, script, 30, None)
-            .await
-            .map_err(|error| changes_runtime_error("changes_file_content_failed", error))?;
-        if entry.exit_code != Some(0) || entry.stdout_truncated || entry.stderr_truncated {
-            return Err(changes_identity_error("changes_file_content_failed"));
-        }
-        let Some((header, path)) = entry.stdout.split_once('\t') else {
-            return Err(changes_identity_error("changes_file_content_failed"));
+        let object = match self.frozen_changes_file_blob(snapshot, file).await? {
+            FrozenFileBlob::Object(object) => object,
+            FrozenFileBlob::Unavailable(reason) => return Ok(unavailable(reason)),
         };
-        if path.strip_suffix('\0') != Some(file.path.as_str()) {
-            return Err(changes_identity_error("changes_file_content_failed"));
-        }
-        let fields = header.split_whitespace().collect::<Vec<_>>();
-        if fields.len() != 3 || !valid_git_object_id(fields[2]) {
-            return Err(changes_identity_error("changes_file_content_failed"));
-        }
-        match fields[0] {
-            "120000" => return Ok(unavailable("symlink")),
-            "160000" => return Ok(unavailable("submodule")),
-            "100644" | "100755" if fields[1] == "blob" => {}
-            _ => return Ok(unavailable("unsupported_file_type")),
-        }
         // Base64 is internal Runner transport only, preserving bytes across
         // shell charset normalization. Three lookahead bytes cover a UTF-8
         // scalar at a page boundary; no whole-file temporary is created.
@@ -998,7 +1001,6 @@ bytes=$(git cat-file -s {object})
 printf '%s\n' "$bytes"
 git cat-file blob {object} | dd bs=1 skip={byte_offset} count={count} 2>/dev/null | base64
 "#,
-            object = fields[2]
         );
         let output = self
             .run_project_internal_posix_script_capture(&snapshot.project, script, 30, None)
@@ -1056,6 +1058,132 @@ git cat-file blob {object} | dd bs=1 skip={byte_offset} count={count} 2>/dev/nul
             "byte_offset": byte_offset, "bytes_total": bytes_total, "content": content,
             "next_byte_offset": (!complete && !limited).then_some(next),
             "complete": complete, "limited": limited,
+        }))
+    }
+
+    async fn frozen_changes_file_blob(
+        &self,
+        snapshot: &ChangesSnapshot,
+        file: &ChangesFileMetadata,
+    ) -> Result<FrozenFileBlob, ToolResult> {
+        // Resolve exactly one immutable entry; never read a live filesystem path
+        // or execute filters. Check the exact path before using its object id.
+        let script = format!(
+            "git --no-pager ls-tree -z {} -- {}",
+            snapshot.final_tree,
+            shell_single_quote(&format!(":(literal){}", file.path))
+        );
+        let entry = self
+            .run_project_internal_posix_script_capture(&snapshot.project, script, 30, None)
+            .await
+            .map_err(|error| changes_runtime_error("changes_file_content_failed", error))?;
+        if entry.exit_code != Some(0) || entry.stdout_truncated || entry.stderr_truncated {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        let Some((header, path)) = entry.stdout.split_once('\t') else {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        };
+        if path.strip_suffix('\0') != Some(file.path.as_str()) {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 || !valid_git_object_id(fields[2]) {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        match fields[0] {
+            "120000" => return Ok(FrozenFileBlob::Unavailable("symlink")),
+            "160000" => return Ok(FrozenFileBlob::Unavailable("submodule")),
+            "100644" | "100755" if fields[1] == "blob" => {}
+            _ => return Ok(FrozenFileBlob::Unavailable("unsupported_file_type")),
+        }
+        Ok(FrozenFileBlob::Object(fields[2].to_string()))
+    }
+
+    async fn frozen_changes_file_pdf(
+        &self,
+        snapshot: &ChangesSnapshot,
+        file: &ChangesFileMetadata,
+        byte_offset: usize,
+    ) -> Result<Value, ToolResult> {
+        let unavailable = |reason: &str| {
+            json!({
+                "project": snapshot.project, "session_id": snapshot.session_id,
+                "snapshot_id": snapshot.snapshot_id, "path": file.path,
+                "view": "pdf", "unavailable_reason": reason,
+            })
+        };
+        if file.kind == "deleted" {
+            return Ok(unavailable("deleted"));
+        }
+        let object = match self.frozen_changes_file_blob(snapshot, file).await? {
+            FrozenFileBlob::Object(object) => object,
+            FrozenFileBlob::Unavailable(reason) => return Ok(unavailable(reason)),
+        };
+        // Validate size and signature before streaming a bounded segment. Read
+        // only the immutable Git blob, including for a renamed/untracked PDF.
+        // 128 KiB of bytes fits Runner's bounded text capture after Base64.
+        let script = format!(
+            r#"set -eu
+bytes=$(git cat-file -s {object})
+printf '%s\n' "$bytes"
+if [ "$bytes" -eq 0 ] || [ "$bytes" -gt {CHANGES_PDF_MAX_BYTES} ]; then exit 0; fi
+magic=$(git cat-file blob {object} | dd bs=1 count=5 2>/dev/null | base64)
+if [ "$magic" != 'JVBERi0=' ]; then printf 'not_pdf\n'; exit 0; fi
+printf 'pdf\n'
+git cat-file blob {object} | dd bs=4096 skip={block} 2>/dev/null | dd bs=1 skip={remainder} count={CHANGES_PDF_PAGE_BYTES} 2>/dev/null | base64
+"#,
+            block = byte_offset / 4096,
+            remainder = byte_offset % 4096,
+        );
+        let output = self
+            .run_project_internal_posix_script_capture(&snapshot.project, script, 30, None)
+            .await
+            .map_err(|error| changes_runtime_error("changes_file_content_failed", error))?;
+        if output.exit_code != Some(0) || output.stdout_truncated || output.stderr_truncated {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        let Some((size, encoded)) = output.stdout.split_once('\n') else {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        };
+        let bytes_total = size
+            .parse::<usize>()
+            .map_err(|_| changes_identity_error("changes_file_content_failed"))?;
+        if bytes_total > CHANGES_PDF_MAX_BYTES {
+            return Ok(unavailable("too_large"));
+        }
+        if bytes_total == 0 {
+            return Ok(unavailable("not_pdf"));
+        }
+        if byte_offset >= bytes_total {
+            return Err(changes_identity_error("changes_page_invalid"));
+        }
+        let Some((kind, encoded)) = encoded.split_once('\n') else {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        };
+        if kind == "not_pdf" {
+            return Ok(unavailable("not_pdf"));
+        }
+        if kind != "pdf" {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        let encoded = encoded
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect::<String>();
+        let raw = STANDARD
+            .decode(encoded)
+            .map_err(|_| changes_identity_error("changes_file_content_failed"))?;
+        if raw.len() != (bytes_total - byte_offset).min(CHANGES_PDF_PAGE_BYTES) {
+            return Err(changes_identity_error("changes_file_content_failed"));
+        }
+        let next = byte_offset + raw.len();
+        let complete = next == bytes_total;
+        Ok(json!({
+            "project": snapshot.project, "session_id": snapshot.session_id,
+            "snapshot_id": snapshot.snapshot_id, "path": file.path, "view": "pdf",
+            "byte_offset": byte_offset, "bytes_total": bytes_total,
+            "content_base64": STANDARD.encode(raw),
+            "next_byte_offset": (!complete).then_some(next), "complete": complete,
         }))
     }
 
@@ -1154,6 +1282,12 @@ fn bound_frozen_diff_text(text: &mut String) -> bool {
     }
     text.truncate(end);
     true
+}
+
+#[derive(Debug)]
+enum FrozenFileBlob {
+    Object(String),
+    Unavailable(&'static str),
 }
 
 #[derive(Debug)]

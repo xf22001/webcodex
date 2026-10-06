@@ -72,6 +72,27 @@ fn mcp_job_audit_correlation_keeps_only_stable_job_identity() {
     );
     assert!(correlated.observed_job_ids.is_empty());
 
+    let sparse_pending = json!({
+        "result": {
+            "structuredContent": {
+                "success": true,
+                "output": {
+                    "execution_state": "pending",
+                    "continuation": {
+                        "tool": "observe_jobs",
+                        "arguments": {"items": [{"job_id": "wc_job_sparse_pending_123"}]}
+                    }
+                }
+            }
+        }
+    });
+    let correlated = mcp_tool_job_audit_correlation(Some("run_process"), &sparse_pending);
+    assert_eq!(
+        correlated.async_job_id.as_deref(),
+        Some("wc_job_sparse_pending_123"),
+        "model-sparse pending handoff must retain originating Job identity in ActionAudit"
+    );
+
     let observed = json!({
         "result": {
             "structuredContent": {
@@ -295,6 +316,8 @@ mod model_ergonomics;
 mod model_surface;
 #[path = "mcp_tests/oauth_scope.rs"]
 mod oauth_scope;
+#[path = "mcp_tests/pdf_document_app.rs"]
+mod pdf_document_app;
 #[path = "mcp_tests/plugin_check.rs"]
 mod plugin_check;
 #[path = "mcp_tests/plugin_tools.rs"]
@@ -476,3 +499,6 @@ async fn handle_with_app_policy(
     )
     .await
 }
+
+#[path = "mcp_tests/docx_document_app.rs"]
+mod docx_document_app;

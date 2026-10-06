@@ -4,18 +4,28 @@
 //! value. The projection is deterministic, bounded, path-safe, and contains
 //! only the facts a coding model needs to start or continue work.
 
-use crate::json_measurement::serialized_json_len;
-use serde::Serialize;
+#[cfg(test)]
+use super::instruction_projection::{
+    changed_instruction_sources, project_instructions_context_projection,
+};
+use super::instruction_projection::{instructions_projection, trim_instruction_source};
+use super::projection_text::{bounded_json_string, json_string_payload_len, serialized_len};
+use super::startup_catalog::{
+    StartupExtensions, StartupPluginsCatalog, StartupSkillsCatalog, PLUGIN_DISCOVERY_HINT,
+    SKILL_DISCOVERY_HINT, STARTUP_EXTENSION_CATALOG_HARD_MAX_BYTES,
+};
+#[cfg(test)]
+use super::startup_catalog::{StartupPluginEntry, StartupSkillEntry};
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::collections::BTreeSet;
 
 use super::continuation_feedback::EXPLORATION_CONTINUITY_ACTION;
+use super::guidance::{core_guidance, tool_strategy_guidance};
 #[cfg(test)]
 use super::project_instructions::INSTRUCTION_CANDIDATE_PATHS;
 use super::project_instructions::{
-    ProjectInstructionFile, ProjectInstructionsSnapshot, ProjectInstructionsSummarySnapshot,
-    MAX_LINES_PER_FILE,
+    ProjectInstructionsSnapshot, ProjectInstructionsSummarySnapshot,
 };
 use super::project_resolution::ResolvedProject;
 use super::session_context::canonical_repository_key;
@@ -25,16 +35,9 @@ use super::tool_inputs::{CodingGuidanceProfile, StartupDetail};
 // Reserve transport-envelope headroom so the rendered ToolResult stays
 // below the documented 32 KiB startup ceiling.
 pub(crate) const STANDARD_STARTUP_HARD_MAX_BYTES: usize = 30 * 1024;
-pub(crate) const STARTUP_EXTENSION_CATALOG_HARD_MAX_BYTES: usize = 6 * 1024;
-pub(crate) const STARTUP_SKILL_CATALOG_MAX_BYTES: usize = 2_900;
-pub(crate) const STARTUP_PLUGIN_CATALOG_MAX_BYTES: usize = 2_900;
-pub(crate) const STARTUP_EXTENSION_DESCRIPTION_MAX_BYTES: usize = 512;
 pub(crate) const REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON: &str =
     "not_requested_by_work_on_project";
-const INSTRUCTION_CONTENT_JSON_BUDGET: usize = 10 * 1024;
 const MIN_INSTRUCTION_CONTENT_JSON_BYTES: usize = 512;
-const MAX_RULE_HEADINGS: usize = 6;
-const MAX_RULE_HEADING_JSON_BYTES: usize = 160;
 const MAX_CHANGED_PATHS: usize = 20;
 const MAX_MINIMAL_EXPLORATION_PATHS: usize = 3;
 const MAX_STANDARD_EXPLORATION_PATHS: usize = 12;
@@ -76,16 +79,7 @@ pub(crate) fn builtin_coding_workflow_projection_with_policy(
         "version": BUILTIN_CODING_WORKFLOW_VERSION,
         "authority": "model_guidance_only",
         "role_selection": "Ordinary implementation uses default guidance. Use independent_review only for an explicit independent review pass. Roles never grant authority.",
-        "guidance": [
-            "Follow host safety and user/project scope/rules; carry authorized work to concrete, reviewable completion. Ask only for missing requirements/authority; guidance grants no authority.",
-            "Verify Project/changes/nested rules, plus branch/HEAD for Git work. Recovery/compaction/exact Session resume is continuation: reuse still-current Git/read/validation/Job facts; revalidate changed snapshots/HEAD/worktree/instructions.",
-            "Preserve unrelated work; push/publish/deploy/restart need explicit action/target. If a user answer/Job/validation/result is not a dependency, continue independent work; wait only on real dependencies.",
-            "For inspection, files/data/artifacts, diagnostics, or coding: inspect → act or produce → review → task-fit validation → deliver. Coding maps cross-layer changes end to end; choose Git/Cargo/commit only when needed. Coding: compiler/schema/exhaustiveness failures expose gaps; avoid speculative redesign.",
-            "Validation failure is evidence, not queue cleanliness. Fix dependent blockers; continue otherwise. Reuse assertion_name; outcome_unknown fails closed. After Rust stabilizes, format once. Development validation may overlap independent work; covered-source edits make it stale for final evidence.",
-            "For closeout evidence, freeze source covered by final validation. Continue read-only review/docs/external inspection; if covered source must change, invalidate that evidence and rerun the appropriate final validation.",
-            "Keep one execution/Job. Generated calls carry follow_up_kind. mechanically_followable is an exact continuation: copy args unchanged after Host inputSchema validation. fallback_recovery is recovery/detail/dependency, never auto-followed. Pending Job continuation is fallback_recovery; passive Job attention may surface.",
-            "observe_jobs is for logs/details/recovery; list_jobs is identity recovery; finish ready work before one wait_for_job_readiness join. any may unblock a branch; all requires every blocker. Deadline recomputes work/set; never mechanically refill. Current turn; no automatic next turn. Never retry/redispatch."
-        ],
+        "guidance": core_guidance(),
         "tool_strategy": tool_strategy_projection(profile),
         "model_protocol": {
             "goal_workflow": policy.goal_selection_guidance(),
@@ -98,11 +92,11 @@ pub(crate) fn builtin_coding_workflow_projection_with_policy(
             "session_message_resolution": "For a handled non-todo, attach _wc.resolve={message_id:<wc_msg_*>,resolution:<text>} on the next ordinary call together with _wc.record; if requires_ack, also include the id in _wc.ack. Resolve cannot predict or change the main call. Todos use complete_session_message.",
             "control_sidecars": "_wc.control is optional and only for an established workflow: piggyback a known transition on an already-needed call; otherwise omit it or use its standalone tool. Never create a Goal/Agent just to use a sidecar. Follow the canonical control schema and load webcodex.goal_workflow for Goal transitions. One mutation per phase, independently authorized; no automatic transitions. Post failure preserves main success. session_context_update remains fail-closed pending CAS/replay support.",
             "context_sidecar": "_wc.context is an optional post-result context request; it never authorizes. jobs.attention is Project-level, not Session/control; workflow.resume is Window/principal-scoped recovery evidence only and never selects or resumes a Session. Recover project.instructions by observation call before dependent mutation.",
-            "bootstrap_reuse": "For read/follow AGENTS.md, CLAUDE.md, repository instructions/project rules/local coding rules, or instruction-dependent tasks, request _wc.context=[\"project.instructions\"] on the first suitable work_on_project. instructions.status=loaded means source observed, not body included. status=available material with content_included=true and no truncation/incompleteness satisfies reading instructions; do not immediately reread via read_files. Reread unavailable/truncated/incomplete sources, changed fingerprints/revisions, possible post-bootstrap edits, or exact source/range needs. Refresh _wc.context=[\"webcodex.workflow\"] for missing/stale guidance, compaction/context recovery or an announced deployment-policy change. This refreshes guidance data, not Host schemas; reuse retained guidance and do not poll it.",
-            "bootstrap_observations": "Treat successful work_on_project.workspace as the initial branch/HEAD/status observation; avoid immediate get_git_status/rev-parse/branch for identical facts. Inspect changed paths, staged/unstaged detail, diffs/hunks/commit ranges or refresh after mutation, stale/unknown/unavailable state, and for fresh mutation fences. semantic_navigation supported=true/available=true allows direct navigation without get_lsp_status; diagnose null/probe_timeout/probe_failed/unavailable or provider issues. Reuse a complete/sufficient startup Skills/Plugins catalog; use skills.catalog, list_skills, plugin_tool list/describe for truncated/unavailable catalogs, missing task capabilities, changed revision/runtime, or explicit broader/refreshed discovery.",
+            "bootstrap_reuse": "Fresh model context: first suitable work_on_project requests _wc.context=[\"project.instructions\",\"webcodex.workflow\"]. First entry to another Project: request project.instructions; reuse retained webcodex.workflow. With complete/current context retained, omit both context keys on later tasks/Sessions and return visits. Session/ClientWindow continuity does not prove retention. Refresh after compaction/context loss, changed fingerprints/revisions, incomplete/truncated/missing bodies, stale workflow, or user request. status=loaded means observed only; content_included=true and complete means read. Follow read_more for missing bodies; read_files for exact ranges. Context refresh never authorizes.",
+            "bootstrap_observations": "work_on_project.workspace is the initial branch/HEAD/status observation; refresh after mutation/stale state and for mutation fences. semantic_navigation available=true works without get_lsp_status; diagnose probe_timeout/probe_failed/unavailable. Fresh/first Project: include_extension_catalog=true/default. Set false only while that Project's complete/sufficient catalog is retained; refresh for changed catalog revision/runtime, truncated discovery, missing relevant metadata, context loss, or user request. If one Skill description materially matches the task, load_skill; Do not load unrelated Skills. Reuse retained same-Project Skill bodies/revisions; catalog metadata alone is not a loaded Skill. Plugin catalog is selection metadata: reuse its applicable retained schema/binding; Never carry a projectBound binding to another Project or recover by replaying uncertain effects. Skill guidance grants no authority.",
             "runner_targeting": "For exact Runner client_id, use get_runtime_status(client_id=...) or list_projects(client_id=...) before treating it as absent.",
             "persistent_shell": "Local: run_process=literal argv; run_shell=shell grammar/short chains; run_script=program-like scripts; specialize for added semantics. Persistent shell only for repeated named-SSH state or local same-process state.",
-            "work_result_presentation": "For substantial Project work in a stable client Window, call present_work_result(project) exactly once immediately after the first successful project-scoped WebCodex action. Do not wait for work_on_project, a Workflow Session, mutation, validation, or closeout. The mounted card refreshes the same Window ActionAudit activity as WebUI, including observe/diagnostic actions; optional linked Session collaboration and final changes may appear later. Never repeat presentation or model-poll it in the same Window. Tiny one-step/read-only lookups may skip it; finish may suggest it only as a fallback if no card was presented.",
+            "work_result_presentation": "PDF: present_pdf(project, path) opens a dedicated reader. For substantial coding work in a stable client Window, call present_work_result(project) exactly once immediately after the first successful project-scoped WebCodex action. Do not wait for work_on_project, Session, edits, validation or closeout. Card refreshes the same Window ActionAudit activity as WebUI: observe/diagnostic actions; optional linked Session collaboration and final changes may appear later. Never repeat presentation or model-poll it in this Window. Tiny one-step/read-only lookups may skip it; finish suggests a fallback if no card was presented.",
             "normal_closeout": "Source/validation/open evidence: finish_coding_task(summary_only=true). Artifact tasks: pass outputs after task-appropriate count/content/format checks; read-only tasks without deliverables omit outputs. No established Goal means no Goal closeout. For goal_follow_up, load webcodex.goal_workflow and preserve unresolved obligations; preference changes never complete a Goal. Read/planning/artifact: finalize directly; close established Goals only after verified completion."
         },
         "roles": {
@@ -171,40 +165,6 @@ fn host_orchestration_catalog() -> Value {
     })
 }
 
-fn tool_strategy_guidance(profile: CodingGuidanceProfile) -> &'static [&'static str] {
-    match profile {
-        CodingGuidanceProfile::Direct => &[
-            "General loop: inspect → act/produce → review → task-fit validation → deliver. Non-Git work can use list_project_files/read_files; Git, Cargo checks, and commits are task-dependent.",
-            "Text source edits: read_files → edit_project_files with its read_revision fence; use exact edits for unique text and replace_range for deterministic whole-line rewrites. Review with review_changes when Git review is useful.",
-            "Use artifact import/export or transfer_project_artifact for binary files; do not rename or transform binary payloads through text edits. Use run_script/Python for computation or non-source transforms, then independently verify generated/report outputs.",
-            "Never use scripts to bypass edit_project_files revision fences, rollback, or sensitive-path policy.",
-            "Coalesce known work: read_files(items), search_project_texts(queries), search_file_context for search→source inspection, cargo_check(packages), and one edit_project_files batch. Keep result-dependent operations sequential; avoid ritual model turns.",            "Simple observation: direct primitive. Batch predetermined independent observations; adaptive follow-ups stay sequential across model calls.",
-            "Known target: bounded targeted reads. Broad discovery: small files/count search then targeted reads. Avoid ritual turns.",
-        ],
-        CodingGuidanceProfile::HostCodeMode => &[
-            "Host-native Code Mode is model guidance only. It grants no WebCodex capability/authority, changes no effects/retry/idempotency, and does not require WebCodex nested Code Mode. Host support is not verified by WebCodex; emit compact evidence.",
-            "Known same-kind inputs: prefer native batches such as read_files(items), search_project_texts(queries), cargo_check(packages), or one edit_project_files batch; do not Promise.all same-kind micro-calls. Never per-Job waits, Promise.race, or automatic redispatch.",
-            "Independent cross-tool read-only observations: native batches first; then Promise.allSettled for partial evidence or Promise.all for all-or-nothing. Prefer search_file_context for search→read; keep mechanically determined dependent chains in one Host cell. Never use observe_jobs heartbeat polling.",
-            "Run to quiescence: finish ready independent calls; follow only follow_up_kind=mechanically_followable with generated arguments unchanged after current input-schema validation. Continue ready work in the same cell. Job terminal does not imply mechanically_followable; fallback_recovery never auto-runs.",
-            "Return to the model for semantic choice, ambiguous result, new user decision, authority/permission change, outcome_unknown, competing recovery, unresolved mutation intent or effect uncertainty. Child-call completion alone is not a boundary. Cell return is not turn completion.",
-            "Exact stale-source reread may be mechanical. reread_required=true or direct_retry_safe=false stops effectful replay; recovery is not mutation retry authority. Keep full ToolResults in the Host cell; preserve exact pending continuations, observation_ref/read_revision, and failure/recovery fields.",
-            "execution_state=pending: retain exact Job identity/continuation as fallback. Run currently-ready independent calls. Ready work exhausted: wait_for_job_readiness join barrier on the entire exact blocked set. any when one terminal Job can unlock a useful branch; all only when every blocked dependency is required.",
-            "Choose wait_secs as the largest safe value from the remaining Host activation budget, up to the 45s maximum; do not prefer fixed 10/15/20s slices. Deadline: recompute ready work and the blocked set; do not mechanically repeat the same-set wait. Final validation: freeze covered source; edits invalidate evidence.",
-        ],
-        #[cfg(feature = "experimental-code-mode")]
-        CodingGuidanceProfile::CodeMode => &[
-            "For one simple observation use a direct primitive; do not wrap it in Code Mode. If one bounded search will immediately inspect its matches, prefer direct search_file_context. Native commands and structured tools are first-class; choose the simplest sufficient primitive. Narrow broad discovery before targeted reads.",
-            "Prefer read-only execute_code_mode for multi-step related search/read observations, cross-file/module investigation, or synthesis of independent observations when it reduces outer model round trips. Three or more related observations is a soft heuristic, never a correctness rule.",
-            "Keep adaptive follow-up inside one cell: search, inspect result, dependent read, inspect, further search, compact final projection. Dependent calls remain sequential inside the cell; they need not cross model turns.",
-            "Plan each cell as a small dependency DAG: use Promise.all for independent observations and keep true dependencies sequential. Prefer a native batch shape (read_files items, search_project_texts queries) over same-kind calls. Use JavaScript for branching/cross-tool composition, not avoidable micro-calls.",
-            "Keep raw child ToolResults inside the cell. Filter, extract, cross-reference and synthesize search results, file bodies and diff chunks before text(...). Emit only compact structured evidence needed for the next model decision; no fixed JSON shape is required.",
-            "Avoid raw-result dumping: do not batch calls then text(results). Project proactively before hitting the bounded outer-output limit. If nested signatures or result fields are not retained, exact read_tool_manifest on the selected Code Mode entry returns its bounded callable contract.",
-            "Canonical mutation is the default edit path; structured validation is the default validation path. Consider effectful Code Mode only to reduce outer round trips for multiple related validations; mutating Code Mode only when adaptive read -> one guarded edit benefits.",
-            "This profile grants no capability or nested admission. All children retain canonical Project/Session authority, permission, risk, approval, effects, idempotency, validation evidence, Job continuation, retry and effect-certainty semantics.",
-        ],
-    }
-}
-
 // Model-side caps for the deterministic repository overview projected into the
 // shared startup brief. Lists are stable-sorted and record truncation; a list
 // that exceeds its cap is never silently presented as complete.
@@ -216,176 +176,6 @@ pub(crate) const REPOSITORY_MAX_SUGGESTED_READS: usize = 8;
 pub(crate) const REPOSITORY_MAX_ROOTS_PER_CLASS: usize = 8;
 pub(crate) const REPOSITORY_MAX_WARNINGS: usize = 8;
 pub(crate) const REPOSITORY_MAX_PROJECT_TYPE_EVIDENCE: usize = 4;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StartupSkillEntry {
-    pub(crate) skill_id: String,
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) source_scope: String,
-    pub(crate) trust: String,
-    pub(crate) name_conflict: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StartupPluginEntry {
-    pub(crate) plugin: String,
-    pub(crate) name: String,
-    pub(crate) tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) description: Option<String>,
-    #[serde(skip_serializing_if = "webcodex_core::plugin::PluginSelectionAnnotations::is_empty")]
-    pub(crate) annotations: webcodex_core::plugin::PluginSelectionAnnotations,
-}
-
-/// Shared startup metadata projection, not a resource store or authority.
-/// Entry types, discovery, and execution remain owned by their domains.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StartupCatalog<Entry> {
-    pub(crate) status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reason_code: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) catalog_revision: Option<String>,
-    pub(crate) total_count: usize,
-    pub(crate) returned_count: usize,
-    pub(crate) truncated: bool,
-    pub(crate) entries: Vec<Entry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) discovery_hint: Option<&'static str>,
-}
-
-pub(crate) type StartupSkillsCatalog = StartupCatalog<StartupSkillEntry>;
-pub(crate) type StartupPluginsCatalog = StartupCatalog<StartupPluginEntry>;
-
-impl<Entry: Serialize> StartupCatalog<Entry> {
-    fn unavailable_with_hint(reason_code: &'static str, discovery_hint: &'static str) -> Self {
-        Self {
-            status: "unavailable",
-            reason_code: Some(reason_code),
-            catalog_revision: None,
-            total_count: 0,
-            returned_count: 0,
-            truncated: false,
-            entries: Vec::new(),
-            discovery_hint: Some(discovery_hint),
-        }
-    }
-
-    fn update_completeness(&mut self, upstream_truncated: bool, discovery_hint: &'static str) {
-        self.returned_count = self.entries.len();
-        self.truncated = upstream_truncated || self.returned_count < self.total_count;
-        self.discovery_hint = self.truncated.then_some(discovery_hint);
-    }
-
-    fn available_bounded(
-        catalog_revision: String,
-        total_count: usize,
-        upstream_truncated: bool,
-        entries: Vec<Entry>,
-        max_bytes: usize,
-        discovery_hint: &'static str,
-    ) -> Self {
-        let mut projection = Self {
-            status: "available",
-            reason_code: None,
-            catalog_revision: Some(catalog_revision),
-            total_count,
-            returned_count: 0,
-            truncated: false,
-            entries: Vec::new(),
-            discovery_hint: None,
-        };
-        for entry in entries {
-            projection.entries.push(entry);
-            projection.update_completeness(upstream_truncated, discovery_hint);
-            // Measure the full wire envelope: optional hints and JSON escaping
-            // participate in the budget. Preserve the original greedy prefix.
-            if !serialized_json_len(&projection)
-                .map(|bytes| bytes <= max_bytes)
-                .unwrap_or(false)
-            {
-                projection.entries.pop();
-                break;
-            }
-        }
-        projection.update_completeness(upstream_truncated, discovery_hint);
-        projection
-    }
-}
-
-impl StartupSkillsCatalog {
-    pub(crate) fn unavailable(reason_code: &'static str) -> Self {
-        Self::unavailable_with_hint(
-            reason_code,
-            "Use skills.catalog or list_skills for explicit discovery when available.",
-        )
-    }
-
-    pub(crate) fn available(
-        catalog_revision: String,
-        discovery_truncated: bool,
-        entries: Vec<StartupSkillEntry>,
-    ) -> Self {
-        Self::available_bounded(
-            catalog_revision,
-            entries.len(),
-            discovery_truncated,
-            entries,
-            STARTUP_SKILL_CATALOG_MAX_BYTES,
-            "Use skills.catalog or list_skills for broader or refreshed discovery.",
-        )
-    }
-}
-
-impl StartupPluginsCatalog {
-    pub(crate) fn unavailable(reason_code: &'static str) -> Self {
-        Self::unavailable_with_hint(
-            reason_code,
-            "Use explicit plugin_tool list and describe when Plugin discovery is available.",
-        )
-    }
-
-    pub(crate) fn available(
-        catalog_revision: String,
-        total_count: usize,
-        entries: Vec<StartupPluginEntry>,
-    ) -> Self {
-        Self::available_bounded(
-            catalog_revision,
-            total_count,
-            false,
-            entries,
-            STARTUP_PLUGIN_CATALOG_MAX_BYTES,
-            "Use plugins.catalog or explicit plugin_tool list and describe for broader or current schema discovery.",
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StartupExtensions {
-    pub(crate) skills: StartupSkillsCatalog,
-    pub(crate) plugins: StartupPluginsCatalog,
-}
-
-impl StartupExtensions {
-    pub(crate) fn serialized_len(&self) -> usize {
-        serialized_json_len(self).unwrap_or(usize::MAX)
-    }
-}
-
-pub(crate) fn bounded_extension_description(value: &str) -> String {
-    if value.len() <= STARTUP_EXTENSION_DESCRIPTION_MAX_BYTES {
-        return value.to_string();
-    }
-    let mut end = STARTUP_EXTENSION_DESCRIPTION_MAX_BYTES;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
-}
 
 pub(crate) struct StartupBriefInput<'a> {
     pub(crate) guidance_profile: CodingGuidanceProfile,
@@ -826,263 +616,6 @@ fn roots_projection(source: &Value) -> Value {
             .unwrap_or_else(|| json!("conventional_directory_name")),
     );
     Value::Object(projected)
-}
-
-pub(crate) fn project_instructions_context_projection(
-    current: &ProjectInstructionsSnapshot,
-    max_bytes: usize,
-) -> Value {
-    // Sidecar requests observe current sources without Session retention. Its
-    // shared envelope is smaller than startup, especially with 16 global files.
-    let mut projection = instructions_projection(current, None, true, true, false);
-    if serialized_len(&projection) <= max_bytes {
-        return projection;
-    }
-    // Headings duplicate the body; remove this optional index before losing
-    // actual guidance or source identities.
-    if let Some(sources) = projection["sources"].as_array_mut() {
-        for source in sources {
-            source["headings"] = json!([]);
-        }
-    }
-    while serialized_len(&projection) > max_bytes {
-        let largest = projection["sources"].as_array().and_then(|sources| {
-            sources
-                .iter()
-                .enumerate()
-                .filter_map(|(index, source)| {
-                    source["content"]
-                        .as_str()
-                        .filter(|body| !body.is_empty())
-                        .map(|body| (index, json_string_payload_len(body)))
-                })
-                .max_by_key(|(_, bytes)| *bytes)
-        });
-        let Some((index, bytes)) = largest else {
-            // Essential source metadata itself does not fit. The owning
-            // sidecar envelope will return its existing explicit budget error.
-            break;
-        };
-        let source = &mut projection["sources"][index];
-        let body = source["content"].as_str().unwrap_or_default();
-        let (bounded, _) = bounded_json_string(body, bytes / 2);
-        source["read_more"] = if source["source_scope"] == "project" {
-            projected_read_more(source["path"].as_str().unwrap_or_default(), &bounded)
-        } else {
-            Value::Null
-        };
-        source["content"] = json!(bounded);
-        source["truncated"] = json!(true);
-        projection["truncated"] = json!(true);
-    }
-    projection
-}
-
-fn instructions_projection(
-    current: &ProjectInstructionsSnapshot,
-    previous: Option<&ProjectInstructionsSummarySnapshot>,
-    force_load: bool,
-    allow_content: bool,
-    minimal: bool,
-) -> Value {
-    let status = instruction_status(current, previous, force_load);
-    let include_content = allow_content
-        && (matches!(status, "loaded" | "changed")
-            || (status == "unavailable" && !current.files.is_empty()));
-    let changed_sources = if matches!(status, "changed" | "unavailable") {
-        changed_instruction_sources(current, previous)
-    } else {
-        Vec::new()
-    };
-    let mut remaining_content_budget = INSTRUCTION_CONTENT_JSON_BUDGET;
-    let mut projection_truncated = false;
-    let source_count = current.files.len();
-    let sources: Vec<Value> = current
-        .files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| {
-            instruction_source_projection(
-                file,
-                include_content,
-                minimal,
-                source_count.saturating_sub(index),
-                &mut remaining_content_budget,
-                &mut projection_truncated,
-            )
-        })
-        .collect();
-    json!({
-        "status": status,
-        "sources": sources,
-        "changed_sources": changed_sources,
-        "content_included": include_content,
-        "truncated": current.truncated || projection_truncated,
-        "total_chars": current.total_chars,
-    })
-}
-
-fn instruction_status(
-    current: &ProjectInstructionsSnapshot,
-    previous: Option<&ProjectInstructionsSummarySnapshot>,
-    force_load: bool,
-) -> &'static str {
-    if !current.scan_complete {
-        return "unavailable";
-    }
-    if !current.loaded {
-        return if previous.is_some_and(|snapshot| snapshot.loaded) {
-            "changed"
-        } else {
-            "not_found"
-        };
-    }
-    let Some(previous) = previous else {
-        return "loaded";
-    };
-    if force_load {
-        return "loaded";
-    }
-    if instruction_snapshots_match(current, previous) {
-        "reused"
-    } else {
-        "changed"
-    }
-}
-
-fn instruction_snapshots_match(
-    current: &ProjectInstructionsSnapshot,
-    previous: &ProjectInstructionsSummarySnapshot,
-) -> bool {
-    current.loaded == previous.loaded
-        && current.truncated == previous.truncated
-        && current.total_chars == previous.total_chars
-        && current.files.len() == previous.files.len()
-        && current
-            .files
-            .iter()
-            .zip(&previous.files)
-            .all(|(left, right)| {
-                left.source_scope == right.source_scope
-                    && left.path == right.path
-                    && left.fingerprint == right.fingerprint
-                    && left.truncated == right.truncated
-            })
-}
-
-fn changed_instruction_sources(
-    current: &ProjectInstructionsSnapshot,
-    previous: Option<&ProjectInstructionsSummarySnapshot>,
-) -> Vec<String> {
-    let mut identities: Vec<_> = current
-        .files
-        .iter()
-        .map(|file| (file.source_scope, file.path.as_str()))
-        .collect();
-    if let Some(previous) = previous {
-        for file in &previous.files {
-            let identity = (file.source_scope, file.path.as_str());
-            if !identities.contains(&identity) {
-                identities.push(identity);
-            }
-        }
-    }
-
-    identities
-        .into_iter()
-        .filter_map(|(scope, path)| {
-            if !current.scope_complete(scope) {
-                return None;
-            }
-            let current_file = current
-                .files
-                .iter()
-                .find(|file| file.source_scope == scope && file.path == path);
-            let previous_file = previous.and_then(|snapshot| {
-                snapshot
-                    .files
-                    .iter()
-                    .find(|file| file.source_scope == scope && file.path == path)
-            });
-            let differs = match (current_file, previous_file) {
-                (Some(left), Some(right)) => {
-                    left.fingerprint != right.fingerprint || left.truncated != right.truncated
-                }
-                (None, None) => false,
-                _ => true,
-            };
-            differs.then(|| path.to_string())
-        })
-        .collect()
-}
-
-fn instruction_source_projection(
-    file: &ProjectInstructionFile,
-    include_content: bool,
-    minimal: bool,
-    remaining_sources: usize,
-    remaining_content_budget: &mut usize,
-    projection_truncated: &mut bool,
-) -> Value {
-    let headings = if minimal {
-        Vec::new()
-    } else {
-        file.content
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with('#'))
-            .take(MAX_RULE_HEADINGS)
-            .map(|line| bounded_json_string(line, MAX_RULE_HEADING_JSON_BYTES).0)
-            .collect()
-    };
-    let (content, content_truncated) = if include_content {
-        // Divide the remaining aggregate budget across the remaining sources.
-        // Short earlier files leave their unused share available, while a long
-        // earlier file cannot starve a later changed rule of all content.
-        let source_budget = *remaining_content_budget / remaining_sources.max(1);
-        let (content, truncated) = bounded_json_string(&file.content, source_budget);
-        *remaining_content_budget =
-            remaining_content_budget.saturating_sub(json_string_payload_len(&content));
-        (Some(content), truncated)
-    } else {
-        (None, false)
-    };
-    *projection_truncated |= content_truncated;
-    let read_more = if content_truncated
-        && file.source_scope == super::project_instructions::InstructionSourceScope::Project
-    {
-        let returned = content.as_deref().unwrap_or_default();
-        projected_read_more(&file.path, returned)
-    } else if content_truncated {
-        Value::Null
-    } else {
-        serde_json::to_value(&file.read_more).unwrap_or(Value::Null)
-    };
-    json!({
-        "source_scope": file.source_scope,
-        "path": file.path,
-        "fingerprint": file.fingerprint,
-        "truncated": file.truncated || content_truncated,
-        "headings": headings,
-        "content": content,
-        "read_more": read_more,
-    })
-}
-
-fn projected_read_more(path: &str, returned: &str) -> Value {
-    let observed_lines = returned.lines().count().max(1);
-    let start_line = if returned.ends_with('\n') {
-        observed_lines.saturating_add(1)
-    } else {
-        // The byte-bound projection may end midway through a line. Re-reading
-        // that line is conservative and avoids losing its unseen suffix.
-        observed_lines
-    };
-    json!({
-        "path": path,
-        "start_line": start_line,
-        "limit": MAX_LINES_PER_FILE,
-    })
 }
 
 fn continuation_projection(
@@ -1566,30 +1099,6 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
     }
 }
 
-/// Bound by the serialized JSON payload cost, not Unicode scalar count. This
-/// keeps control characters and escape-heavy content within the byte contract.
-fn bounded_json_string(value: &str, max_payload_bytes: usize) -> (String, bool) {
-    let mut output = String::new();
-    let mut used = 0usize;
-    for character in value.chars() {
-        let encoded = serde_json::to_string(&character.to_string())
-            .expect("single character JSON serialization");
-        let cost = encoded.len().saturating_sub(2);
-        if used.saturating_add(cost) > max_payload_bytes {
-            return (output, true);
-        }
-        output.push(character);
-        used = used.saturating_add(cost);
-    }
-    (output, false)
-}
-
-fn json_string_payload_len(value: &str) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len().saturating_sub(2))
-        .unwrap_or(0)
-}
-
 fn enforce_hard_size_limit(brief: &mut Value) {
     // Reserve the same workflow allowance for either strategy. Otherwise a
     // larger guidance projection could trim unrelated instructions/evidence.
@@ -1613,14 +1122,8 @@ fn enforce_hard_size_limit(brief: &mut Value) {
     // through explicit discovery. Under aggregate startup pressure, trim them
     // before repository facts or project instruction prose.
     const EXTENSION_CATALOGS: &[(&str, &str)] = &[
-        (
-            "/extensions/skills",
-            "Use skills.catalog or list_skills for broader or refreshed discovery.",
-        ),
-        (
-            "/extensions/plugins",
-            "Use plugins.catalog or explicit plugin_tool list and describe for broader or current schema discovery.",
-        ),
+        ("/extensions/skills", SKILL_DISCOVERY_HINT),
+        ("/extensions/plugins", PLUGIN_DISCOVERY_HINT),
     ];
     loop {
         if serialized_len(brief) <= max_bytes {
@@ -1746,20 +1249,7 @@ fn enforce_hard_size_limit(brief: &mut Value) {
         let next_budget = current_budget
             .saturating_sub(512)
             .max(MIN_INSTRUCTION_CONTENT_JSON_BYTES);
-        let (bounded, _) = bounded_json_string(content, next_budget);
-        let path = source
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let read_more = if source["source_scope"] == "project" {
-            projected_read_more(&path, &bounded)
-        } else {
-            Value::Null
-        };
-        source["content"] = json!(bounded);
-        source["truncated"] = json!(true);
-        source["read_more"] = read_more;
+        trim_instruction_source(source, next_budget);
         brief["instructions"]["truncated"] = json!(true);
     }
 
@@ -1849,20 +1339,7 @@ fn enforce_hard_size_limit(brief: &mut Value) {
             .unwrap_or_default();
         let current_budget = json_string_payload_len(content);
         let next_budget = current_budget.saturating_sub(128);
-        let (bounded, _) = bounded_json_string(content, next_budget);
-        let path = source
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let read_more = if source["source_scope"] == "project" {
-            projected_read_more(&path, &bounded)
-        } else {
-            Value::Null
-        };
-        source["content"] = json!(bounded);
-        source["truncated"] = json!(true);
-        source["read_more"] = read_more;
+        trim_instruction_source(source, next_budget);
         brief["instructions"]["truncated"] = json!(true);
     }
 
@@ -1876,10 +1353,6 @@ fn enforce_hard_size_limit(brief: &mut Value) {
         serialized_len(brief) <= STANDARD_STARTUP_HARD_MAX_BYTES,
         "startup brief base contract exceeded its hard byte budget"
     );
-}
-
-fn serialized_len(value: &Value) -> usize {
-    serialized_json_len(value).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

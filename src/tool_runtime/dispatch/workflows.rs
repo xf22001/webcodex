@@ -57,6 +57,29 @@ impl ToolRuntime {
                 .await
             }
 
+            ToolCall::PresentDocx { project, path } => self.present_docx(project, path, auth).await,
+
+            ToolCall::PresentPdf { project, path } => self.present_pdf(project, path, auth).await,
+            ToolCall::ReadPdfChunk {
+                project,
+                path,
+                sha256,
+                bytes,
+                byte_offset,
+            } => {
+                self.read_pdf_chunk(project, path, sha256, bytes, byte_offset, auth)
+                    .await
+            }
+            ToolCall::ReadAppArtifactChunk {
+                project,
+                path,
+                sha256,
+                bytes,
+                byte_offset,
+            } => {
+                self.read_app_artifact_chunk(project, path, sha256, bytes, byte_offset, auth)
+                    .await
+            }
             ToolCall::PresentWorkResult {
                 project,
                 session_id,
@@ -120,7 +143,9 @@ impl ToolRuntime {
             call @ (ToolCall::SessionHandoffSummary { .. }
             | ToolCall::SessionHandoffState { .. }) => self.dispatch_handoff_tool(call, auth).await,
 
-            call @ (ToolCall::ListProjects { .. }
+            call @ (ToolCall::ResolveWorkspace { .. }
+            | ToolCall::UnregisterProjects { .. }
+            | ToolCall::ListProjects { .. }
             | ToolCall::RegisterProject { .. }
             | ToolCall::UnregisterProject { .. }
             | ToolCall::CreateProject { .. }) => self.dispatch_project_tool(call, auth).await,

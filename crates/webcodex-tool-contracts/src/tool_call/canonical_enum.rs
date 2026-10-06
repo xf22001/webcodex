@@ -104,11 +104,11 @@ pub enum ToolCall {
         #[schemars(with = "CodingGuidanceProfile")]
         guidance_profile: Option<CodingGuidanceProfile>,
         #[schemars(extend("default" = true))]
-        /// Whether startup should include a small bounded Skills/Plugins selection catalog. Defaults to
-        /// true. Set false only when the caller's current model context already retains the relevant
-        /// extension metadata. False skips the startup Skill/Plugin discovery observations. The catalog
-        /// grants no authority, never loads Skill bodies, never creates Plugin bindings, and never
-        /// substitutes for plugin_tool describe before invocation.
+        /// Include the bounded Skills/Plugins catalog. keep true/default in fresh model/ClientWindow context
+        /// and on First entry to another Project; the catalog is Project-scoped. Set false only while that
+        /// Project's complete/sufficient catalog is retained; Workflow Session/ClientWindow alone is insufficient.
+        /// Refresh after compaction/context loss, changed catalog revision/runtime, truncated/missing metadata,
+        /// or explicit user request. This is request-local advice and grants no authority.
         #[serde(default = "default_true")]
         include_extension_catalog: bool,
         /// Optional explicit Workflow Session to continue exactly: canonical wc_sess_* or server-issued
@@ -145,7 +145,8 @@ pub enum ToolCall {
         #[schemars(length(max = 16))]
         #[schemars(inner(length(min = 1, max = 512)))]
         #[serde(default)]
-        outputs: Vec<String>,        /// When true, return the minimal decision-complete closeout only: workspace cleanliness/conflicts,
+        outputs: Vec<String>,
+        /// When true, return the minimal decision-complete closeout only: workspace cleanliness/conflicts,
         /// hygiene state, bounded Job counts, final validation state/counts, tool-failure actionability
         /// counts, canonical task_outcome, evidence_integrity, warnings, and suggested_next_actions. Omits
         /// project/session identity, permissions, review/work/change/handoff provenance, facts/evidence
@@ -173,6 +174,50 @@ pub enum ToolCall {
         /// true; minimal diagnostics require bounded tails or safe result metadata.
         #[serde(default)]
         include_validation_summary: Option<bool>,
+    },
+
+    /// Select one authorized DOCX version for a dedicated read-only reader.
+    PresentDocx {
+        #[schemars(length(min = 1, max = 512))]
+        project: String,
+        /// Project-relative .docx file; no Git or Session required.
+        #[schemars(length(min = 1, max = 512))]
+        path: String,
+    },
+    /// Open one project PDF in a dedicated reader, independently of Git or a Session.
+    PresentPdf {
+        #[schemars(length(min = 1, max = 512))]
+        project: String,
+        #[schemars(length(min = 1, max = 512))]
+        path: String,
+    },
+
+    /// App-only read of the exact PDF version selected by present_pdf.
+    ReadPdfChunk {
+        #[schemars(length(min = 1, max = 512))]
+        project: String,
+        #[schemars(length(min = 1, max = 512))]
+        path: String,
+        #[schemars(regex(pattern = "^[0-9a-f]{64}$"))]
+        sha256: String,
+        #[schemars(range(min = 5, max = 20971520))]
+        bytes: usize,
+        #[schemars(range(min = 0, max = 20971519))]
+        byte_offset: usize,
+    },
+
+    /// App-only generic read of one exact immutable artifact version for presentation renderers.
+    ReadAppArtifactChunk {
+        #[schemars(length(min = 1, max = 512))]
+        project: String,
+        #[schemars(length(min = 1, max = 512))]
+        path: String,
+        #[schemars(regex(pattern = "^[0-9a-f]{64}$"))]
+        sha256: String,
+        #[schemars(range(min = 1, max = 268435456))]
+        bytes: usize,
+        #[schemars(range(min = 0, max = 268435455))]
+        byte_offset: usize,
     },
 
     /// Explicitly present one persistent card for the current client Window.
@@ -207,7 +252,7 @@ pub enum ToolCall {
             pattern = "^(wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})|~s[1-9][0-9]{0,18})$"
         ))]
         session_id: Option<String>,
-        /// Explicit file inventory, lazy diff, or bounded UTF-8 content page; omission keeps lightweight card state.
+        /// Explicit inventory, lazy diff, UTF-8 content or PDF page; omission keeps lightweight card state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         files: Option<WorkResultFilesRequest>,
     },
@@ -687,7 +732,7 @@ pub enum ToolCall {
             pattern = "^(wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})|~s[1-9][0-9]{0,18})$"
         ))]
         session_id: String,
-        /// Experimental E2a JavaScript orchestration source. Admitted tools are the E1 read-only set plus cargo_check and cargo_test. Structured validators may hand off the same execution as ordinary Jobs; no mutation, shell, generic process, Job observation, plugins/MCP, or recursive Code Mode is exposed.
+        /// Experimental E2a JavaScript orchestration source. Admitted tools are the E1 read-only set plus project_validate, cargo_check and cargo_test. Structured validators may hand off the same execution as ordinary Jobs; no mutation, shell/generic process, Job observation, Plugin/MCP gateways, or recursive Code Mode is exposed.
         #[schemars(length(max = 65536))]
         source: String,
         /// Optional orchestration/frontend decision deadline in milliseconds. Defaults to 5000 and is server-clamped to 1..30000. The response may follow after a short bounded drain of already-started canonical child calls needed to report truthful consequential outcomes.
@@ -708,7 +753,7 @@ pub enum ToolCall {
             pattern = "^(wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})|~s[1-9][0-9]{0,18})$"
         ))]
         session_id: String,
-        /// Experimental E2c source: E1 reads, at most one canonical edit_project_files attempt, then cargo_check/cargo_test only after a successful known edit (including no-op). Use read_revision for guarded edits. Inspect source_state independently of execution success. Return Job handoffs to the outer workflow, never wait inside JS. No shell/process, nested Job observation, alternate writes, gateways, recursion or automatic whole-program retry.
+        /// Experimental E2c source: E1 reads, at most one canonical edit_project_files attempt, then project_validate, cargo_check or cargo_test only after a successful known edit (including no-op). Use read_revision for guarded edits. Inspect source_state independently of execution success. Return Job handoffs to the outer workflow, never wait inside JS. No shell/process, nested Job observation, alternate writes, Plugin/MCP gateways, recursion or automatic whole-program retry.
         #[schemars(length(max = 65536))]
         source: String,
         /// Optional frontend decision deadline in milliseconds. Defaults to 5000, clamped to 1..30000. A short bounded drain preserves already-dispatched mutation/validation truth and exact Job continuations; timeout is not rollback or retry authority.
@@ -1308,21 +1353,20 @@ pub enum ToolCall {
         /// Optional explicit wc_sess_* Workflow Session id. Snapshot reuse is fenced to this identity.
         #[serde(default)]
         session_id: Option<String>,
-        /// Optional project-relative paths to narrow diff paging.
+        /// Patch paths only; workspace identity/metadata remain repository-wide.
         #[serde(default)]
         paths: Option<Vec<String>>,
         /// Maximum hunks on each bounded diff page.
         #[serde(default)]
         max_hunks: Option<usize>,
-        /// Maximum complete lines per returned hunk.
+        /// Maximum lines per returned hunk.
         #[serde(default)]
         max_hunk_lines: Option<usize>,
         /// Raw producer page budget, clamped by the same read_git_diff_hunks engine.
         #[schemars(range(min = 0))]
         #[serde(default)]
         max_page_bytes: Option<usize>,
-        /// Opaque review_changes continuation. When present, metadata comes only from the exact retained
-        /// snapshot and the underlying diff page continues from the same fenced source.
+        /// Opaque token from next_call; repeat its scope and page inputs.
         #[schemars(length(max = 384))]
         #[serde(default)]
         continuation: Option<String>,
@@ -1497,7 +1541,8 @@ pub enum ToolCall {
         /// Optional portable dependency-resolution policy. locked forbids adapters from
         /// repairing dependency selection state; it does not imply offline execution.
         #[serde(default)]
-        dependency_policy: Option<webcodex_core::project_build::ProjectDependencyPolicy>,        /// Total build execution budget, default 1800 seconds, clamped to 7 days.
+        dependency_policy: Option<webcodex_core::project_build::ProjectDependencyPolicy>,
+        /// Total build execution budget, default 1800 seconds, clamped to 7 days.
         /// Host handoff timing never extends this budget or starts a second build.
         #[serde(default)]
         #[schemars(range(min = 1))]
@@ -1515,7 +1560,7 @@ pub enum ToolCall {
         #[serde(default)]
         cwd: Option<String>,
         action: webcodex_core::project_validation::ProjectValidationAction,
-        /// Omission means auto. Rust and Go are supported; Node/Python return unavailable.
+        /// Omission means auto. Rust and Go are supported; Python supports test through pytest; Node returns unavailable.
         #[serde(default)]
         adapter: Option<webcodex_core::project_validation::ProjectValidationAdapter>,
         /// Optional portable scope. Explicit packages narrow Rust/Go selection; all_packages=true selects the
@@ -1525,8 +1570,10 @@ pub enum ToolCall {
         /// Optional portable dependency-resolution policy. locked forbids adapters from
         /// repairing dependency selection state; it does not imply offline execution.
         #[serde(default)]
-        dependency_policy: Option<webcodex_core::project_validation::ProjectDependencyPolicy>,        /// Test-only selector and count postconditions. Rust uses a libtest substring;
-        /// Go uses native -run regexp. Omission preserves unfiltered positive-test proof.
+        dependency_policy: Option<webcodex_core::project_validation::ProjectDependencyPolicy>,
+        /// Test-only selector and count postconditions. Rust uses a libtest substring,
+        /// Go uses native -run regexp, and Python pytest uses -k. Omission preserves
+        /// unfiltered positive-test proof.
         #[serde(default)]
         test: Option<webcodex_core::project_validation::ProjectValidationTestOptions>,
         /// Total execution budget, clamped to 3600 seconds. Host grace never starts another execution.
@@ -1916,6 +1963,10 @@ pub enum ToolCall {
     /// Open the readonly workbench. Empty arguments show a chooser; a Project is selected only
     /// when explicitly supplied. Session selection never creates a recorder or execution context.
     OpenWebcodexWorkbench {
+        /// Runner for explicit Project choices.
+        #[serde(default)]
+        #[schemars(length(min = 1, max = 128))]
+        client_id: Option<String>,
         #[serde(default)]
         project: Option<String>,
         #[serde(default)]
@@ -1925,6 +1976,10 @@ pub enum ToolCall {
     /// Search bounded authorized resources. File and artifact searches require an explicit project;
     /// artifact search additionally requires an exact retained Workflow Session.
     SearchWebcodexResources {
+        /// Project discovery only: Runner filter before paging.
+        #[serde(default)]
+        #[schemars(length(min = 1, max = 128))]
+        client_id: Option<String>,
         kind: WebcodexResourceKind,
         #[serde(default)]
         #[schemars(length(max = 200))]
@@ -3435,6 +3490,16 @@ pub enum ToolCall {
         #[schemars(length(min = 1, max = 128))]
         idempotency_key: String,
     },
+    /// Open one independent read-only spreadsheet view. No Workflow Session is required.
+    PresentSpreadsheet {
+        /// Exact runtime Project id or issued principal-scoped project reference.
+        #[schemars(length(min = 1, max = 512))]
+        project: String,
+        /// Project-relative CSV, TSV or XLSX file (at most 5 MiB; path up to 512 bytes).
+        #[schemars(length(min = 1, max = 512))]
+        path: String,
+    },
+
     /// Preferred unified read-side facade for Project artifacts. Physical
     /// dispatch remains action-specific: Runner-backed metadata/inspection and
     /// MCP presentation/authority for native images and complete export.
@@ -3887,6 +3952,37 @@ pub enum ToolCall {
         session_id: Option<String>,
     },
 
+    /// Locate an already registered workspace without creating a Session or registration.
+    /// Exactly one selector is required: an exact registered path or a non-empty literal query.
+    ResolveWorkspace {
+        /// Exact caller-visible Runner; never fall through to another machine.
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        /// Exact registered absolute path; no filesystem or symlink guessing. Exclusive with query.
+        #[serde(default)]
+        #[schemars(length(min = 1, max = 4096))]
+        path: Option<String>,
+        /// Literal case-insensitive substring over id, name, path and description.
+        #[serde(default)]
+        #[schemars(length(min = 1, max = 200))]
+        query: Option<String>,
+        /// Candidate bound, default 20, clamped to 1..100. Never resolves ambiguous matches by rank.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+
+    /// Preview or unregister explicit Project registrations; files are never deleted.
+    UnregisterProjects {
+        #[schemars(length(min = 1, max = 16))]
+        items: Vec<ProjectUnregisterInput>,
+        /// Default true: inspect exact revisions without dispatch. Not a lease or success guarantee.
+        #[serde(default = "default_true")]
+        dry_run: bool,
+        /// Required true for execution; every item rechecks ownership, CAS and active Jobs.
+        #[serde(default)]
+        confirm: bool,
+    },
+
     ListProjects {
         /// Exact Runner client_id. Filters only caller-visible Projects on that Runner.
         #[schemars(length(min = 1, max = 128))]
@@ -3900,13 +3996,14 @@ pub enum ToolCall {
         #[schemars(length(min = 1, max = 200))]
         #[serde(default)]
         query: Option<String>,
-        /// Maximum Projects returned after all filters. Values above 100 are accepted and clamped to 100.
-        /// Omit to preserve the legacy full visible registry result.
+        /// Maximum results, clamped to 100. Filtered queries default to 100; unfiltered omission returns all visible Projects.
         #[schemars(range(min = 1))]
         #[serde(default)]
         limit: Option<usize>,
-        /// Return a compact workspace-selection projection without paths, revisions, or broad smoke
-        /// metadata.
+        /// Include cached Runner-inventory Git branch/HEAD/dirty, not a fresh filesystem read.
+        #[serde(default)]
+        include_git_summary: bool,
+        /// Compact workspace selection including exact paths, without revisions or detailed policy.
         #[serde(default)]
         summary_only: bool,
     },
@@ -4011,6 +4108,16 @@ pub enum ToolCall {
         /// compatibility.
         #[serde(default)]
         include_projects: Option<bool>,
+        /// Literal case-insensitive substring over Runner id, display name and hostname.
+        #[serde(default)]
+        #[schemars(length(max = 200))]
+        query: Option<String>,
+        /// Online=connected; offline=not connected (includes stale); stale=heartbeat-expired inventory.
+        #[serde(default)]
+        status: Option<RunnerStatusFilter>,
+        /// Matching Runner limit, clamped to 1..100; omission preserves full operator inventory.
+        #[serde(default)]
+        limit: Option<usize>,
         /// Return compact Runner identity, health, build, project-count, and shared Job-concurrency facts.
         #[serde(default)]
         summary_only: bool,
@@ -4088,38 +4195,31 @@ pub enum ToolCall {
         payload_index: Option<usize>,
     },
 
-    /// Return a compact, bounded tool manifest with categories, risk summary,
-    /// recommended flows, and optional intent-shaped tool views. Intent views
-    /// only filter and rank discovery output; they do not change tool behavior,
-    /// policy, permissions, execution, or finish verdict semantics. Intended as
-    /// a lightweight alternative to `list_tools` for long-running tasks where
-    /// full catalog schemas cause ResponseTooLargeError. Read-only runtime
-    /// introspection; list/filter mode stays schema-free, while exact tool_name
-    /// mode exposes only that tool's input schema. Never exposes tokens, secrets,
-    /// internal paths, or output schemas.
+    /// Schema-free discovery by query/category/intent; exact tool_name returns one input contract.
+    /// Discovery does not register Host tools or change invocation authority.
     #[serde(rename = "read_tool_manifest")]
     ToolManifest {
         #[schemars(length(min = 1, max = 128))]
         /// Optional exact model-visible runtime tool name for one-tool contract discovery.
         #[serde(default)]
         tool_name: Option<String>,
-        /// Optional category filter (e.g. session, edit, git, checkpoint, runtime, job, validation).
-        /// Distinct from intent.
+        /// Literal tool-name/category/description keywords.
+        #[serde(default)]
+        #[schemars(length(max = 200))]
+        query: Option<String>,
+        /// 1..100 results; query default 20.
+        #[serde(default)]
+        limit: Option<usize>,
+        /// Canonical category; distinct from cross-category task intent.
         #[serde(default)]
         category: Option<String>,
-        /// Optional task intent view such as coding, audit, exploration,
-        /// release, or discovery. Distinct from `category`. Discovery filtering
-        /// only; does not change tool behavior or finish verdict semantics.
+        /// Task view: maintenance, resources, coding, audit, exploration, file_transfer, release or discovery.
         #[serde(default)]
         intent: Option<String>,
-        /// Include recommended_flows in the output. Omission defaults to false for exact tool_name lookup
-        /// and true for category, intent, or broad discovery.
+        /// Omitted: false for exact tool_name/query, true for category/intent/broad discovery.
         #[serde(default = "default_true")]
         include_recommended_flows: bool,
-        /// Request aggregate risk_summary where the selected projection exposes it (default true).
-        /// Unfiltered/full discovery can return the aggregate; sparse filtered discovery omits it and
-        /// carries per-tool risk only when needed for selection. This flag does not change authority,
-        /// permission, or tool behavior.
+        /// Include aggregate risks in broad output (default true); focused output keeps per-tool risks. No authority change.
         #[serde(default = "default_true")]
         include_risk_summary: bool,
     },

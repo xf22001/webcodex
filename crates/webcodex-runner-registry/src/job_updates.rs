@@ -8,8 +8,8 @@ use super::jobs::{
 };
 use super::reconciliation::validate_stream_snapshot;
 use super::requests::{
-    enqueue_pending_request_locked, next_request_id, notify_runner_locked,
-    remove_pending_request_locked,
+    capability_upgrade_error, enqueue_pending_request_locked, next_request_id,
+    notify_runner_locked, remove_pending_request_locked,
 };
 use super::state::{
     DetachedIdempotencyIntent, JobLifecycleState, JobObservationState, JobRecoveryPhase,
@@ -1281,39 +1281,40 @@ impl RunnerRegistry {
             ));
         }
         if project_build_request && !runner.runner_features.supports(RunnerFeature::ProjectBuild) {
-            return Err(
-                "capability_unavailable: upgrade target Runner for project_build_v1".to_string(),
-            );
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectBuild,
+            ));
         }
         if project_all_packages_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::ProjectAllPackages)
         {
-            return Err(
-                "capability_unavailable: upgrade target Runner for project_all_packages_v1"
-                    .to_string(),
-            );
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectAllPackages,
+            ));
         }
         if project_dependency_policy_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::ProjectDependencyPolicy)
         {
-            return Err(
-                "capability_unavailable: upgrade target Runner for project_dependency_policy_v1"
-                    .to_string(),
-            );
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectDependencyPolicy,
+            ));
         }
         if project_go_single_module_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::ProjectGoSingleModule)
         {
-            return Err(
-                "capability_unavailable: upgrade target Runner for project_go_single_module_v1"
-                    .to_string(),
-            );
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectGoSingleModule,
+            ));
         }
         if javascript_script_request
             && !runner
@@ -1390,9 +1391,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::ProjectValidation)
         {
-            return Err(
-                "capability_unavailable: upgrade target Runner for project_validation_v1".into(),
-            );
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectValidation,
+            ));
         }
         let python_pytest = validation
             .as_ref()
@@ -1405,7 +1407,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::ProjectValidationPythonPytest)
         {
-            return Err("capability_unavailable: upgrade target Runner for project_validation_python_pytest_v1".into());
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectValidationPythonPytest,
+            ));
         }
         // Recheck at admission, not only during the earlier planning round trip:
         // a replacement/older Runner must never reinterpret new filters or counts.
@@ -1421,7 +1426,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::ProjectValidationTestOptions)
         {
-            return Err("capability_unavailable: upgrade target Runner for project_validation_test_options_v1".into());
+            return Err(capability_upgrade_error(
+                &client_id,
+                RunnerFeature::ProjectValidationTestOptions,
+            ));
         }
         if !validation_steps.is_empty()
             && !runner
@@ -1959,6 +1967,30 @@ impl RunnerRegistry {
             return Err(format!("unknown shell job: {}", job_id));
         }
         Ok(job_view(job))
+    }
+
+    /// Bounded caller-authorized immutable Job views for outer observability.
+    /// Unlike ordinary Job reads this deliberately does not refresh lifecycle,
+    /// touch receipts, contact a Runner, or wait for the registry lock. Missing,
+    /// hidden, or contended metadata is omitted so telemetry can never change or
+    /// delay the caller's tool outcome.
+    pub fn try_job_observability_views_for_auth(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        job_ids: &[&str],
+    ) -> Option<Vec<ShellJobInfo>> {
+        self.inner.try_read(|inner| {
+            job_ids
+                .iter()
+                .take(8)
+                .filter_map(|job_id| {
+                    let job = inner.jobs_by_id.get(*job_id)?;
+                    (job.visibility == ShellJobVisibility::Public
+                        && shell_job_visible_to_auth(auth, inner, job))
+                    .then(|| job_view(job))
+                })
+                .collect()
+        })
     }
 
     /// Resolve one observability-only Project anchor for an exact Job set under

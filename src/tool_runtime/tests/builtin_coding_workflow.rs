@@ -198,7 +198,7 @@ fn direct_strategy_prefers_structured_edits_and_coalesces_known_work() {
         "read_files(items)",
         "search_project_texts(queries)",
         "search_file_context",
-        "cargo_check(packages)",
+        "project_validate with scope.packages",
         "one edit_project_files batch",
         "result-dependent operations sequential",
         "direct primitive",
@@ -262,7 +262,7 @@ fn host_code_mode_strategy_is_bounded_guidance_only() {
         "model guidance only",
         "read_files(items)",
         "search_project_texts(queries)",
-        "cargo_check(packages)",
+        "project_validate with scope.packages",
         "one edit_project_files batch",
         "do not Promise.all same-kind micro-calls",
         "Independent cross-tool read-only observations",
@@ -473,4 +473,24 @@ fn sparse_pending_receipts_rely_on_complete_static_scheduling_guidance() {
             }
         }
     }
+}
+
+#[test]
+fn bootstrap_guidance_schema_allows_semantic_headroom_but_keeps_a_ceiling() {
+    use webcodex_core::runtime_contract::BUILTIN_BOOTSTRAP_GUIDANCE_MAX_CHARS;
+    let schema = workflow_schema();
+    let workflow = builtin_coding_workflow_projection(Default::default());
+    for field in ["bootstrap_reuse", "bootstrap_observations"] {
+        assert_eq!(
+            schema["properties"]["model_protocol"]["properties"][field]["maxLength"],
+            BUILTIN_BOOTSTRAP_GUIDANCE_MAX_CHARS
+        );
+        let mut at_bound = workflow.clone();
+        at_bound["model_protocol"][field] = json!("x".repeat(BUILTIN_BOOTSTRAP_GUIDANCE_MAX_CHARS));
+        validate_schema_instance_for_test(&at_bound, &schema).unwrap();
+        at_bound["model_protocol"][field] =
+            json!("x".repeat(BUILTIN_BOOTSTRAP_GUIDANCE_MAX_CHARS + 1));
+        assert!(validate_schema_instance_for_test(&at_bound, &schema).is_err());
+    }
+    validate_schema_instance_for_test(&workflow, &schema).unwrap();
 }

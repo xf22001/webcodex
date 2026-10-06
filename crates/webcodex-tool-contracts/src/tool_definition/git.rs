@@ -48,7 +48,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
         )
         .with_composition_policy(super::ToolCompositionPolicy::Parallel)
         .with_host_orchestration_hint(super::ToolHostOrchestrationHint::independent_parallel_read()),
-        "Specialist exact committed-range review map retained for explicit discovery. Ordinary review uses review_changes; use this only when a dedicated committed file/class/symbol map is specifically needed. Read-only.",
+        "Summarize an exact committed Git range as bounded file/class/symbol metadata and change statistics, without returning patch bodies. Commits and the merge-base are pinned; incomplete coverage stays explicit. Ordinary review uses review_changes. Read-only.",
     ))),
     adaptive_runtime_direct(
         change_summary_like(git_like(model_spec(
@@ -85,7 +85,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
                     .diff_review(super::ToolDiffReviewEvidence::Always),
             )
             .with_composition_policy(super::ToolCompositionPolicy::Parallel),
-            "Primary bounded Git review workflow. First call returns an exact snapshot, summary/signals, and first read_git_diff_hunks page. Continue with the returned opaque token and identical closed scope/paging inputs. Workspace mutation fails closed; committed review stays pinned to exact commits and merge-base.",
+            "Review a fenced Git snapshot with three-line context. Workspace is the net HEAD-to-worktree patch, including staged/untracked contents, not an index-only plan. Committed scope pins commits/merge-base. Follow only next_call with unchanged inputs; workspace changes fail closed. Use get_git_status for cleanliness.",
         ))),
         120,
         super::ToolDirectReason::CoreWorkflow,
@@ -126,7 +126,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
                         .diff_review(super::ToolDiffReviewEvidence::ArgumentBool("include_diff")),
                 )
                 .with_composition_policy(super::ToolCompositionPolicy::Parallel),
-                "Specialist workspace projection retained for explicit discovery, presentation, Session signals, and closeout internals. Ordinary code review uses review_changes. Read-only; recent Session event history is opt-in.",
+                "Read a structured workspace summary: Git branch, HEAD, staged/unstaged/untracked files and diff statistics, without a patch by default. Optional include_diff adds bounded unstaged hunks and safe untracked previews, not a complete staged patch. Ordinary code review uses review_changes; recent Session event history is opt-in. Read-only.",
             ),
         )),
 ];
@@ -180,7 +180,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
         .with_host_orchestration_hint(
             super::ToolHostOrchestrationHint::independent_parallel_read(),
         ),
-        "Run git status --porcelain for a project.",
+        "Read current Git dirty/staged/untracked status for one exact Project without generating a review diff; use review_changes for patch content.",
     )),
     change_summary_like(git_like(
         model_spec(
@@ -225,7 +225,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
             .with_host_orchestration_hint(
                 super::ToolHostOrchestrationHint::independent_parallel_read(),
             ),
-            "Specialist exact diff paging core retained for explicit discovery and review_changes internals. Preserves source fences, bounded page/hunk continuation, path/range projection, and safe recovery. Read-only.",
+            "Read bounded Git diff hunks for selected paths: cached=true selects staged changes, omission selects unstaged changes; exact base_commit+head_commit selects a committed range. Preserves source fences, bounded page/hunk continuation and safe recovery. Use review_changes for a complete net-workspace review. Read-only.",
         ),
     )),
     git_like(model_spec(

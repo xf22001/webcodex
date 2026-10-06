@@ -33,6 +33,7 @@ pub(crate) mod control_sidecar;
 pub(crate) mod conversation_import;
 mod discovery_tools;
 mod dispatch;
+mod docx_document;
 mod edit_tool_telemetry;
 mod file_tools;
 pub(crate) mod files;
@@ -49,13 +50,16 @@ mod git_review;
 mod git_review_snapshot;
 mod git_tools;
 mod goal;
+mod guidance;
 mod handoff;
 mod handoff_brief;
 mod handoff_tools;
 mod helpers;
 mod hygiene;
 mod hygiene_tools;
+mod instruction_projection;
 mod job_attention;
+pub(crate) mod job_audit;
 mod job_input;
 mod job_query;
 mod job_terminal_wait;
@@ -78,6 +82,7 @@ pub(crate) mod permissions;
 mod process;
 mod project_build;
 mod project_resolution;
+mod projection_text;
 pub(crate) mod window_collaboration;
 pub(crate) use project_resolution::ResolvedProject;
 mod project_tools;
@@ -113,6 +118,7 @@ mod shell_tools;
 pub(crate) mod skills;
 pub(crate) mod specialized;
 pub(crate) mod startup_brief;
+mod startup_catalog;
 mod structured_execution;
 mod surface;
 pub(crate) use tool_audit::session_log_result_for_tool as audit_safe_result_for_tool;
@@ -131,6 +137,7 @@ pub(crate) use webcodex_tool_contracts::{
 #[cfg(test)]
 pub(crate) use webcodex_tool_runtime_contracts::recorder_metadata::parse_tool_call_with_recorder_metadata;
 pub(crate) use webcodex_tool_runtime_contracts::{tool_audit, tool_result};
+mod pdf_document;
 mod work_result;
 mod work_result_workspace;
 pub(crate) use window_activity::{ActiveWindowRequest, MAX_ACTIVE_REQUESTS_PER_WINDOW};
@@ -193,7 +200,7 @@ pub(crate) use model_references::SessionSelectorError;
 pub(crate) use project_resolution::ProjectResolverErrorKind;
 pub(crate) use project_resolution::{runner_project_runtime_id, ProjectResolverError};
 pub(crate) use registry::{
-    agent_continuation_app_tool_specs, goal_plan_app_tool_specs,
+    agent_continuation_app_tool_specs, artifact_app_tool_specs, goal_plan_app_tool_specs,
     job_terminal_continuation_app_tool_specs, registered_tool_specs,
     stateless_operator_extension_tool_specs, work_result_app_tool_specs,
 };

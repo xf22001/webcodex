@@ -17,10 +17,13 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use super::tool_result::{RecoveryKind, ToolResult};
+mod maintenance;
+
 use super::{runner_project_runtime_id, ToolRuntime};
 use crate::auth::{AuthContext, SCOPE_PROJECT_READ};
 use crate::runner_http::{RunnerFeature, RunnerSemanticView};
 use crate::runner_protocol::{RunnerProjectSummary, RUNNER_CAPABILITY_PROJECT_PATH_REGISTRATION};
+use maintenance::registered_git_summary;
 
 /// Maximum time the runtime waits for a Runner project-op response. Project
 /// operations are fast (write a small TOML, maybe create a directory + git
@@ -39,6 +42,7 @@ pub(crate) struct ListProjectsOptions {
     pub(crate) query: Option<String>,
     pub(crate) limit: Option<usize>,
     pub(crate) summary_only: bool,
+    pub(crate) include_git_summary: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -247,6 +251,7 @@ impl ToolRuntime {
                 query,
                 limit: Some(limit),
                 summary_only: false,
+                include_git_summary: false,
             },
             RUNTIME_CONSOLE_LIST_PROJECTS_MAX_RESULTS,
         )
@@ -266,7 +271,11 @@ impl ToolRuntime {
         let access = crate::runner_http::runner_access_from_auth(auth);
         let clients = self
             .runner_registry
-            .list_runner_semantic_views_for_auth(access.as_ref())
+            .list_project_semantic_views_for_auth(
+                access.as_ref(),
+                options.client_id.as_deref(),
+                options.project.as_deref(),
+            )
             .await;
         self.list_projects_from_semantic_clients(auth, &options, query.as_deref(), limit, &clients)
             .await
@@ -395,6 +404,7 @@ impl ToolRuntime {
                     "id": runtime_id,
                     "agent_project_id": project.id,
                     "name": project.name,
+                    "path": project.path,
                     "description": project.description,
                     "executor": "agent",
                     "client_id": client_id,
@@ -436,6 +446,9 @@ impl ToolRuntime {
                     "capabilities": capabilities,
                 })
             };
+            if options.include_git_summary {
+                value["git"] = registered_git_summary(&project);
+            }
             if let Some(project_ref) = project_ref {
                 value["project_ref"] = json!(project_ref);
             }
