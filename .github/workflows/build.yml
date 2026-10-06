@@ -144,7 +144,7 @@ jobs:
               rustc --version --verbose
               cargo --version --verbose
 
-              cargo build --locked --release -p webcodex -p webcodex-cli -p webcodex-runner -p webcodex-openai-tunnel --bin webcodex-tunnel
+              cargo build --locked --release -p webcodex -p webcodex-cli -p webcodex-runner -p webcodex-openai-tunnel
 
               mkdir -p dist/webcodex-${{ matrix.arch }}
               cp target/release/webcodex dist/webcodex-${{ matrix.arch }}/
