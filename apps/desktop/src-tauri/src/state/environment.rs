@@ -458,10 +458,33 @@ impl DesktopCore {
                 return Err(migration_target_conflict());
             }
         }
+        // Saved setup owns the label; reopening must never rename a Runner.
+        let runner_display_name =
+            if let Some(record) = store()?.load_environment().map_err(desktop_error)? {
+                record.request.runner_display_name
+            } else if let Some(journal) = store()?.load_journal().map_err(desktop_error)? {
+                journal.environment.request.runner_display_name
+            } else if legacy {
+                None
+            } else {
+                input.runner_display_name.clone()
+            };
+        webcodex_core::runner_protocol::validate_optional_runner_field(
+            &runner_display_name,
+            "display_name",
+        )
+        .map_err(|_| {
+            DesktopError::new(
+                "runner_display_name",
+                "Runner name must be at most 200 characters and contain no NUL",
+                "Shorten the Runner name and retry.",
+            )
+        })?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         crate::runtime_selection::verify_resolved_files(&binaries).await?;
         self.snapshot.binaries = Some(binaries.info());
         let request = SetupRequest {
+            runner_display_name,
             // Desktop-owned processes are not historical SCM services. A new
             // handoff uses the same user-session default as fresh setup; an
             // interrupted handoff must retain its journal's exact manager.
@@ -782,11 +805,12 @@ impl DesktopCore {
             tunnel_profiles: if request.local_server() {
                 let mut profiles = Vec::new();
                 for profile in self.tunnel_config.profiles() {
+                    let id = crate::connection_id::TunnelProfileId::try_from(profile.id.clone())
+                        .map_err(|_| migration_target_conflict())?;
                     profiles.push(LegacyTunnelProfile {
-                        profile_id: profile.id.to_string(),
+                        profile_id: profile.id,
                         start: process_is_active(
-                            self.process_snapshot(ProcessKey::RegularTunnel(profile.id))
-                                .await,
+                            self.process_snapshot(ProcessKey::RegularTunnel(id)).await,
                         ),
                     });
                 }

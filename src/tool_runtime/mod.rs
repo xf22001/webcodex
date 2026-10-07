@@ -4,6 +4,7 @@
 //! No HTTP framework types here — pure Rust input/output.
 
 pub mod activity;
+pub(crate) mod admin_dashboard;
 mod agent_task;
 mod agent_wait;
 mod artifact_transfer;
@@ -79,6 +80,7 @@ mod patch;
 mod patch_tools;
 pub(crate) mod peer_collaboration;
 pub(crate) mod permissions;
+mod presentation;
 mod process;
 mod project_build;
 mod project_resolution;
@@ -90,6 +92,7 @@ mod projects;
 mod read_cache;
 mod read_files;
 mod read_revisions;
+mod workspace_reads;
 #[cfg(test)]
 pub(crate) use read_revisions::ReadRevisionTarget;
 mod optional_enrichment;
@@ -97,6 +100,7 @@ pub(crate) mod resource_references;
 mod result_projection;
 mod return_timing;
 mod runtime;
+mod runtime_compatibility;
 mod runtime_info;
 pub(crate) mod runtime_metrics;
 mod script;
@@ -216,4 +220,6 @@ pub(crate) use surface::registered_tool_categories;
 #[cfg(test)]
 mod tests;
 
+mod edit_outcome;
+mod execution_outcome;
 mod external_observations;

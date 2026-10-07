@@ -53,6 +53,7 @@ async fn poll(
         runtime_for_task
             .dispatch_with_auth(
                 ToolCall::WorkResultState {
+                    collaboration: None,
                     project,
                     session_id: Some(session),
                     files: None,
@@ -196,7 +197,7 @@ async fn work_result_workspace_mutation_lease_expiry_explicit_refresh_and_closed
             .await
             .success
     );
-    runtime.work_result_workspace_cache.expire_for_test();
+    runtime.presentation.workspace_cache().expire_for_test();
     assert!(
         poll(&runtime, &project, &session, &auth, true, 1)
             .await

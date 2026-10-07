@@ -7,6 +7,37 @@ use crate::tray;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
 
+// UI intents are process-local and grant no execution or Runtime authority.
+#[tauri::command]
+pub fn desktop_shell_restore_only(shell: State<'_, desktop_shell::DesktopShellState>) -> bool {
+    shell.restore_only()
+}
+
+#[tauri::command]
+pub fn desktop_shell_bootstrap_complete(
+    app: AppHandle,
+    shell: State<'_, desktop_shell::DesktopShellState>,
+) {
+    shell.mark_bootstrap_complete();
+    let snapshot = app.state::<AppState>().get_state();
+    tray::refresh_from_snapshot(&app, &snapshot);
+}
+
+#[tauri::command]
+pub fn read_desktop_navigation(
+    shell: State<'_, desktop_shell::DesktopShellState>,
+) -> Option<desktop_shell::NavigationIntent> {
+    shell.pending_navigation()
+}
+
+#[tauri::command]
+pub fn acknowledge_desktop_navigation(
+    sequence: u32,
+    shell: State<'_, desktop_shell::DesktopShellState>,
+) {
+    shell.acknowledge_navigation(sequence);
+}
+
 #[tauri::command]
 pub fn set_desktop_locale(
     app: AppHandle,
@@ -114,7 +145,7 @@ pub async fn save_tunnel_profile(
 pub async fn tunnel_profile_action(
     app: AppHandle,
     state: State<'_, AppState>,
-    profile_id: crate::connection_id::TunnelProfileId,
+    profile_id: String,
     action: crate::state::ConnectionAction,
 ) -> DesktopResult<DesktopStateSnapshot> {
     project_state_result(&app, state.tunnel_profile_action(profile_id, action).await)
@@ -643,6 +674,29 @@ pub async fn export_support_bundle(path: String, state: State<'_, AppState>) -> 
 }
 
 #[tauri::command]
+pub async fn get_path_inventory(
+    state: State<'_, AppState>,
+) -> DesktopResult<webcodex_environment::inventory::PathInventory> {
+    state.path_inventory().await
+}
+
+#[tauri::command]
+pub async fn open_inventory_location(
+    request: crate::state::OpenInventoryRequest,
+    state: State<'_, AppState>,
+) -> DesktopResult<()> {
+    state.open_inventory_location(request).await
+}
+
+#[tauri::command]
+pub async fn export_inventory_document(
+    request: crate::state::ExportInventoryRequest,
+    state: State<'_, AppState>,
+) -> DesktopResult<()> {
+    state.export_inventory_document(request).await
+}
+
+#[tauri::command]
 pub async fn check_for_updates(
     manual: bool,
     state: State<'_, AppState>,
@@ -652,6 +706,14 @@ pub async fn check_for_updates(
 #[tauri::command]
 pub fn get_update_download_state(state: State<'_, AppState>) -> crate::updates::DownloadStatus {
     state.get_update_download_state()
+}
+
+#[tauri::command]
+pub async fn get_local_update_status(
+    inspect_files: bool,
+    state: State<'_, AppState>,
+) -> DesktopResult<crate::state::updates::LocalUpdateStatus> {
+    state.local_update_status(inspect_files).await
 }
 
 #[tauri::command]
@@ -679,13 +741,17 @@ pub async fn set_automatic_update_download(
 pub async fn install_verified_update(
     version: String,
     confirmed: bool,
+    confirmation: crate::state::updates::UpdateConfirmation,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> DesktopResult<()> {
-    if state.install_verified_update(&version, confirmed).await? {
+    if state
+        .install_verified_update(&version, confirmed, confirmation)
+        .await?
+    {
         // Only the explicit Install confirmation authorizes this exit. The
         // normal exit path closes Desktop-owned processes, not persistent services.
-        app.exit(0);
+        desktop_shell::request_application_exit(&app);
     }
     Ok(())
 }

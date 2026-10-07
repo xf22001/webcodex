@@ -1,9 +1,14 @@
 # Browser/CDP runtime architecture
 
-Status: Phase 1 implementation contract. This document describes the first-class
+Status: Browser runtime implementation contract. This document describes the first-class
 Browser domain and the boundaries that later Browser work must preserve. Browser
 is not part of Computer Use: Computer owns OS/window/accessibility/pointer/keyboard
 semantics, while Browser owns page/navigation/DOM-or-AX/CDP semantics.
+
+Persistent profiles, external extension attachment, ownership-specific cleanup,
+and exact Browser/Computer handoff are specified in
+[Browser session continuity](browser-session-continuity.md). The CDP/identity,
+request bounds and action-admission rules below apply to both transports.
 
 ## Shape of the runtime
 
@@ -21,8 +26,8 @@ observe_browser / control_browser
 ```
 
 `observe_browser` is guaranteed read-only and has the closed actions `targets`,
-`browsers`, `pages`, `snapshot`, `screenshot`, `console`, `network`, and `diagnostics`.
-`control_browser` has the closed actions `launch`, `new_page`, `navigate`, `reload`,
+`discover`, `browsers`, `pages`, `surface`, `snapshot`, `screenshot`, `console`, `network`, and `diagnostics`.
+`control_browser` has the closed actions `launch`, `attach`, `new_page`, `navigate`, `reload`,
 `click`, `input_text`, `select_option`, `set_value`, `upload_file`, `batch`, `key`,
 `clear_diagnostics`, `close_page`, and `close_browser`. The model surface does not expose one MCP tool
 per CDP primitive, and it does not accept arbitrary protocol methods, scripts,
@@ -34,6 +39,65 @@ The Runner wire remains more precise than the model facade. It uses distinct
 navigation, element effects, key input, and close operations. This separation
 preserves rolling compatibility, capability admission, telemetry, and exact
 failure attribution without inflating the model tool inventory.
+
+### Bounded semantic queries
+
+`observe_browser(action=snapshot, query={...})` filters the existing semantic
+source before applying `node_offset` / `max_nodes`. It does not concatenate
+successive snapshots. `fields_only=true` finds native and semantic form fields,
+including disabled/read-only controls. `text` is a case-insensitive literal
+substring of name, description, nearby label or placeholder; `role` is exact
+(case-insensitive), and `group` / `section` are literal label substrings. Filters
+are conjunctive, limited to 128 nonblank characters, and never grant actions.
+No regex, selector or script is accepted. Query terms are omitted from durable
+Browser audit projections.
+
+For example, `query={"fields_only":true,"section":"Education"}` returns fields
+across ordinary snapshot page boundaries in one call. With a query, `auto` keeps
+semantic text instead of silently compacting it away; explicit `interactive`
+still limits results to interactive semantics. Up to 4,352 existing source nodes
+(the existing pagination horizon) are searched once. Return limits remain
+256 nodes / 64 KiB; CDP reads keep the existing depth, message-byte and request
+deadline bounds. There is no unbounded pagination loop or widening of iframe
+collection. `truncated=true` makes a missing match inconclusive, including an
+exhausted search horizon or AX-advertised descendants omitted by the depth bound.
+`next_node_offset` addresses remaining matches within that horizon, with the same
+query; a null offset does not make a truncated result complete.
+
+Every returned element belongs to one new snapshot generation and can be used in
+one existing batch. A new query or snapshot invalidates every older element id.
+Do not combine ids from different result windows; narrow the semantic query to
+obtain the relevant controls together. Unreturned nodes receive no retained
+identity. The additive `browser_semantic_query` capability is checked both by
+ToolRuntime and under the Runner registry lock; older Runners still receive the
+original snapshot payload when query is absent.
+
+### Conservative clickable cards
+
+A top-document `div`, `li` or `article` already represented as a generic/group/
+listitem/article AX node can gain **click only**. One private read-only
+`DOMSnapshot.captureSnapshot` supplies Chromium's `isClickable` event-response
+fact and computed layout/style evidence. Admission additionally requires a
+visible, nonzero box, pointer cursor, enabled pointer events, readable bounded
+text, and a fully known content subtree without nested interactive targets,
+shadow roots or frame documents. Hidden, inert, disabled, editable and invisible
+ancestors suppress admission; nested event targets are ambiguous and suppressed.
+Neither pointer styling nor `onclick` alone grants authority. No site selector,
+listener source, raw DOM or CDP entry point is exposed to the model.
+
+Before the extra capture, the existing depth-bounded DOM must prove a complete
+tree of at most 4,352 nodes (including shadow/frame contents); missing children
+or unknown frame documents suppress capture entirely. The existing CDP
+message/deadline ceilings guard changes racing that preflight. Classification
+also rejects documents over 4,352 captured nodes, scans at most that many DOM/AX nodes,
+checks at most 64 content nodes per candidate, and admits at most 32 cards.
+Missing/oversized evidence fails closed for cards while existing native control
+semantics remain unchanged. Root DOM identity and a post-capture loader check
+prevent joining different documents. This slice does not infer cards inside
+shadow roots or iframes, and does not infer delegated ancestor handlers.
+
+Card `actions` and opaque ids use the same projection, generation, lease and
+document fences as native controls. No new effect path or replay behavior exists.
 
 ### Bounded form batches
 
@@ -112,16 +176,18 @@ native executable path remains Runner-private.
 
 `BrowserSupervisor` is Runner-owned process state rather than a global singleton.
 It bounds browsers, pages, request time, semantic snapshot nodes/bytes, image
-bytes, input text, idle time, and absolute runtime lifetime. Every launched browser
-uses a WebCodex-owned temporary profile. It never attaches the user's normal
-Chrome/Edge profile or logged-in session. The CDP endpoint is bound to loopback and
-its port, target IDs, session IDs, websocket URL, profile path, process IDs, and
-native node identities remain private to the Runner/runtime.
+bytes, input text, idle time, and absolute runtime lifetime. Default launch uses a
+WebCodex-owned temporary profile; managed launch uses a private persistent named
+profile. Existing user Chrome tabs require explicit extension consent and native
+attachment, never profile adoption. Owned CDP endpoints are loopback-only; bridge
+endpoints are authenticated and lease-scoped. Ports, target/session IDs, websocket
+URLs, profile paths, PIDs and native node identities remain Runner-private.
 
 The owned Chromium process tree is spawned through `webcodex-process::ManagedChild`.
-Manual close, idle/lifetime reaping, and Runner shutdown all use bounded process-tree
-termination/reaping. Runner restart intentionally invalidates all ephemeral Browser
-identities; Phase 1 does not persist or recover Browser sessions.
+Manual close, idle/lifetime reaping, and Runner shutdown use bounded process-tree
+termination/reaping only for owned instances; external attachments only detach.
+Runner restart invalidates all opaque Browser identities. Managed profile data
+survives, but no old Browser/page/element identity is recovered or reused.
 
 ## Identity, stale fencing, and semantic snapshots
 
@@ -138,7 +204,8 @@ opaque `element_id` values and an `actions` list.
 `actions` is the canonical admission for that element. It is not inferred from
 the accessibility role alone. The resolved element's local name and input type
 select the effect: native `select` admits `select_option`; text-like inputs and
-`textarea` admit `click` and `input_text`; `number`, `range`, date/time-like
+`textarea` admit `click`, `input_text` (caret insertion), and `set_value`
+(exact replacement via the native value setter plus input/change events); `number`, `range`, date/time-like
 inputs, and `color` admit `set_value`; `file` admits `upload_file`. Native
 `option` nodes remain observable choices and admit no effect. Accessibility
 `spinbutton` and `slider` nodes are not generically actionable. Descendants

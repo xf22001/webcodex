@@ -17,7 +17,11 @@ fn target_schema() -> Value {
                     "browser_control": {"type": "boolean"},
                     "browser_element_action_admission": {"type": "boolean"},
                     "browser_batch": {"type": "boolean"},
-                    "browser_launch": {"type": "boolean"}
+                    "browser_semantic_query": {"type": "boolean"},
+                    "browser_launch": {"type": "boolean"},
+                    "browser_managed_profile": {"type": "boolean"},
+                    "browser_surface_handoff": {"type": "boolean"},
+                    "browser_extension_bridge": {"type": "boolean"}
                 },
                 "required": [
                     "browser_observe",
@@ -37,7 +41,9 @@ fn browser_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "browser_id": {"type": "string", "minLength": 1, "maxLength": 128},
-            "page_count": {"type": "integer", "minimum": 0, "maximum": 16}
+            "page_count": {"type": "integer", "minimum": 0, "maximum": 16},
+            "ownership": {"type": "string", "enum": ["owned_ephemeral", "owned_managed_persistent", "attached_external"]},
+            "profile": {"type": "string", "maxLength": 48}
         },
         "required": ["browser_id", "page_count"]
     })
@@ -54,6 +60,31 @@ fn page_schema() -> Value {
             "url": {"type": "string", "maxLength": 2048}
         },
         "required": ["browser_id", "page_id", "title", "url"]
+    })
+}
+
+fn form_context_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "field_signature": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+            "dom_tag": {"type": "string", "maxLength": 32},
+            "input_type": {"type": "string", "maxLength": 32},
+            "html_name": {"type": "string", "maxLength": 256},
+            "placeholder": {"type": "string", "maxLength": 512},
+            "autocomplete": {"type": "string", "maxLength": 128},
+            "nearby_label": {"type": "string", "maxLength": 512},
+            "group_label": {"type": "string", "maxLength": 512},
+            "group_index": {"type": "integer", "minimum": 0, "maximum": 31},
+            "group_size": {"type": "integer", "minimum": 1, "maximum": 32},
+            "section_label": {"type": "string", "maxLength": 512},
+            "component_hint": {"type": "string", "maxLength": 64},
+            "aria_invalid": {"type": "boolean"},
+            "validation_hint": {"type": "string", "maxLength": 512},
+            "option_count": {"type": "integer", "minimum": 0, "maximum": 256}
+        },
+        "required": ["field_signature", "dom_tag"]
     })
 }
 
@@ -74,6 +105,7 @@ fn node_schema() -> Value {
             "required": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
             "disabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
             "read_only": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "form_context": {"anyOf": [form_context_schema(), {"type": "null"}]},
             "element_id": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 128}, {"type": "null"}]},
             "actions": {
                 "type": "array",
@@ -217,6 +249,19 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                     "browsers",
                     json!({"type": "array", "maxItems": 4, "items": browser_schema()}),
                 ),
+                ("attachments", json!({"type":"array", "maxItems":16, "items": {
+                    "type":"object", "additionalProperties":false, "properties": {
+                        "attachment_id":{"type":"string", "pattern":"^attachment_[a-f0-9]{32}$"},
+                        "title":{"type":"string", "maxLength":256}, "url":{"type":"string", "maxLength":2048}
+                    }, "required":["attachment_id","title","url"]
+                }})),
+                ("surface_id", json!({"type":"string", "maxLength":128})),
+                ("application", json!({"type":"string", "maxLength":512})),
+                ("title", json!({"type":"string", "maxLength":512})),
+                ("width", json!({"type":"integer", "minimum":0})),
+                ("height", json!({"type":"integer", "minimum":0})),
+                ("focused", json!({"type":["boolean","null"]})),
+                ("active", json!({"type":["boolean","null"]})),
                 (
                     "pages",
                     json!({"type": "array", "maxItems": 32, "items": page_schema()}),
@@ -303,6 +348,17 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                     json!({"type": "integer", "minimum": 0, "maximum": 256}),
                 ),
                 (
+                    "node_offset",
+                    json!({"type": "integer", "minimum": 0, "maximum": 4096}),
+                ),
+                (
+                    "next_node_offset",
+                    json!({"anyOf": [
+                        {"type": "integer", "minimum": 0, "maximum": 4096},
+                        {"type": "null"}
+                    ]}),
+                ),
+                (
                     "nodes",
                     json!({"type": "array", "maxItems": 256, "items": node_schema()}),
                 ),
@@ -338,6 +394,8 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
         "control_browser" => {
             let mut fields = common_fields();
             fields.extend([
+                ("ownership", json!({"type":"string", "enum":["owned_ephemeral", "owned_managed_persistent", "attached_external"]})),
+                ("profile", json!({"type":"string", "maxLength":48})),
                 ("requested_count", bounded_count(32)),
                 ("completed_count", json!({"type": "integer", "minimum": 0, "maximum": 32, "description": "Known completed operations, even when aggregate execution_state is outcome_unknown. Missing after transport loss means progress is unknown."})),
                 ("stopped_at_index", json!({"type": "integer", "minimum": 0, "maximum": 31, "description": "Zero-based stopped operation. A post-effect document change stops at the completed operation's index."})),

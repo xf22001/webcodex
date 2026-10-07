@@ -32,6 +32,7 @@ pub mod runner_skill;
 pub mod runtime_contract;
 pub mod sensitive_paths;
 pub mod sensitive_text;
+pub mod server_environment;
 pub mod shell_quote;
 pub mod skill_metadata;
 pub mod skill_store;
@@ -58,3 +59,5 @@ mod project_build_tests;
 mod project_operation_tests;
 
 pub mod directory_page;
+
+pub mod browser_query;

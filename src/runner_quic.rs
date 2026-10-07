@@ -578,6 +578,9 @@ mod tests {
     ) -> QuicRegisterFrame {
         let capabilities = crate::test_support::current_runner_capabilities(RunnerCapabilities {
             shell: true,
+            browser_managed_profile: false,
+            browser_surface_handoff: false,
+            browser_extension_bridge: false,
             explicit_shell_selection: false,
             bash_login_shell: false,
             file_read: true,
@@ -638,6 +641,7 @@ mod tests {
             browser_control: false,
             browser_element_action_admission: false,
             browser_batch: false,
+            browser_semantic_query: false,
             browser_launch: false,
             computer_observe: false,
             computer_application_discovery: false,

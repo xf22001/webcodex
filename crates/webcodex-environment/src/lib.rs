@@ -12,17 +12,15 @@ fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir()
 }
 
+mod embedded_tunnel;
 mod engine;
+pub use embedded_tunnel::{embedded_tunnel_profiles, EmbeddedTunnelProfile};
 mod installer_authorization;
 #[cfg(unix)]
 mod installer_unix;
+pub mod inventory;
+pub use inventory::*;
 mod layout;
-#[cfg(target_os = "linux")]
-mod legacy_cli;
-#[cfg(target_os = "linux")]
-mod legacy_system_server;
-#[cfg(target_os = "linux")]
-mod legacy_systemd;
 mod local_status;
 mod migration;
 mod native;
@@ -38,6 +36,10 @@ mod tunnel;
 mod types;
 pub use local_status::{ComponentObservation, LocalEnvironmentStatus};
 pub use upgrade::{upgrade_observation, UpgradeObservation, UpgradeOutcome};
+pub use upgrade::{
+    upgrade_status, upgrade_status_at, UpgradeFileComponent, UpgradePhase, UpgradeServiceComponent,
+    UpgradeServiceKind, UpgradeStatus, UpgradeTarget,
+};
 pub mod unified_update;
 mod upgrade;
 pub mod upgrade_transport;
@@ -62,11 +64,7 @@ pub use installer_authorization::{
 #[cfg(unix)]
 pub use installer_unix::{finish_authorized_installation, run_installer_upgrade_child};
 pub use layout::installed_desktop_runtime_directory;
-#[cfg(target_os = "linux")]
-pub use legacy_cli::{migrate_legacy_cli_user_runner, LegacyCliRunnerInput};
-#[cfg(target_os = "linux")]
-pub use legacy_system_server::{migrate_legacy_cli_system_server, LegacyCliServerInput};
-pub use upgrade::windows_legacy;
+pub use upgrade::windows_package;
 pub use upgrade::{
     ensure_upgrade_idle_under_lock, verify_prepared_installation, verify_same_installed_package,
     verify_upgrade_candidate, CandidateArtifact, CandidateDesktop, PreparedInstallationReceipt,
@@ -74,6 +72,8 @@ pub use upgrade::{
 };
 
 pub use tunnel::{
-    tunnel_profiles, tunnel_service_spec, write_tunnel_health, TunnelCredentials, TunnelRecord,
-    TunnelRuntimeObservation,
+    tunnel_profile_credentials, tunnel_profile_snapshots, tunnel_profiles, tunnel_service_spec,
+    write_embedded_tunnel_health, write_tunnel_health, TunnelConfigurationNextAction,
+    TunnelConfigurationResult, TunnelCredentials, TunnelHostMode, TunnelProfileSnapshot,
+    TunnelRecord, TunnelRuntimeObservation,
 };

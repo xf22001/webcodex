@@ -2,11 +2,31 @@
 use super::*;
 
 pub(super) fn browser_observe_audit_projection(call: &BrowserObserveToolCall) -> Value {
-    serde_json::to_value(call).unwrap_or_else(|_| {
-        serde_json::json!({
-            "action": call.action_name()
-        })
-    })
+    let value = serde_json::to_value(call).unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    if let Some(obj) = value.as_object() {
+        // Queries are page/user content, unlike opaque identities and budgets.
+        // Keep an allowlist so future observation inputs cannot leak by default.
+        copy_keys(
+            obj,
+            &mut out,
+            &[
+                "action",
+                "client_id",
+                "browser_id",
+                "page_id",
+                "limit",
+                "mode",
+                "max_nodes",
+                "max_depth",
+                "node_offset",
+                "include_all_console",
+                "include_all_network",
+                "since_cursor",
+            ],
+        );
+    }
+    Value::Object(out)
 }
 
 pub(super) fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
@@ -23,9 +43,21 @@ pub(super) fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "page_id": page_id,
             "operation_count": operations.len(),
         }),
-        BrowserActToolCall::Launch { client_id } => serde_json::json!({
+        BrowserActToolCall::Attach {
+            client_id,
+            attachment_id,
+        } => serde_json::json!({
+            "action": "attach", "client_id": client_id, "attachment_id": attachment_id,
+        }),
+        BrowserActToolCall::Launch {
+            client_id,
+            mode,
+            profile,
+        } => serde_json::json!({
             "action": "launch",
             "client_id": client_id,
+            "mode": mode,
+            "profile_present": profile.is_some(),
         }),
         BrowserActToolCall::NewPage {
             client_id,

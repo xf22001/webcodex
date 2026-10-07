@@ -47,7 +47,7 @@ fn work_result_thread_entrypoint_tool_spec() -> ToolSpec {
         .expect("Work Result state App tool must exist");
     ToolSpec {
         name: WORK_RESULT_THREAD_ENTRYPOINT_TOOL_NAME.to_string(),
-        description: "User-opened conversation thread panel for the Work Result already presented in this exact Host Window. The Host invokes this entrypoint with an empty object; WebCodex resolves only a prior successful present_work_result binding from the same authenticated Window and then reuses the normal work_result_state authorization and projection path.".to_string(),
+        description: "Host UI entrypoint only; models should use present_work_result, not call this tool. Opens the Work Result already presented in this exact Host Window. The Host invokes this entrypoint with an empty object; WebCodex resolves only a prior successful present_work_result binding from the same authenticated Window and then reuses the normal work_result_state authorization and projection path.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {},
@@ -749,7 +749,6 @@ pub(super) fn add_stateless_workflow_recorder_metadata(payload: &mut Value) {
             tool_name,
             Some(
                 "sync_goal_plan"
-                    | "read_pdf_chunk"
                     | "get_work_result_state"
                     | "read_changed_file_diff"
                     | "search_mentions"
@@ -830,7 +829,7 @@ fn attach_openai_thread_entrypoint(value: &mut Value) {
     };
     object.insert(
         "title".to_string(),
-        Value::String("WebCodex review".to_string()),
+        Value::String("WebCodex Work Result".to_string()),
     );
     let Some(meta) = tool_meta_object(value) else {
         return;
@@ -2019,7 +2018,6 @@ fn mcp_invocation_envelope_supported_fields(tool: &str) -> Vec<&'static str> {
         tool,
         "sync_goal_plan"
             | "get_work_result_state"
-            | "read_pdf_chunk"
             | "read_app_artifact_chunk"
             | "read_changed_file_diff"
             | "search_mentions"
@@ -2820,12 +2818,8 @@ pub(super) async fn handle_call(
             None => json!({"project": binding.project}),
         };
     }
-    let app_only_artifact_read = server_mcp_apps_enabled
-        && stateless_2026
-        && matches!(
-            params.name.as_str(),
-            "read_pdf_chunk" | "read_app_artifact_chunk"
-        );
+    let app_only_artifact_read =
+        server_mcp_apps_enabled && stateless_2026 && params.name == "read_app_artifact_chunk";
     let app_only_work_result_state =
         work_result_app_admitted && params.name == "get_work_result_state";
     let app_only_work_result_activity_detail =

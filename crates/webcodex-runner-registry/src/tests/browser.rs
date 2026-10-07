@@ -1,5 +1,119 @@
 use super::*;
 
+fn continuity_requirements() -> [(&'static str, Vec<RunnerFeature>); 4] {
+    [
+        (
+            "browser_discover",
+            vec![
+                RunnerFeature::BrowserObserve,
+                RunnerFeature::BrowserExtensionBridge,
+            ],
+        ),
+        (
+            "browser_attach",
+            vec![
+                RunnerFeature::BrowserControl,
+                RunnerFeature::BrowserExtensionBridge,
+            ],
+        ),
+        (
+            "browser_launch_managed",
+            vec![
+                RunnerFeature::BrowserLaunch,
+                RunnerFeature::BrowserManagedProfile,
+            ],
+        ),
+        (
+            "browser_surface",
+            vec![
+                RunnerFeature::BrowserObserve,
+                RunnerFeature::BrowserSurfaceHandoff,
+                RunnerFeature::ComputerObserve,
+            ],
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn browser_continuity_operations_reach_the_exact_runner_wire() {
+    for (kind, features) in continuity_requirements() {
+        let registry = RunnerRegistry::default();
+        let alice = auth_context(Some("alice"), false);
+        let mut registration = runner_registration("continuity", "browser-inst", vec![]);
+        registration.owner = Some("alice".into());
+        registration.capabilities = v2_baseline_capabilities();
+        for feature in features {
+            registration.capabilities.set(feature, true);
+        }
+        registry.register(registration).await.unwrap();
+        let (_, _receiver) = registry
+            .enqueue_browser(
+                "continuity".into(),
+                kind,
+                "{}".into(),
+                "alice".into(),
+                Some(&alice),
+                5,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{kind}: {error}"));
+        let poll = || RunnerPollRequest {
+            client_id: "continuity".into(),
+            runner_instance_id: "browser-inst".into(),
+        };
+        let request = registry
+            .poll(poll())
+            .await
+            .unwrap()
+            .expect("exact Browser operation");
+        assert_eq!(request.kind, kind);
+        assert_eq!(request.stdin.as_deref(), Some("{}"));
+        assert!(request.command.is_empty());
+        assert!(request.process.is_none());
+        assert!(request.script.is_none());
+        assert!(registry.poll(poll()).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn browser_continuity_rechecks_every_capability_without_dispatch() {
+    for (kind, features) in continuity_requirements() {
+        for missing in features.iter().copied() {
+            let registry = RunnerRegistry::default();
+            let alice = auth_context(Some("alice"), false);
+            let mut registration = runner_registration("continuity-old", "browser-inst", vec![]);
+            registration.owner = Some("alice".into());
+            registration.capabilities = v2_baseline_capabilities();
+            for feature in &features {
+                registration.capabilities.set(*feature, true);
+            }
+            registration.capabilities.set(missing, false);
+            registry.register(registration).await.unwrap();
+            let error = registry
+                .enqueue_browser(
+                    "continuity-old".into(),
+                    kind,
+                    "{}".into(),
+                    "alice".into(),
+                    Some(&alice),
+                    5,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("capability_unavailable"), "{kind}: {error}");
+            assert!(error.contains(missing.as_wire_name()), "{kind}: {error}");
+            assert!(registry
+                .poll(RunnerPollRequest {
+                    client_id: "continuity-old".into(),
+                    runner_instance_id: "browser-inst".into(),
+                })
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+}
+
 #[tokio::test]
 async fn browser_batch_is_one_bounded_runner_invocation() {
     let registry = RunnerRegistry::default();
@@ -272,4 +386,50 @@ async fn browser_precise_operation_is_preserved_on_wire_without_shell_fields() {
         request.stdin.as_deref(),
         Some(r#"{"browser_id":"browser_test","page_id":"page_test"}"#)
     );
+}
+
+#[tokio::test]
+async fn browser_query_rechecks_additive_capability_before_enqueue() {
+    for supported in [false, true] {
+        let registry = RunnerRegistry::default();
+        let alice = auth_context(Some("alice"), false);
+        let mut registration = runner_registration("query", "browser-inst", vec![]);
+        registration.owner = Some("alice".into());
+        registration.capabilities = v2_baseline_capabilities();
+        registration
+            .capabilities
+            .set(RunnerFeature::BrowserObserve, true);
+        registration
+            .capabilities
+            .set(RunnerFeature::BrowserElementActionAdmission, true);
+        registration
+            .capabilities
+            .set(RunnerFeature::BrowserSemanticQuery, supported);
+        registry.register(registration).await.unwrap();
+        let payload = serde_json::json!({"browser_id":"browser_fixture", "page_id":"page_fixture", "query":{"fields_only":true}}).to_string();
+        let result = registry
+            .enqueue_browser(
+                "query".into(),
+                "browser_snapshot",
+                payload.clone(),
+                "alice".into(),
+                Some(&alice),
+                30,
+            )
+            .await;
+        let request = registry
+            .poll(RunnerPollRequest {
+                client_id: "query".into(),
+                runner_instance_id: "browser-inst".into(),
+            })
+            .await
+            .unwrap();
+        if supported {
+            assert!(result.is_ok());
+            assert_eq!(request.unwrap().stdin.as_deref(), Some(payload.as_str()));
+        } else {
+            assert!(result.unwrap_err().contains("browser_semantic_query"));
+            assert!(request.is_none());
+        }
+    }
 }

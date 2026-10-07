@@ -151,8 +151,13 @@ Window-linked Session evidence never becomes refresh authority. Reopen the panel
 to select a newer successful presentation; missing Window identity or binding
 fails closed. Current authorization and snapshot fences still apply on every read.
 Changed files and Final Changes offer lazy Full text previews only for advertised
-paths. Current files use the pinned working-tree snapshot; final files use the
-sealed final tree, even after later workspace edits. Content loads in explicit
+paths. Changed files follow fresh workspace observations by default, renewing
+only a previously inspected view and keeping each read bound to an exact
+working-tree snapshot. Pin snapshot for review keeps that code stable while
+activity and workspace status refresh; Follow changes resumes updates. Final
+files always use the sealed final tree, even after later workspace edits.
+Snapshot retention and expiry remain bounded; failed reads never retarget code.
+Content loads in explicit
 32 KiB pages up to 256 KiB per file; the card labels partial content and the cap.
 A deleted file has no final version. Binary, non-UTF-8, symlink and submodule
 contents are unavailable; failed or expired reads never fall back to a live path.
@@ -313,7 +318,7 @@ For ordinary hosted `connect --auth oauth`, the Runner keeps its hosted credenti
 
 Shared-key OAuth delegation for Browser Use requires explicit `--oauth-browser-permissions` on `connect --auth oauth`. It adds only `browser:read`, `browser:control`, and `browser:launch`. The baseline excludes Browser scopes. Browser authority is independent of `--oauth-computer-permissions` and its consent checkboxes. Existing clients never expand automatically; narrow historical profiles gain only the explicitly selected class. Scope ceiling changes revoke old grants and require reauthorization. Reusing a Browser-enabled profile requires the flag again.
 
-Operator/admin diagnostics such as `read_tool_trace` are outside ordinary OAuth delegation. Neither OAuth supported scopes nor the shared-key bridge ceiling includes `admin`. Manifest discovery checks caller authority as well as protocol capability. Hard-coded calls remain denied without a challenge suggesting OAuth reconnect can grant `admin`. Missing delegable scopes such as Browser scopes still return the standard `WWW-Authenticate: Bearer error="insufficient_scope"` challenge.
+`read_tool_trace` requires credential-level admin authority and the Stateless MCP 2026 trace-diagnostics capability. A managed OAuth connection can acquire internal admin authority when an admin PAT authorizes its own managed-user client; tools/list, manifest discovery, direct calls and `call_runtime_tool` then use the same admin scope checks. `admin` remains absent from requestable scopes and public OAuth responses; ordinary OAuth denials do not advertise an `admin` scope challenge. Shared-key/project-share OAuth cannot acquire this authority. Pre-upgrade ChatGPT/NewWebCodex connections require one such reauthorization; refresh rotation then preserves authority. See [Authentication](AUTH_MODEL.md#oauth2).
 
 Project-first `share --auth oauth` remains bound to that temporary share environment. Managed-user OAuth is a separate advanced flow (`connect --auth managed-oauth`). OAuth credentials are never valid on Runner transport.
 
@@ -417,7 +422,7 @@ Cargo all-packages provenance is a bounded package-selection witness, not a comp
 
 For ordinary portable Rust/Go builds, prefer `project_build`. It accepts only an exact registered `project`, optional project-relative `cwd`, an optional `auto` / `rust` / `go` adapter hint, optional portable `scope` selecting either bounded `packages` (1..8 entries) or `all_packages=true`, and total `timeout_secs`. The Runner resolves the nearest unambiguous recipe and owns canonical argv: Rust maps explicit packages to repeated `-p` selectors and all-packages to `cargo build --workspace` only after proving the effective Cargo workspace root is the registered Project root; Go maps explicit package patterns directly and all-packages to `go build ./...`. Go project builds execute with Runner-owned `GO111MODULE=on` and `GOWORK=off`; full `go.work` workspace semantics are outside the v1 gateway rather than inherited implicitly from the Runner host. The request cannot provide an executable, argv, shell, script, release/profile/target/features, native workspace/exclude flags, offline/network policy, or artifact-discovery contract. Portable all-packages requests require the additive `project_all_packages_v1` Runner capability. Node/Python recipes fail closed as unsupported in v1.
 
-Both gateways optionally accept `dependency_policy: {"mode":"locked"}`. This is a portable dependency-resolution guarantee, not a literal cross-ecosystem flag contract: Rust build/check/test use Cargo `--locked`, while Go build/vet/test use `-mod=readonly`. The policy tells the adapter not to repair project dependency selection state in order to make the operation succeed; it does **not** disable registry/module/toolchain network access. Offline/network policy remains a separate #599 extension. `project_validate(action="format_check")` rejects the dependency policy instead of silently ignoring it. Policy-bearing planning and typed Job admission both require the additive `project_dependency_policy_v1` Runner capability. Locked validation derives a distinct durable validation target identity, while requests that omit the policy preserve the historical argv and identity.
+Both gateways optionally accept `dependency_policy: {"mode":"locked"}`. This is a portable dependency-resolution guarantee, not a literal cross-ecosystem flag contract: Rust build/check/test use Cargo `--locked`, while Go build/vet/test use `-mod=readonly`. The policy tells the adapter not to repair project dependency selection state in order to make the operation succeed; it does **not** disable registry/module/toolchain network access. Offline/network policy is tracked as an additive lifecycle extension in #962. `project_validate(action="format_check")` rejects the dependency policy instead of silently ignoring it. Policy-bearing planning and typed Job admission both require the additive `project_dependency_policy_v1` Runner capability. Locked validation derives a distinct durable validation target identity, while requests that omit the policy preserve the historical argv and identity.
 
 `project_build` requires the additive `project_build_v1` Runner capability at both planning and typed Job admission. Go project-build Job admission additionally requires `project_go_single_module_v1`. Admission replans the registered project/root, recipe, manifest/lock provenance, package scope, and canonical invocation; the worker rechecks that same plan after any local queue wait, before native process execution. A stale plan fails as `not_started` and releases its Job slot rather than silently rebuilding or executing the outdated intent. Long builds keep the same durable Job and return the ordinary sparse pending continuation; pending never authorizes retry or redispatch. The closed gateway bounds WebCodex's command authority but is not an OS sandbox: Cargo/Go build logic and project build scripts may still have their own filesystem or network effects. Existing lower-level execution tools remain explicit escape hatches for build forms outside this v1 contract.
 
@@ -442,7 +447,7 @@ format_check. Any supplied test block requires the additive
 `project_validation_test_options_v1` Runner capability; it is checked at both
 planning and Job admission. Old calls without that block retain their old wire
 and execution defaults. See [project-validation test options](implementation/project-validation-test-options.md)
-for exact scope, identity, and remaining #599 work.
+for exact scope and identity; additive lifecycle extensions are tracked in #962.
 
 Adaptive Runtime may expose common tools directly and long-tail tools through `call_runtime_tool`. Direct versus gateway exposure never changes schema validation, OAuth scope, Project authority, permission policy, Runner capability checks, Session fences, or effects.
 
@@ -571,10 +576,10 @@ The dedicated reader uses the App-only `read_app_artifact_chunk` bridge for byte
 That bridge is format-neutral and reuses the canonical artifact export chunk
 transport: each `tools/call` reauthorizes Project access, validates the pinned
 path/size/SHA-256 identity, and returns at most 512 KiB per Host-facing call through private MCP metadata.
-A changed source fails closed. For a 9 MiB document this is roughly eighteen Host
-round trips rather than the legacy 128 KiB `read_pdf_chunk` loop's roughly seventy.
-The legacy PDF-specific reader remains available for compatibility but is no longer
-the dedicated reader's primary path. The PDF remains bounded at 20 MiB and PDF.js
+A changed source fails closed. A 9 MiB document needs eighteen Host round trips.
+The unreleased PDF-specific `read_pdf_chunk` adapter has been removed; older
+mounted readers must be reopened from the current descriptor. The PDF remains
+bounded at 20 MiB and PDF.js
 rechecks the assembled digest/header before rendering. Use `present_work_result`
 for substantial coding progress, and `present_pdf` when the user asks to view a
 PDF. See [PDF document viewer](architecture/pdf-document-viewer.md).

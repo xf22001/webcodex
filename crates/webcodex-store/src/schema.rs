@@ -265,6 +265,7 @@ impl Database {
                 ON oauth_clients(owner_shared_key_hash);
 
             CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+                admin_authority INTEGER NOT NULL DEFAULT 0 CHECK(admin_authority IN (0, 1)),
                 id TEXT PRIMARY KEY,
                 code_hash TEXT NOT NULL UNIQUE,
                 client_id TEXT NOT NULL,
@@ -288,6 +289,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_client ON oauth_authorization_codes(client_id);
 
             CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+                admin_authority INTEGER NOT NULL DEFAULT 0 CHECK(admin_authority IN (0, 1)),
                 id TEXT PRIMARY KEY,
                 token_hash TEXT NOT NULL UNIQUE,
                 client_id TEXT NOT NULL,
@@ -309,6 +311,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_user ON oauth_access_tokens(user_id);
 
             CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+                admin_authority INTEGER NOT NULL DEFAULT 0 CHECK(admin_authority IN (0, 1)),
                 id TEXT PRIMARY KEY,
                 token_hash TEXT NOT NULL UNIQUE,
                 client_id TEXT NOT NULL,
@@ -399,10 +402,22 @@ impl Database {
         // table and its indices remain unchanged.
         Self::ensure_model_reference_schema(&mut conn)?;
 
-        // Preserve the authority of previously issued enrollment codes. Only a
-        // newly issued explicit admin grant adds ACP/SSH scopes; old codes stay 0.
+        // Add authority fields without inferring authority for historical grants
+        // or enrollment codes. Missing evidence always defaults to false.
         {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for table in [
+                "oauth_authorization_codes",
+                "oauth_access_tokens",
+                "oauth_refresh_tokens",
+            ] {
+                if !table_columns(&tx, table)?
+                    .iter()
+                    .any(|name| name == "admin_authority")
+                {
+                    tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN admin_authority INTEGER NOT NULL DEFAULT 0 CHECK(admin_authority IN (0, 1));"))?;
+                }
+            }
             if !table_columns(&tx, "pairing_codes")?
                 .iter()
                 .any(|column| column == "runner_capabilities")
@@ -584,6 +599,33 @@ impl Database {
                     principal_kind, principal_id, recipient_window_key,
                     requires_ack, first_projected_at_ms, created_at_ms
                 );
+
+            -- Historical peer bodies move here atomically before the bounded
+            -- delivery queue evicts them. This table never grants a live route.
+            CREATE TABLE IF NOT EXISTS window_peer_message_history (
+                message_id TEXT PRIMARY KEY,
+                principal_kind TEXT NOT NULL, principal_id TEXT NOT NULL,
+                sender_window_key TEXT NOT NULL, recipient_window_key TEXT NOT NULL,
+                sender_peer_id TEXT NOT NULL, recipient_peer_id TEXT NOT NULL,
+                kind TEXT NOT NULL, priority TEXT NOT NULL, message TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL, sender_session_id TEXT, sender_project TEXT,
+                requires_ack INTEGER NOT NULL,
+                first_projected_at_ms INTEGER, first_ack_observed_at_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_attention_recent ON window_operator_messages
+                (principal_kind, principal_id, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_operator_transcript_page ON window_operator_messages
+                (principal_kind, principal_id, recipient_window_key, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_reply_transcript_page ON window_model_replies
+                (principal_kind, principal_id, window_key, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_peer_transcript_in ON window_peer_messages
+                (principal_kind, principal_id, recipient_window_key, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_peer_transcript_out ON window_peer_messages
+                (principal_kind, principal_id, sender_window_key, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_peer_history_in ON window_peer_message_history
+                (principal_kind, principal_id, recipient_window_key, created_at_ms DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_peer_history_out ON window_peer_message_history
+                (principal_kind, principal_id, sender_window_key, created_at_ms DESC, message_id DESC);
 
             CREATE TABLE IF NOT EXISTS window_peer_discoveries (
                 principal_kind TEXT NOT NULL,

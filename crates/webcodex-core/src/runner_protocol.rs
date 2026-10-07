@@ -3,6 +3,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Shared registration/configuration bounds for optional Runner metadata.
+const MAX_RUNNER_FIELD_LEN: usize = 200;
+pub fn validate_optional_runner_field(value: &Option<String>, field: &str) -> Result<(), String> {
+    if let Some(value) = value {
+        if value.chars().count() > MAX_RUNNER_FIELD_LEN {
+            return Err(format!(
+                "{} is too long; maximum is {} characters",
+                field, MAX_RUNNER_FIELD_LEN
+            ));
+        }
+        if value.contains('\0') {
+            return Err(format!("{} cannot contain NUL bytes", field));
+        }
+    }
+    Ok(())
+}
+
 mod job;
 mod transport;
 
@@ -810,6 +827,12 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub browser_element_action_admission: bool = false;
     }
+    /// Bounded semantic filtering before snapshot pagination.
+    BrowserSemanticQuery => RUNNER_CAPABILITY_BROWSER_SEMANTIC_QUERY("browser_semantic_query"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub browser_semantic_query: bool = false;
+    }
     /// Bounded same-snapshot Browser batches with fail-stop partial-effect receipts.
     BrowserBatch => RUNNER_CAPABILITY_BROWSER_BATCH("browser_batch"),
     v2_baseline = false {
@@ -823,6 +846,24 @@ runner_capabilities! {
         /// Runner-owned launch of ephemeral Chromium-family runtimes.
         #[serde(default, skip_serializing_if = "is_false")]
         pub browser_launch: bool = false;
+    }
+    BrowserExtensionBridge => RUNNER_CAPABILITY_BROWSER_EXTENSION_BRIDGE("browser_extension_bridge"),
+    v2_baseline = false {
+        /// Live Runner-owned authenticated Native Messaging bridge, not raw CDP attach.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub browser_extension_bridge: bool = false;
+    }
+    BrowserManagedProfile => RUNNER_CAPABILITY_BROWSER_MANAGED_PROFILE("browser_managed_profile"),
+    v2_baseline = false {
+        /// Explicit, named, private persistent Browser profiles; not inferred from launch.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub browser_managed_profile: bool = false;
+    }
+    BrowserSurfaceHandoff => RUNNER_CAPABILITY_BROWSER_SURFACE_HANDOFF("browser_surface_handoff"),
+    v2_baseline = false {
+        /// Exact live Browser process to native Computer surface correlation.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub browser_surface_handoff: bool = false;
     }
     ComputerObserve => RUNNER_CAPABILITY_COMPUTER_OBSERVE("computer_observe"),
     v2_baseline = false {
@@ -2807,7 +2848,11 @@ mod envelope_tests {
                 browser_control: false,
                 browser_element_action_admission: false,
                 browser_batch: false,
+                browser_semantic_query: false,
                 browser_launch: false,
+                browser_extension_bridge: false,
+                browser_managed_profile: false,
+                browser_surface_handoff: false,
                 computer_observe: false,
                 computer_application_discovery: false,
                 computer_application_launch: false,
@@ -2971,6 +3016,15 @@ mod envelope_tests {
         assert!(legacy.browser_control);
         assert!(!legacy.browser_element_action_admission);
         assert!(!legacy.browser_batch);
+        assert!(!legacy.browser_semantic_query);
+        assert!(!serde_json::to_value(&legacy)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("browser_semantic_query"));
+        let query: RunnerCapabilities =
+            serde_json::from_str(r#"{"browser_semantic_query":true}"#).unwrap();
+        assert!(query.browser_semantic_query);
         assert!(legacy.browser_launch);
 
         let present: RunnerCapabilities =

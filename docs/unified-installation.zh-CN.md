@@ -59,36 +59,28 @@ pairing code 从 stdin 读取，不能放进命令行参数。由中心 Server �
 
 普通 `resume` 使用 `--token-file` 是为了继续配置，不会轮换已保存的用户凭据。若已保存的 Server 用户凭据丢失或失效，请运行 `webcodex environment repair-user-credential [--token-file PATH]`；不提供 `--token-file` 时，CLI 会通过隐藏终端输入安全读取凭据。
 
-## 迁移现有 Linux CLI 服务
+## 从 v0.4.6 升级
 
-Linux 为受支持的旧 CLI 服务提供显式迁移命令。迁移会保留既有身份，不会签发新的配对码。源码审查已完成，但这些命令尚未通过原生安装包/服务验收；不要将这些路径视为已完成 M2f 原生验收。
+v0.4.6 已经包含 Environment。请保留原 Environment 目录、服务所有者和 scope、
+Runtime 选择、私有凭据以及恢复记录；普通升级不需要删除配置或重新配对 Runner。
+升级到 v0.5 后，刷新 MCP 连接的工具 schema，并重新打开旧 App 阅读器，以使用新的
+规范工具名称。具体保留边界、旧安装迁移，以及“Desktop 已保存但 Environment 尚未
+配置”的 Tunnel profile 如何显式补齐，见[兼容性政策](compatibility-policy.md)。
+该 CLI 补齐路径会安装并启动 standalone 服务，不是仅保存配置的导入操作。
 
-对于用户所有的旧 Runner，请由原用户运行，并提供该用户私有的 user credential 文件：
+## 从 v0.4.6 之前的安装升级
 
-```bash
-webcodex environment migrate-legacy-runner \
-  --join https://server.example \
-  --project /home/alice/src/repo \
-  --token-file /home/alice/.config/webcodex/webcodex-user-token
-```
+v0.5 将正式发布的 v0.4.6 Environment 版本作为最低直接升级来源。pre-Environment Linux 安装以及官方 Windows v0.4.3 包不再由 v0.5 直接迁移。请先升级或迁移到 v0.4.6，确认 Environment 已正确接管原 Server/Runner 身份和服务，再从该 Environment 升级到 v0.5。
 
-只有命名 profile 才添加 `--profile NAME`。迁移只接受已知、带 owner 的 Runner 配置及其生成的用户 unit，复用现有 Runner 身份、项目 ID 和用户凭据，不会重新配对。不会推测无 owner 的 shared-key 配置或自定义 unit。
-
-对于 root 所有的固定 system Server unit/socket，请用原 Server 用户名、该用户私有的 API credential 文件和旧监听地址执行显式迁移：
-
-```bash
-webcodex environment migrate-legacy-server \
-  --user alice \
-  --token-file /home/alice/.config/webcodex/webcodex-user-token \
-  --listen 0.0.0.0:8080 \
-  --server-url http://127.0.0.1:8080
-```
-
-`--server-url` 可选；省略时 CLI 会从原监听地址推导本机 URL。此命令只迁移 Server，目标仅限已知的 systemd unit/socket 以及固定的环境和数据目录。独立配置的旧 Tunnel 仍归原 owner/profile 管理，不会由此迁入 Core。命令不会猜测自定义 unit、路径或 owner。妥善保护 credential 文件，不要用 Server bootstrap token 替代原用户的 API credential。
+这样历史安装形态只需要经过一个已发布的桥版本，不必让后续每个版本继续携带旧 systemd handoff 和 v0.4.3 package classifier。跨桥升级时不要删除或重建凭据；旧身份由 v0.4.6 负责导入，v0.5 只保留并升级生成后的 Environment 数据。
 
 ## Tunnel 配置
 
-使用 `webcodex environment configure-tunnel PROFILE --credentials-file PATH` 配置命名 Tunnel profile。受保护的 JSON 文件包含 `tunnel_id` 和 `api_key`；CLI 也支持通过隐藏终端输入提供凭据。使用 `webcodex environment tunnel-status PROFILE` 查看状态，或使用 `webcodex environment remove-tunnel PROFILE` 删除 profile。通过 `webcodex environment start tunnel --profile PROFILE`、`stop tunnel --profile PROFILE` 或 `restart tunnel --profile PROFILE` 管理指定 profile。请妥善保护凭据文件，并在使用后删除。
+持久本机 Server 推荐在创建时直接选择 Server owner：`webcodex environment configure-tunnel work --host embedded --credentials-file /secure/work.json`。受保护 JSON 只包含 `tunnel_id` 和 `api_key`，也可使用隐藏终端输入。该命令把精确 profile 与私有 local-MCP binding 写入 `EnvironmentStore`，绝不安装或启动 standalone Tunnel 服务，也不会 hot reload 或暗中重启正在工作的 Server。JSON 结果会返回 `server_restart_required` 和 `next_action`；可连续配置多个 profile，最后按提示只执行一次 `webcodex environment restart server`。Desktop 中对应 **Run with WebCodex Server (recommended)**，并显示同一个显式重启操作。
+
+只有明确需要独立 per-profile 服务时才使用 `--host standalone`；原有 `start|stop|restart tunnel --profile PROFILE` 生命周期保持不变。已有 profile 改 owner 仍必须在干净停止并卸载 standalone 服务后显式执行 `tunnel-host PROFILE --host ...`；配置流程不会自动接管 foreign 或 legacy 服务。使用 `tunnel-status PROFILE` 查看状态，使用 `remove-tunnel PROFILE` 删除 profile。
+
+持久模式下，CLI 与 Desktop 都以 `EnvironmentStore` 为唯一 profile catalog。历史 Desktop `secrets/tunnel-config.json` 只服务 legacy/non-persistent runtime；若它与持久 Environment 同时存在，只作为 fail-closed profile/Tunnel identity 栅栏，不再是第二套可写 catalog。历史 API-key 字节不会覆盖或阻止带 revision 栅栏的 EnvironmentStore key rotation。请妥善保护凭据文件，并在使用后删除。
 
 ## 服务与凭据
 
