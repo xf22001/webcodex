@@ -136,7 +136,7 @@ async fn result_app_descriptor_and_resource_exposure_require_ui_operator_capabil
     assert_eq!(MCP_RESULT_UI_RESOURCE_URI, "ui://webcodex/changes/v4");
     assert_eq!(
         MCP_WORK_RESULT_UI_RESOURCE_URI,
-        "ui://webcodex/work-result/v29"
+        "ui://webcodex/work-result/v31"
     );
     assert!(super::super::app_registry::resource_meta(None)["ui"]
         .get("domain")
@@ -2077,7 +2077,7 @@ async fn mcp_job_presentation_tracks_real_running_to_terminal_transition() {
     );
     assert_eq!(
         presentation(&unknown)["items"][0]["suggested_call"],
-        json!({"follow_up_kind": "fallback_recovery", "tool": "call_runtime_tool", "arguments": {"tool": "list_jobs", "arguments": {}}})
+        json!({"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}})
     );
 
     assert!(runtime.runner_registry.remove_job_record(&job_id).await);

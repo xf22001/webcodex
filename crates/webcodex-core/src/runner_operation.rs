@@ -585,6 +585,8 @@ pub enum RunnerBrowserOperationKind {
     Click,
     InputText,
     SelectOption,
+    SelectChoice,
+    SetDate,
     SetValue,
     UploadFile,
     Batch,
@@ -623,6 +625,8 @@ impl RunnerBrowserOperationKind {
             Self::Click => "browser_click",
             Self::InputText => "browser_input_text",
             Self::SelectOption => "browser_select_option",
+            Self::SelectChoice => "browser_select_choice",
+            Self::SetDate => "browser_set_date",
             Self::SetValue => "browser_set_value",
             Self::UploadFile => "browser_upload_file",
             Self::Batch => "browser_batch",
@@ -653,6 +657,8 @@ impl RunnerBrowserOperationKind {
             "browser_click" => Self::Click,
             "browser_input_text" => Self::InputText,
             "browser_select_option" => Self::SelectOption,
+            "browser_select_choice" => Self::SelectChoice,
+            "browser_set_date" => Self::SetDate,
             "browser_set_value" => Self::SetValue,
             "browser_upload_file" => Self::UploadFile,
             "browser_batch" => Self::Batch,
@@ -661,6 +667,26 @@ impl RunnerBrowserOperationKind {
             "browser_close" => Self::CloseBrowser,
             _ => return None,
         })
+    }
+
+    /// Composite widget actions require explicit support, including inside a batch.
+    /// Inspect the canonical operation field only; values never become operation names.
+    pub fn requires_complex_controls(self, payload: &serde_json::Value) -> bool {
+        match self {
+            Self::SelectChoice | Self::SetDate => true,
+            Self::Batch => payload
+                .get("operations")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|operations| {
+                    operations.iter().any(|operation| {
+                        matches!(
+                            operation.get("action").and_then(serde_json::Value::as_str),
+                            Some("select_choice" | "set_date")
+                        )
+                    })
+                }),
+            _ => false,
+        }
     }
 
     pub fn is_large_image(self) -> bool {
@@ -2437,6 +2463,30 @@ mod tests {
             expected_resource_sha256: "c".repeat(64),
             args: vec!["literal".to_string()],
         }
+    }
+
+    #[test]
+    fn skill_resource_structured_execution_metadata_is_valid() {
+        let request = skill_execution_request();
+        let operation = RunnerJobOperation::StartSkillResource(RunnerJobSkillResourceOperation {
+            job_id: "job-skill-resource-metadata".to_string(),
+            cwd: Some("/repo".to_string()),
+            request: request.clone(),
+            timeout_secs: 60,
+            context: structured_job_context(
+                Some("/repo"),
+                "run_skill_resource",
+                None,
+                None,
+                request.args.len(),
+                true,
+            ),
+        });
+        let metadata = operation
+            .expected_structured_execution()
+            .expect("Skill resource jobs retain structured execution metadata");
+        assert_eq!(metadata.execution_source, "run_skill_resource");
+        assert!(metadata.is_valid());
     }
 
     #[test]

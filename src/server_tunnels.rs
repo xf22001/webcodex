@@ -14,19 +14,9 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 use webcodex_environment::{
-    embedded_tunnel_profiles, write_embedded_tunnel_health, EmbeddedTunnelProfile,
+    embedded_tunnel_profiles, write_embedded_tunnel_observation, EmbeddedTunnelProfile, TunnelState,
 };
 use webcodex_openai_tunnel::ControlPlaneProxy;
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TunnelState {
-    Starting,
-    Running,
-    Draining,
-    Stopped,
-    Failed,
-}
 
 /// Only safe observations; no Tunnel IDs, proxy URLs, tokens, payloads or headers.
 #[derive(Clone, Debug, Serialize)]
@@ -60,6 +50,7 @@ impl TunnelStatus {
 
 #[derive(Default)]
 pub(crate) struct TunnelSupervisor {
+    cloudflare: Option<crate::cloudflare_ingress::CloudflareOwner>,
     profiles: Vec<EmbeddedTunnelProfile>,
     mcp_url: String,
     status: TunnelStatus,
@@ -101,10 +92,17 @@ impl TunnelSupervisor {
                 .collect(),
         )));
         Ok(Self {
+            cloudflare: None,
             profiles,
             mcp_url,
             status,
         })
+    }
+    pub(crate) fn attach_cloudflare(
+        &mut self,
+        owner: Option<crate::cloudflare_ingress::CloudflareOwner>,
+    ) {
+        self.cloudflare = owner;
     }
     pub(crate) fn status(&self) -> TunnelStatus {
         self.status.clone()
@@ -113,31 +111,33 @@ impl TunnelSupervisor {
     /// This future is polled alongside HTTP. Dropping it drops every profile owner,
     /// aborting its owned client and retaining its marker, never detaching a poller.
     pub(crate) async fn run(self, stop: watch::Receiver<bool>) {
-        let mut profiles = FuturesUnordered::new();
-        for (index, profile) in self.profiles.into_iter().enumerate() {
-            if profile.autostart {
-                profiles.push(run_profile(
-                    index,
-                    profile,
-                    self.mcp_url.clone(),
-                    self.status.clone(),
-                    stop.clone(),
-                ));
-            } else if write_embedded_tunnel_health(
-                &profile.readiness_path,
-                profile.runtime_revision,
-                false,
-                false,
-            )
-            .is_err()
-            {
-                self.status.update(index, |state| {
-                    state.state = TunnelState::Failed;
-                    state.diagnostic = Some("tunnel_health_unavailable".into());
-                });
+        let cloudflare_stop = stop.clone();
+        let cloudflare = self.cloudflare;
+        let openai = async move {
+            let mut profiles = FuturesUnordered::new();
+            for (index, profile) in self.profiles.into_iter().enumerate() {
+                if profile.autostart {
+                    profiles.push(run_profile(
+                        index,
+                        profile,
+                        self.mcp_url.clone(),
+                        self.status.clone(),
+                        stop.clone(),
+                    ));
+                } else if persist_status(&profile, &self.status, index).is_err() {
+                    self.status.update(index, |state| {
+                        state.state = TunnelState::Failed;
+                        state.diagnostic = Some("tunnel_health_unavailable".into());
+                    });
+                }
             }
-        }
-        while profiles.next().await.is_some() {}
+            while profiles.next().await.is_some() {}
+        };
+        tokio::join!(openai, async move {
+            if let Some(owner) = cloudflare {
+                owner.run(cloudflare_stop).await;
+            }
+        });
     }
 }
 
@@ -159,14 +159,7 @@ async fn run_profile(
     status: TunnelStatus,
     mut stop: watch::Receiver<bool>,
 ) {
-    if write_embedded_tunnel_health(
-        &profile.readiness_path,
-        profile.runtime_revision,
-        false,
-        false,
-    )
-    .is_err()
-    {
+    if persist_status(&profile, &status, index).is_err() {
         status.update(index, |state| {
             state.state = TunnelState::Failed;
             state.diagnostic = Some("tunnel_health_unavailable".into());
@@ -179,12 +172,7 @@ async fn run_profile(
             state.tunnel_ready = false;
             state.diagnostic = Some(code.to_string());
         });
-        let _ = write_embedded_tunnel_health(
-            &profile.readiness_path,
-            profile.runtime_revision,
-            false,
-            false,
-        );
+        let _ = persist_status(&profile, &status, index);
     };
     let proxy = match profile.proxy.as_ref() {
         Some(proxy) => ControlPlaneProxy::Explicit(proxy.expose().to_string()),
@@ -220,12 +208,7 @@ async fn run_profile(
             biased;
             _ = stopped(&mut stop) => {
                 status.update(index, |state| { state.state = TunnelState::Stopped; state.shutdown_outcome = Some("clean"); });
-                let _ = write_embedded_tunnel_health(
-                    &profile.readiness_path,
-                    profile.runtime_revision,
-                    false,
-                    false,
-                );
+                let _ = persist_status(&profile, &status, index);
                 return;
             }
             ready = probe_local_mcp(&probe, &mcp_url, profile.local_token.expose()) => if ready { break; },
@@ -269,12 +252,7 @@ async fn run_profile(
                     state.state = if reached_ready { TunnelState::Running } else { TunnelState::Starting };
                     state.tunnel_ready = ready; state.local_mcp_ready = local;
                 });
-                if write_embedded_tunnel_health(
-                    &profile.readiness_path,
-                    profile.runtime_revision,
-                    ready,
-                    local,
-                )
+                if persist_status(&profile, &status, index)
                 .is_err()
                 {
                     break Some("tunnel_health_unavailable".into());
@@ -286,12 +264,7 @@ async fn run_profile(
         state.state = TunnelState::Draining;
         state.tunnel_ready = false;
     });
-    let _ = write_embedded_tunnel_health(
-        &profile.readiness_path,
-        profile.runtime_revision,
-        false,
-        false,
-    );
+    let _ = persist_status(&profile, &status, index);
     let clean = tunnel.stop_with_outcome().await.is_ok();
     status.update(index, |state| {
         state.state = if clean && outcome.is_none() {
@@ -304,5 +277,22 @@ async fn run_profile(
         state.shutdown_outcome = Some(if clean { "clean" } else { "uncertain" });
         state.diagnostic = outcome.or_else(|| (!clean).then(|| "tunnel_restart_uncertain".into()));
     });
+    let _ = persist_status(&profile, &status, index);
     tracing::info!(profile = %profile.profile_id, clean_shutdown = clean, "Server-owned Tunnel stopped");
+}
+
+fn persist_status(
+    profile: &EmbeddedTunnelProfile,
+    status: &TunnelStatus,
+    index: usize,
+) -> webcodex_environment::SetupResultValue<()> {
+    let state = &status.snapshot()[index];
+    write_embedded_tunnel_observation(
+        &profile.readiness_path,
+        profile.runtime_revision,
+        state.state,
+        state.tunnel_ready,
+        state.local_mcp_ready,
+        state.diagnostic.as_deref(),
+    )
 }

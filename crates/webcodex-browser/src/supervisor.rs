@@ -18,6 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod reaper;
+use reaper::Reaper;
+
 // Keep non-image Browser observations below the Server's ordinary 256 KiB
 // Runner-result retention boundary, with explicit room for the Runner envelope.
 const MAX_BROWSER_OBSERVATION_RESULT_BYTES: usize = 192 * 1024;
@@ -31,6 +34,8 @@ const ACTION_STABILITY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub struct BrowserSupervisor {
+    // Stop and join the shared worker before the final owner drops Browser state.
+    reaper: Arc<Reaper>,
     inner: Arc<Mutex<SupervisorState>>,
     factory: Arc<dyn BackendFactory>,
     shutting_down: Arc<AtomicBool>,
@@ -102,6 +107,7 @@ impl BrowserSupervisor {
 
     pub fn attach_external(&self, attachment_id: &str) -> BrowserResult<BrowserSummary> {
         self.reject_if_shutting_down()?;
+        self.reaper.ensure_available()?;
         self.reap_expired();
         let mut state = self.operation_state()?;
         if state.browsers.len() >= MAX_BROWSERS {
@@ -130,12 +136,16 @@ impl BrowserSupervisor {
     }
 
     fn with_factory(factory: Arc<dyn BackendFactory>) -> Self {
+        let inner = Arc::new(Mutex::new(SupervisorState {
+            browsers: HashMap::new(),
+        }));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let reaper = Arc::new(Reaper::start(&inner, &shutting_down));
         Self {
-            inner: Arc::new(Mutex::new(SupervisorState {
-                browsers: HashMap::new(),
-            })),
+            reaper,
+            inner,
             factory,
-            shutting_down: Arc::new(AtomicBool::new(false)),
+            shutting_down,
             bridge: None,
         }
     }
@@ -148,6 +158,7 @@ impl BrowserSupervisor {
         // Shutdown admission must never wait behind a Browser operation that is
         // currently holding the runtime mutex while bounded CDP I/O completes.
         self.shutting_down.store(true, Ordering::Release);
+        self.reaper.stop();
     }
 
     pub fn list_browsers(&self) -> Vec<BrowserSummary> {
@@ -177,6 +188,7 @@ impl BrowserSupervisor {
 
     fn launch_mode(&self, profile: Option<&str>) -> BrowserResult<BrowserSummary> {
         self.reject_if_shutting_down()?;
+        self.reaper.ensure_available()?;
         self.reap_expired();
         let mut state = self.operation_state()?;
         if state.browsers.len() >= MAX_BROWSERS {
@@ -819,6 +831,42 @@ impl BrowserSupervisor {
         )
     }
 
+    pub fn select_choice(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        element_id: &str,
+        path: &[String],
+    ) -> BrowserResult<BrowserStability> {
+        self.touch_current(browser_id)?;
+        crate::types::validate_choice_path(path)?;
+        self.element_effect(
+            browser_id,
+            page_id,
+            element_id,
+            AdmittedBrowserAction::SelectChoice,
+            |backend, target, node| backend.select_choice(target, node, path),
+        )
+    }
+
+    pub fn set_date(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        element_id: &str,
+        value: &str,
+    ) -> BrowserResult<BrowserStability> {
+        self.touch_current(browser_id)?;
+        crate::types::validate_date_value(value)?;
+        self.element_effect(
+            browser_id,
+            page_id,
+            element_id,
+            AdmittedBrowserAction::SetDate,
+            |backend, target, node| backend.set_date(target, node, value),
+        )
+    }
+
     pub fn upload_file(
         &self,
         browser_id: &str,
@@ -887,13 +935,14 @@ impl BrowserSupervisor {
 
     pub fn shutdown_until(&self, deadline: Instant) -> BrowserShutdownReport {
         self.begin_shutdown();
+        self.reaper.join_until(deadline);
         let mut state = self.state();
-        let mut report = BrowserShutdownReport {
-            browsers: state.browsers.len(),
-            ..BrowserShutdownReport::default()
-        };
         let browsers = std::mem::take(&mut state.browsers);
         drop(state);
+        // Taking Browser state first fences worker registration of any runtimes
+        // removed before shutdown admission. No further reaping can start.
+        let mut report = self.reaper.take_report();
+        report.browsers = report.browsers.saturating_add(browsers.len());
         for (_, mut runtime) in browsers {
             let remaining = deadline
                 .saturating_duration_since(Instant::now())
@@ -937,18 +986,8 @@ impl BrowserSupervisor {
     }
 
     fn reap_expired(&self) {
-        let now = Instant::now();
         let mut state = self.state();
-        let expired_ids = state
-            .browsers
-            .iter()
-            .filter(|(_, runtime)| runtime.expired(now))
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        let expired = expired_ids
-            .into_iter()
-            .filter_map(|id| state.browsers.remove(&id))
-            .collect::<Vec<_>>();
+        let expired = state.take_expired(Instant::now());
         drop(state);
         for mut runtime in expired {
             let _ = runtime.backend.shutdown(SHUTDOWN_TIMEOUT);
@@ -974,7 +1013,6 @@ impl BrowserSupervisor {
             .get_mut(browser_id)
             .ok_or_else(|| stale_browser(browser_id))?;
         let target = runtime.page_target(page_id)?;
-        let deadline = Instant::now() + Duration::from_secs(20);
         let mut result = BatchResult {
             execution_state: ExecutionState::NotStarted,
             requested_count: operations.len(),
@@ -985,6 +1023,17 @@ impl BrowserSupervisor {
             stability: None,
             error: None,
         };
+        // Intrinsic arguments are independent of page state. Validate the whole
+        // request before dispatch so a malformed later widget cannot mutate an
+        // earlier native field and then fail as a partial batch.
+        for (index, operation) in operations.iter().enumerate() {
+            if let Err(error) = operation.validate() {
+                result.stopped_at_index = Some(index);
+                result.error = Some(error);
+                return Ok(result);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
         for (index, operation) in operations.iter().enumerate() {
             let attempt = (|| {
                 if Instant::now() >= deadline {
@@ -993,7 +1042,6 @@ impl BrowserSupervisor {
                         "batch dispatch budget exhausted",
                     ));
                 }
-                operation.validate()?;
                 let (element_id, action) = operation.authority();
                 let element = runtime.authorized_element(page_id, &target, element_id, action)?;
                 let node = element.backend_node_id;
@@ -1007,6 +1055,12 @@ impl BrowserSupervisor {
                     }
                     BatchOperation::SetValue { value, .. } => {
                         runtime.backend.set_value(&target, node, value)
+                    }
+                    BatchOperation::SelectChoice { choice_path, .. } => {
+                        runtime.backend.select_choice(&target, node, choice_path)
+                    }
+                    BatchOperation::SetDate { value, .. } => {
+                        runtime.backend.set_date(&target, node, value)
                     }
                     BatchOperation::UploadFile { path, .. } => {
                         runtime.backend.upload_file(&target, node, path)
@@ -1112,6 +1166,21 @@ impl BrowserSupervisor {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl SupervisorState {
+    fn take_expired(&mut self, now: Instant) -> Vec<BrowserRuntime> {
+        let expired_ids = self
+            .browsers
+            .iter()
+            .filter(|(_, runtime)| runtime.expired(now))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        expired_ids
+            .into_iter()
+            .filter_map(|id| self.browsers.remove(&id))
+            .collect()
     }
 }
 
@@ -1482,14 +1551,16 @@ fn matches_snapshot_query(
     fn contains(value: Option<&str>, needle: &str) -> bool {
         value.is_some_and(|value| value.to_lowercase().contains(&needle.to_lowercase()))
     }
-    let field = context
-        .is_some_and(|c| matches!(c.dom_tag.as_str(), "input" | "select" | "textarea"))
+    let field = node.capability.custom_choice
+        || node.capability.custom_date
+        || context.is_some_and(|c| matches!(c.dom_tag.as_str(), "input" | "select" | "textarea"))
         || matches!(
             node.role.as_str(),
             "textbox"
                 | "searchbox"
                 | "combobox"
                 | "checkbox"
+                | "listbox"
                 | "radio"
                 | "switch"
                 | "spinbutton"
@@ -1526,9 +1597,12 @@ fn matches_snapshot_query(
 #[cfg(test)]
 mod tests {
     mod batch;
+    mod campus_e2e;
     mod fill;
     mod frames;
+    mod lifecycle;
     mod query;
+    mod widgets;
     use super::*;
     use crate::cdp::{
         BackendConsoleEntry, BackendDiagnosticsSnapshot, BackendEventSnapshot, BackendFactory,
@@ -1580,6 +1654,7 @@ mod tests {
     }
 
     struct FakeBackend {
+        shutdown_probe: Option<lifecycle::ShutdownProbe>,
         query_nodes: Option<Vec<BackendNode>>,
         frame_state: Option<Arc<Mutex<String>>>,
         batch_probe: Option<Arc<Mutex<batch::BatchProbe>>>,
@@ -1606,6 +1681,7 @@ mod tests {
 
         fn with_snapshot_nodes(snapshot_node_count: usize) -> Self {
             Self {
+                shutdown_probe: None,
                 query_nodes: None,
                 frame_state: None,
                 batch_probe: None,
@@ -1682,6 +1758,13 @@ mod tests {
     }
 
     impl BrowserBackend for FakeBackend {
+        fn ownership(&self) -> crate::BrowserOwnership {
+            self.shutdown_probe
+                .as_ref()
+                .map(|probe| probe.ownership)
+                .unwrap_or(crate::BrowserOwnership::OwnedEphemeral)
+        }
+
         fn validate_frame_fence(&mut self, _target_id: &str, fence: &str) -> BrowserResult<()> {
             if self
                 .frame_state
@@ -2051,6 +2134,17 @@ mod tests {
         ) -> BrowserResult<()> {
             self.record_batch_effect(format!("value:{_backend_node_id}:{_value}"))
         }
+        fn select_choice(
+            &mut self,
+            _target_id: &str,
+            node: i64,
+            path: &[String],
+        ) -> BrowserResult<()> {
+            self.record_batch_effect(format!("choice:{node}:{}", path.join("/")))
+        }
+        fn set_date(&mut self, _target_id: &str, node: i64, value: &str) -> BrowserResult<()> {
+            self.record_batch_effect(format!("date:{node}:{value}"))
+        }
         fn upload_file(
             &mut self,
             _target_id: &str,
@@ -2091,7 +2185,10 @@ mod tests {
             self.pages.retain(|page| page.target_id != target_id);
             Ok(())
         }
-        fn shutdown(&mut self, _timeout: Duration) -> BrowserResult<()> {
+        fn shutdown(&mut self, timeout: Duration) -> BrowserResult<()> {
+            if let Some(probe) = &mut self.shutdown_probe {
+                return probe.shutdown(timeout);
+            }
             Ok(())
         }
     }
@@ -2440,6 +2537,22 @@ mod tests {
         assert_eq!(error.kind, "stale_element");
         assert_eq!(error.execution_state, ExecutionState::NotStarted);
         assert_eq!(error.recovery_action, Some("snapshot"));
+        let current = supervisor.pages(&browser.browser_id, 8).unwrap().remove(0);
+        assert_eq!(current.page_id, page.page_id);
+        let refreshed = supervisor
+            .snapshot(
+                &browser.browser_id,
+                &page.page_id,
+                SnapshotMode::Full,
+                MAX_SNAPSHOT_NODES,
+                DEFAULT_SNAPSHOT_DEPTH,
+            )
+            .unwrap();
+        let fresh_element = refreshed.nodes[0].element_id.as_ref().unwrap();
+        assert_ne!(fresh_element, &element);
+        supervisor
+            .click(&browser.browser_id, &page.page_id, fresh_element)
+            .unwrap();
     }
 
     #[test]
@@ -2469,6 +2582,22 @@ mod tests {
         assert_eq!(error.kind, "stale_element");
         assert_eq!(error.execution_state, ExecutionState::NotStarted);
         assert_eq!(error.recovery_action, Some("snapshot"));
+        let current = supervisor.pages(&browser.browser_id, 8).unwrap().remove(0);
+        assert_eq!(current.page_id, page.page_id);
+        let refreshed = supervisor
+            .snapshot(
+                &browser.browser_id,
+                &page.page_id,
+                SnapshotMode::Full,
+                MAX_SNAPSHOT_NODES,
+                DEFAULT_SNAPSHOT_DEPTH,
+            )
+            .unwrap();
+        let fresh_element = refreshed.nodes[0].element_id.as_ref().unwrap();
+        assert_ne!(fresh_element, &element);
+        supervisor
+            .click(&browser.browser_id, &page.page_id, fresh_element)
+            .unwrap();
     }
 
     #[test]

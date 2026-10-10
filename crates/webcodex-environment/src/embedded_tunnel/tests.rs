@@ -20,6 +20,8 @@ fn records(store: &EnvironmentStore, names: &[&str]) {
     let values: Vec<_> = names
         .iter()
         .map(|name| TunnelRecord {
+            configuration_id: None,
+            provider: crate::TunnelProvider::Openai,
             profile_id: (*name).into(),
             name: (*name).into(),
             host_mode: TunnelHostMode::Embedded,
@@ -151,6 +153,8 @@ fn duplicate_tunnel_identity_across_standalone_and_embedded_owners_fails_closed(
     let (_temp, store) = fixture();
     let records = vec![
         TunnelRecord {
+            configuration_id: None,
+            provider: crate::TunnelProvider::Openai,
             profile_id: "separate".into(),
             name: "Separate".into(),
             host_mode: TunnelHostMode::Standalone,
@@ -161,6 +165,8 @@ fn duplicate_tunnel_identity_across_standalone_and_embedded_owners_fails_closed(
             started: false,
         },
         TunnelRecord {
+            configuration_id: None,
+            provider: crate::TunnelProvider::Openai,
             profile_id: "server-owned".into(),
             name: "Server owned".into(),
             host_mode: TunnelHostMode::Embedded,
@@ -182,4 +188,73 @@ fn duplicate_tunnel_identity_across_standalone_and_embedded_owners_fails_closed(
     );
 
     assert!(embedded_tunnel_profiles(store.root()).is_err());
+}
+
+#[test]
+fn catalog_only_diagnosis_preserves_failure_without_inventing_owner_authority() {
+    let (_temp, store) = fixture();
+    records(&store, &["primary"]);
+    profile(&store, "primary", "tunnel_one", "private-fixture-key", None);
+    let path = store.root().join("server/tunnels/primary/readiness.json");
+    let backend = NativeEnvironment::new().unwrap();
+    assert_eq!(
+        backend
+            .diagnose_tunnel(&store, "primary")
+            .unwrap()
+            .readiness_status,
+        "missing_or_invalid"
+    );
+    write_embedded_tunnel_observation(
+        &path,
+        1,
+        TunnelState::Failed,
+        false,
+        false,
+        Some("tunnel_restart_uncertain"),
+    )
+    .unwrap();
+    let observed = backend.diagnose_tunnel(&store, "primary").unwrap();
+    assert_eq!(observed.observed_state, Some(TunnelState::Failed));
+    assert_eq!(
+        observed.diagnostic.as_deref(),
+        Some("tunnel_restart_uncertain")
+    );
+    assert_eq!(observed.readiness_status, "owner_unverified");
+    assert!(!observed.tunnel_ready && !observed.local_mcp_ready);
+    assert!(store.load_environment().unwrap().is_none());
+    assert!(!serde_json::to_string(&observed)
+        .unwrap()
+        .contains("private-fixture-key"));
+    assert!(backend.diagnose_tunnel(&store, "wrong").is_err());
+    write_embedded_tunnel_observation(
+        &path,
+        2,
+        TunnelState::Running,
+        true,
+        true,
+        Some("private-fixture-key"),
+    )
+    .unwrap();
+    let observed = backend.diagnose_tunnel(&store, "primary").unwrap();
+    assert_eq!(observed.readiness_status, "revision_mismatch");
+    assert_eq!(
+        observed.diagnostic.as_deref(),
+        Some("tunnel_protocol_failed")
+    );
+    assert!(!observed.tunnel_ready);
+    let mut health = crate::tunnel::read_tunnel_health(&path).unwrap();
+    let pid = health.service_pid.unwrap();
+    assert_eq!(
+        crate::tunnel::health_status(Some(&health), Some(2), Some(pid)),
+        "current"
+    );
+    assert_eq!(
+        crate::tunnel::health_status(Some(&health), Some(2), Some(pid + 1)),
+        "owner_pid_mismatch"
+    );
+    health.fresh = false;
+    assert_eq!(
+        crate::tunnel::health_status(Some(&health), Some(2), Some(pid)),
+        "stale"
+    );
 }

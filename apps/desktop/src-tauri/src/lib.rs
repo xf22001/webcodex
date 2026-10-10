@@ -73,6 +73,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             app.manage(AppState::new_resolved(data_dir, resource_dir)?);
             app.manage(desktop_shell::DesktopShellState::default());
             app.manage(tray::TrayPresentationCache::default());
+            platform::install_session_shutdown(app.handle())?;
             tray::setup(app.handle())?;
             tray::start_background_observer(app.handle());
 
@@ -124,6 +125,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             commands::add_runner_plugin,
             commands::update_runner_settings,
             commands::update_runner_allowed_roots,
+            commands::save_runner_job_concurrency,
             commands::restart_owned_runner,
             commands::open_powershell_install_guide,
             commands::get_launch_at_login,
@@ -145,6 +147,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             commands::authorize_runner_capabilities,
             commands::runner_capability_authorization,
             commands::tunnel_profile_action,
+            commands::cloudflare_connection,
             commands::inspect_project,
             commands::inspect_project_access,
             commands::configure_local_setup,
@@ -206,6 +209,7 @@ fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
             }
         }
         tauri::RunEvent::Exit => {
+            platform::stop_session_shutdown(app_handle);
             let state = app_handle.state::<AppState>();
             tauri::async_runtime::block_on(state.shutdown());
         }
