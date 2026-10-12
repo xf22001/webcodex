@@ -49,7 +49,7 @@ LaunchAgent 与 Windows 用户计划任务需要该用户保持登录。旧服�
 | `repair-user-credential [--token-file PATH]` | 核实并替换已保存用户凭据，不配对 Runner 或改变服务状态。 |
 | `repair-credential runner` | 通过隐藏输入修复 Windows SCM 账户凭据。 |
 
-完整命名空间（含 Tunnel profile、显式旧配置迁移和安装器升级/恢复）见 `webcodex environment --help`。公开环境命令支持 `--json` 和 `--environment-dir PATH`。不要将 token、配对码或服务密码放入命令行参数。配对兑换结果不确定时，先阅读恢复诊断，再显式通过 `resume --new-pairing-code --code-stdin` 提供替换码，不自动重放旧码。
+完整命名空间（含 Tunnel profile 和安装器升级/恢复）见 `webcodex environment --help`。早于 v0.4.6 的安装须先经过[兼容策略](compatibility-policy.md)规定的 v0.4.6 桥接；v0.5 不提供已移除的 pre-Environment Linux 迁移命令。公开环境命令支持 `--json` 和 `--environment-dir PATH`。不要将 token、配对码或服务密码放入命令行参数。配对兑换结果不确定时，先阅读恢复诊断，再显式通过 `resume --new-pairing-code --code-stdin` 提供替换码，不自动重放旧码。
 
 ### 项目 / 本地工作流
 
@@ -122,7 +122,7 @@ Runner 可执行文件是 `webcodex-runner`。其规范 CLI 生命周期命名�
 | --- | --- |
 | `webcodex runner init` | 手动生成 `runner.toml` 配置 |
 | `webcodex runner install` | 安装、启用并启动 Runner 服务 |
-| `webcodex runner run` | 前台运行 `webcodex-runner` |
+| `webcodex runner run` | 前台运行 `webcodex-runner`。省略 `--profile` 和 `--config` 时，由 `webcodex-runner` 自行解析配置。 |
 | `webcodex runner start` | 启动 hosted 后台 Runner 或已安装的 profile 服务 |
 | `webcodex runner stop` | 停止 |
 | `webcodex runner restart` | 重启 |

@@ -22,6 +22,14 @@ The rejection comes from the ChatGPT host or the conversation-level Developer MC
 
 Check the Runner and project state independently. If they remain available and the request did not reach WebCodex, retry in a conversation where ChatGPT admits Developer MCPs. No WebCodex configuration change is required solely because this host-side error appeared.
 
+## ChatGPT Dot
+
+ChatGPT Dot support is best-effort. It depends on the plugin capabilities ChatGPT exposes for that Dot, and WebCodex does not define Dot as incompatible. Accounts and Dots can differ: some call WebCodex normally, while others discover the plugin and then ask to hand the work to a local Codex or local task. This project does not have a stable public description of when a Dot may operate on local resources directly, so this page does not treat one of those behaviors as the contract.
+
+If a Dot lists the plugin but does not dispatch calls to WebCodex, delete that Dot, create it again, and add or authorize the WebCodex plugin once more. The difference can involve plugin state, a cache, or the capabilities saved when the Dot was created, and recreation has sometimes changed the behavior. Keep the existing ChatGPT authentication and permission settings; recreation does not require a WebCodex credential or configuration change.
+
+If the same behavior remains after recreation, add the steps to [issue #955](https://github.com/yyjeqhc/webcodex/issues/955). Those steps let us judge whether WebCodex itself can improve the case.
+
 ## ChatGPT: temporary `share`
 
 Explicit `share` is supported on Linux, macOS, and Windows and owns a temporary single-project environment for that foreground run. Windows x64 can use the managed default Cloudflare Quick Tunnel; Windows ARM64 needs a trusted explicit/PATH `cloudflared` because the pinned Cloudflare release publishes no official ARM64 artifact. Native OpenAI Tunnel supports both Windows x64 and arm64.
@@ -190,8 +198,10 @@ and fetch their sanitized trace/timing details only when expanded. The inline ca
 shows the canonical hashed Window key used by the Window activity ledger; the
 thread panel puts the same identity under Diagnostics, making
 support traces attributable without exposing the Host's raw Window identifier.
-New cards use `ui://webcodex/work-result/v17` so Hosts with cached older templates
-load the current thread-panel, lazy-detail and canonical tool-name contract.
+New cards use the Work Result resource URI advertised by the current descriptor,
+owned by the [canonical App registry](../src/mcp/app_registry/builtin.rs). Refresh
+Host schemas and reopen cached readers to load the current thread-panel, lazy-detail
+and canonical tool-name contract.
 Retired resource URIs fail closed instead of serving a new template under an old cache key.
 
 ## Existing Server
@@ -455,6 +465,14 @@ The removed ProjectConnector capability names (`task_start`, `files_read`, `edit
 
 ### Long work continues as Jobs
 
+Stateless MCP 2026 execution tools can opt in to `_wc.compact_execution=true`.
+This separates stable `output.execution` control facts from `output.details`
+(per item for `observe_jobs`) while retaining logs, recovery and collaboration
+obligations. Only `outcome=passed` proves successful execution; tool acceptance
+or a successful observation alone does not. It neither waits nor retries commands.
+See [Host execution control](experiments/host-execution-control.md) for supported
+tools, gateway placement, unknown outcomes and pending-chain design limits.
+
 `observe_jobs(summary_only=true)` is an opt-in presentation mode for proven successful
 structured validation Jobs. It removes routine passed-test and Cargo progress lines,
 while preserving test summaries, unknown text, warnings, validation evidence, lifecycle,
@@ -543,7 +561,7 @@ and execution keep the direct `load_skill` and `run_skill_resource` paths.
 The optional closeout helpers `check_workspace_hygiene` and `finish_coding_task`
 are model-visible gateway tools; review/coding catalogs still recommend them.
 
-Stateless MCP 2026 exposes common untrusted invocation metadata only through one optional closed `_wc` envelope. Depending on the tool, the envelope may admit `record`, `ack`, `ack_ref`, `resolve`, `reply`, `context`, and `control`. These are adapter metadata only: they never become canonical ToolCall business arguments or grant authority. Legacy flat root wrappers such as `recording_session_id`, `ack_session_message_ids`, `ack_ref`, `session_message_resolution`, `window_reply`, `context_request`, and `_control` are rejected on this Stateless 2026 surface; legacy/non-stateless transports keep their existing contracts. `call_runtime_tool` carries `_wc` only on the outer gateway call; the nested target `arguments` remain canonical business arguments and reject a second `_wc`.
+Stateless MCP 2026 exposes common untrusted invocation metadata only through one optional closed `_wc` envelope. Depending on the tool, the envelope may admit `record`, `ack`, `ack_ref`, `resolve`, `reply`, `context`, `control`, and `compact_execution`. These are adapter metadata only: they never become canonical ToolCall business arguments or grant authority. Legacy flat root wrappers such as `recording_session_id`, `ack_session_message_ids`, `ack_ref`, `session_message_resolution`, `window_reply`, `context_request`, and `_control` are rejected on this Stateless 2026 surface; legacy/non-stateless transports keep their existing contracts. `call_runtime_tool` carries `_wc` only on the outer gateway call; the nested target `arguments` remain canonical business arguments and reject a second `_wc`.
 
 `WEBCODEX_MCP_COMPACT_SCHEMAS` defaults to `true`. Compact `tools/list` omits
 `outputSchema` and projects shorter MCP-specific tool/input descriptions for

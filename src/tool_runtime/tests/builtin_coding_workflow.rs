@@ -203,6 +203,10 @@ fn direct_strategy_prefers_structured_edits_and_coalesces_known_work() {
         "result-dependent operations sequential",
         "direct primitive",
         "predetermined independent observations",
+        "fixed read-only CLI",
+        "run_shell with exit checks",
+        "One literal command: run_process",
+        "never rename or transform binaries via text edits",
         "bounded targeted reads",
         "small files/count search",
         "Avoid ritual",
@@ -265,6 +269,8 @@ fn host_code_mode_strategy_is_bounded_guidance_only() {
         "project_validate with scope.packages",
         "one edit_project_files batch",
         "do not Promise.all same-kind micro-calls",
+        "Read-only CLI: one bounded run_shell with exit checks, no effects",
+        "Never per-Job waits, Promise.race",
         "Independent cross-tool read-only observations",
         "Promise.allSettled",
         "partial evidence",
@@ -318,6 +324,57 @@ fn host_code_mode_strategy_is_bounded_guidance_only() {
     direct.as_object_mut().unwrap().remove("tool_strategy");
     host.as_object_mut().unwrap().remove("tool_strategy");
     assert_eq!(direct, host);
+}
+
+#[test]
+fn host_code_mode_guidance_preserves_attention_when_compacting_model_output() {
+    use crate::tool_runtime::tool_inputs::CodingGuidanceProfile;
+    let host = builtin_coding_workflow_projection(CodingGuidanceProfile::HostCodeMode);
+    let direct = builtin_coding_workflow_projection(CodingGuidanceProfile::Direct);
+    validate_schema_instance_for_test(&host, &workflow_schema()).unwrap();
+
+    let strategy = strategy_text(&host);
+    for field in [
+        "session_attention",
+        "operator_messages",
+        "peer_messages",
+        "job_attention",
+    ] {
+        assert!(
+            strategy.contains(field),
+            "missing Host attention guidance for {field}"
+        );
+        assert!(
+            !strategy_text(&direct).contains(field),
+            "Host-only output instructions leaked into Direct: {field}"
+        );
+    }
+    for boundary in [
+        "nonempty",
+        "text(...)",
+        "never drop",
+        "emit compact evidence",
+        "model guidance only",
+    ] {
+        assert!(
+            strategy.contains(boundary),
+            "missing output boundary: {boundary}"
+        );
+    }
+
+    // A Host projection is not a Server receipt. The protocol and Direct
+    // workflow remain unchanged; only the Host tool strategy gains guidance.
+    let mut host_without_strategy = host;
+    let mut direct_without_strategy = direct;
+    host_without_strategy
+        .as_object_mut()
+        .unwrap()
+        .remove("tool_strategy");
+    direct_without_strategy
+        .as_object_mut()
+        .unwrap()
+        .remove("tool_strategy");
+    assert_eq!(host_without_strategy, direct_without_strategy);
 }
 
 #[test]

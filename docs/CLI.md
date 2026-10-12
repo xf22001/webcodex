@@ -54,7 +54,7 @@ services. [Lifecycle and compatibility details](implementation/personal-environm
 | `repair-user-credential [--token-file PATH]` | Verify and replace the saved user credential without pairing or changing service state. |
 | `repair-credential runner` | Repair Windows SCM account credentials through hidden input. |
 
-Use `webcodex environment --help` for the complete namespace, including Tunnel profiles, explicit legacy migrations, and installer upgrade/recovery commands. Public environment commands support `--json` and `--environment-dir PATH`. Do not put tokens, pairing codes, or service passwords in command arguments. When pairing redemption is uncertain, read the recovery diagnostic before explicitly supplying a replacement through `resume --new-pairing-code --code-stdin`; do not replay the old code automatically.
+Use `webcodex environment --help` for the complete namespace, including Tunnel profiles and installer upgrade/recovery commands. For installations older than v0.4.6, first use the v0.4.6 bridge described in the [compatibility policy](compatibility-policy.md); v0.5 does not provide the removed pre-Environment Linux migration commands. Public environment commands support `--json` and `--environment-dir PATH`. Do not put tokens, pairing codes, or service passwords in command arguments. When pairing redemption is uncertain, read the recovery diagnostic before explicitly supplying a replacement through `resume --new-pairing-code --code-stdin`; do not replay the old code automatically.
 
 ### Local unified updates (Linux terminal)
 
@@ -181,7 +181,7 @@ service. `webcodex` and `webcodex-runner` remain separate executables.
 | --- | --- |
 | `webcodex runner init` | Generate a `runner.toml` config manually |
 | `webcodex runner install` | Install, enable, and start the Runner service |
-| `webcodex runner run` | Run `webcodex-runner` in the foreground |
+| `webcodex runner run` | Run `webcodex-runner` in the foreground. Omitting `--profile` and `--config` leaves config resolution to `webcodex-runner`. |
 | `webcodex runner start` | Start a hosted background Runner or installed profile service |
 | `webcodex runner stop` | Stop it |
 | `webcodex runner restart` | Restart it |

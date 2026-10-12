@@ -16,6 +16,26 @@ use crate::metadata::{
 use webcodex_core::authority::SCOPE_JOB_DETACH;
 
 pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
+    require_all_scopes(
+        permission_risk(
+            adaptive_runtime_direct(
+                model_spec(
+                    def("project_format", super::ToolAuditPolicy::TYPED_CANONICAL,
+                        ModelVisible, TOOL_CATEGORY_EXECUTION, Some(super::RunnerCapabilityRequirement::ProjectFormat),
+                        TOOL_PROVIDER_RUNNER,
+                        super::ToolSemanticContract { effect: super::ToolEffect::Mutate,
+                            risk: crate::metadata::ToolRisk::ProjectWrite,
+                            approval: super::ToolApprovalPolicy::Standard,
+                            idempotency: super::ToolIdempotency::NonIdempotent },
+                        Some(crate::metadata::PROJECT_WRITE), true, NoPath, true, true,
+                        super::ToolSessionEvidencePolicy::NONE),
+                    "Intentionally format 1..8 ordered Project-relative source files under one Runner-resolved recipe root. Requires project:write, job:run and project_format_v1. Rust uses bounded Cargo edition and installed rustfmt stdin/stdout with skip_children; custom configuration and unsupported topology fail closed. Python uses bounded pyproject target-version and isolated Ruff stdin/stdout; extend configuration and unsupported topology fail closed. No workspace traversal, installs, package scripts, arbitrary flags or implied network permission. Candidate bytes stay private; Runner compares source and file identity before each guarded write. A multi-file write is not atomic: failure, cancellation, timeout, conflicting edits or a lost receipt can leave mutation unknown. Known state_changed comes only from the verified executor report, never exit status. One admitted Job owns every phase; retain and observe its exact continuation when pending or uncertain. Never automatically retry or redispatch. Review source before any new mutation. Formatting does not supply the edit_project_files receipt required by Code Mode dependent validation.",
+                ).with_execution(super::ToolExecutionContract::new(super::ToolExecutionForm::ProjectFormat,
+                    super::ToolExecutionLifetime::Runner, super::ToolExecutionStart::SyncFirst,
+                    super::ToolExecutionContinuation::ObserveJobs)),
+                93, super::ToolDirectReason::CoreWorkflow),
+            super::PERMISSION_RISK_WRITE),
+        &[crate::metadata::PROJECT_WRITE, JOB_RUN]),
     adaptive_runtime_direct(
         model_spec(
         def("write_job_input", super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -516,7 +536,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
         ),
         "Recovery and inventory primitive for caller-visible Jobs, not the normal continuation step. Do not call list_jobs when the initiating pending result already provides an exact continuation or passive attention already identifies the execution; retain that continuation and continue independent work, using observe_jobs only when logs/details/recovery are needed. Use list_jobs when exact Job identity was lost, unknown_job explicitly requests inventory recovery, the user asks to enumerate background work, or multiple historical/parallel Jobs must be inspected. Exact project/session_id filters are preferred when known and combine with status using AND semantics. stdout/stderr bodies are never included; exact Job logs belong to observe_jobs.",
     ), 79, super::ToolDirectReason::CoreWorkflow),
-    model_spec(
+    adaptive_runtime_direct(model_spec(
             def(
                 "present_job_terminal_continuation",
                 super::ToolAuditPolicy::typed_fields(&[
@@ -527,7 +547,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
                     super::ToolAuditResultField::pointer("automatic_resume_available", "/job_terminal_continuation/automatic_resume_available"),
                     super::ToolAuditResultField::value("error_kind"),
                 ]),
-                ModelHidden,
+                ModelVisible,
                 TOOL_CATEGORY_JOB,
                 None,
                 TOOL_PROVIDER_NATIVE,
@@ -544,8 +564,8 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Present one exact caller-owned still-waiting Job terminal wait as a bounded MCP App continuation card. Use this only as the final meaningful action when progress is blocked on that terminal transition; after successful presentation, yield/end the current model turn promptly so a later Host follow-up can create a fresh turn. An already-triggered wait should be handled in the current turn instead. Requires explicit wait_id, independently re-authorizes the wait and underlying Job visibility, never infers identity from Project, Session, ClientWindow, peer identity, credential, or recent activity, and never changes Job execution or terminal truth.",
-        ),
+            "Present one exact caller-owned still-waiting Job terminal wait as a bounded MCP App continuation card through this dedicated callable, not call_runtime_tool. Use this only when no independent work remains and progress is blocked on that terminal transition. After successful presentation, produce a normal final assistant response and let the current turn finalize promptly; the card/tool result alone does not end the assistant turn. Do not keep polling or wait for the later follow-up in that presenting turn. An already-triggered wait should be handled in the current turn instead. Requires explicit wait_id, independently re-authorizes the wait and underlying Job visibility, never infers identity from Project, Session, ClientWindow, peer identity, credential, or recent activity, and never changes Job execution or terminal truth. Automatic readiness requires a separately verified unattended Host and an exact live authorized binding; dispatch acceptance is not a fresh turn or completed consume. Uncertain delivery is not permission to resend or retry execution.",
+        ), 78, super::ToolDirectReason::Continuation),
 
     def(
         "bind_job_terminal_continuation",

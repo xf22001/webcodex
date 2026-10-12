@@ -1350,6 +1350,99 @@ def _metric_distribution(values: list[int], *, missing: int = 0) -> dict[str, An
     }
 
 
+# Optional additive ModelErgonomics v13 output metrics. The producer persists
+# only numeric counters; raw file text, Job logs, paths and correlation ids stay
+# out of the Audit report. Nested Code Mode calls are not individual outer rows.
+_OUTPUT_TRANSFER_FIELDS = {
+    "read_files": (
+        "items", "text_bytes",
+        "identical_same_path_text_items", "identical_same_path_text_bytes",
+    ),
+    "observe_jobs": (
+        "items", "baseline_items", "delta_items", "reset_items",
+        "unchanged_items", "baseline_log_bytes", "delta_log_bytes",
+        "reset_log_bytes", "unchanged_log_bytes",
+    ),
+}
+_MAX_TRANSFER_FIELD = 8 * 1024 * 1024
+
+
+def _valid_output_transfer(tool: str, telemetry: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(telemetry, dict):
+        return None
+    version = telemetry.get("schema_version")
+    facts = telemetry.get("output_transfer")
+    if (
+        type(version) is not int
+        or version < 13
+        or telemetry.get("tool_name") != tool
+        or telemetry.get("success") is not True
+        or not isinstance(facts, dict)
+        or facts.get("kind") != tool
+    ):
+        return None
+    fields = _OUTPUT_TRANSFER_FIELDS[tool]
+    values = {name: facts.get(name) for name in fields}
+    if any(type(value) is not int or not 0 <= value <= _MAX_TRANSFER_FIELD for value in values.values()):
+        return None
+    if not 1 <= values["items"] <= 8:
+        return None
+    if tool == "read_files":
+        if (
+            values["identical_same_path_text_items"] > values["items"]
+            or values["identical_same_path_text_bytes"] > values["text_bytes"]
+        ):
+            return None
+    elif (
+        sum(values[name] for name in ("baseline_items", "delta_items", "reset_items", "unchanged_items"))
+        != values["items"]
+    ):
+        return None
+    return values
+
+
+def _summarize_output_transfer(
+    outer: list[dict[str, Any]], *, action_audit_available: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    summary: dict[str, Any] = {}
+    availability: dict[str, Any] = {}
+    for tool, fields in _OUTPUT_TRANSFER_FIELDS.items():
+        relevant = [
+            event for event in outer if event.get("operation") == tool
+        ] if action_audit_available else []
+        observed = []
+        for event in relevant:
+            facts = _valid_output_transfer(tool, _telemetry(event))
+            if facts is not None:
+                observed.append(facts)
+        metrics = {
+            name: _metric_distribution(
+                [facts[name] for facts in observed],
+                missing=len(relevant) - len(observed) if action_audit_available else 1,
+            )
+            for name in fields
+        }
+        if not relevant:
+            # Neither no calls nor trace-only input proves a measured zero.
+            for metric in metrics.values():
+                metric["total"] = None
+        summary[tool] = {
+            "calls": len(relevant) if action_audit_available else None,
+            "measured_calls": len(observed) if action_audit_available else None,
+            "metrics": metrics,
+        }
+        complete = action_audit_available and bool(relevant) and len(observed) == len(relevant)
+        availability[tool] = {
+            "available": complete,
+            "reason": None if complete else (
+                "no ActionAudit tool-call evidence" if not action_audit_available
+                else "no matching outer tool calls" if not relevant
+                else "one or more outer calls lack complete payload-free output transfer counters"
+            ),
+        }
+    return summary, availability
+
+
 def _summarize_code_mode_composition(
     outer: list[dict[str, Any]],
     variant: str | None,
@@ -1434,10 +1527,11 @@ def _audit_sort_key(event: dict[str, Any]) -> tuple[int, str]:
 def _window_timing(
     outer: list[dict[str, Any]],
     continuity_events: list[dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any], int, int]:
+) -> tuple[dict[str, Any], int, int, dict[str, dict[str, Any]]]:
     selected_ids = {str(event["event_id"]) for event in outer}
     previous: dict[tuple[str, str, str], dict[str, Any]] = {}
     gaps: list[int] = []
+    gap_pairs: dict[tuple[str, str], list[int]] = {}
     missing_serial = 0
     overlap_count = 0
     source = continuity_events if continuity_events is not None else outer
@@ -1470,12 +1564,28 @@ def _window_timing(
                 and isinstance(previous_handed, int)
                 and current_started >= previous_handed
             ):
-                gaps.append(current_started - previous_handed)
+                gap = current_started - previous_handed
+                gaps.append(gap)
+                earlier_tool = predecessor.get("operation")
+                later_tool = event.get("operation")
+                if (isinstance(earlier_tool, str) and earlier_tool
+                        and isinstance(later_tool, str) and later_tool):
+                    gap_pairs.setdefault((earlier_tool, later_tool), []).append(gap)
             else:
                 missing_serial += 1
         if event.get("window_continuity_eligible") is True:
             previous[key] = event
-    return _metric_distribution(gaps, missing=missing_serial), overlap_count, missing_serial
+    # Only persisted operation names are exposed, never Window/principal identity.
+    # Limit cardinality and keep the heaviest observed gaps first. Incomplete
+    # chains remain incomplete in the overall gap distribution above.
+    ranked_pairs = sorted(
+        gap_pairs.items(), key=lambda item: (-sum(item[1]), item[0])
+    )[:10]
+    by_pair = {
+        f"{earlier} -> {later}": _metric_distribution(values)
+        for (earlier, later), values in ranked_pairs
+    }
+    return _metric_distribution(gaps, missing=missing_serial), overlap_count, missing_serial, by_pair
 
 
 def _summarize_host_short_chains(
@@ -1620,6 +1730,9 @@ def _summarize_audit(
     runtime_duration = _metric_distribution(runtime_durations, missing=len(outer) - len(runtime_durations))
     result_bytes = [int(value["serialized_result_bytes"]) for _, value in present_telemetries if isinstance(value.get("serialized_result_bytes"), int) and value["serialized_result_bytes"] >= 0]
     result_byte_metric = _metric_distribution(result_bytes, missing=len(outer) - len(result_bytes))
+    output_transfer, output_transfer_availability = _summarize_output_transfer(
+        outer, action_audit_available=True
+    )
 
     failure_kinds: Counter[str] = Counter()
     recovery_guidance: Counter[str] = Counter()
@@ -1650,7 +1763,7 @@ def _summarize_audit(
         if isinstance(tool_name, str) and tool_name:
             edit_outcomes_by_tool.setdefault(tool_name, Counter())[outcome] += 1
 
-    gaps, overlap_count, missing_serial = _window_timing(outer, continuity_events)
+    gaps, overlap_count, missing_serial, gap_pairs = _window_timing(outer, continuity_events)
     host_short_chain, host_short_chain_availability = _summarize_host_short_chains(
         outer, continuity_events
     )
@@ -1703,9 +1816,11 @@ def _summarize_audit(
             "webcodex_service_ms": service,
             "tool_runtime_ms": runtime_duration,
             "outside_webcodex_gap_ms": gaps,
+            "outside_webcodex_gap_by_tool_pair": gap_pairs,
             "overlap_count": overlap_count,
         },
         "results": {"serialized_tool_result_bytes": result_byte_metric},
+        "output_transfer": output_transfer,
         "failures": {
             "error_kind_by_name": dict(sorted(error_kinds.items())),
             "failure_kind_by_name": dict(sorted(failure_kinds.items())),
@@ -1715,6 +1830,7 @@ def _summarize_audit(
         },
         "availability": {
             "action_audit": {"available": True},
+            "output_transfer": output_transfer_availability,
             "model_round_trips": {
                 "available": False,
                 "reason": "ActionAudit records meaningful outer tool calls but not the model response/turn identity needed to prove exact model round trips",
@@ -1796,7 +1912,11 @@ def _summarize_trace_only(trace_events: list[dict[str, Any]], variant: str | Non
     composition, composition_availability = _summarize_code_mode_composition(
         [], variant, action_audit_available=False
     )
+    output_transfer, output_transfer_availability = _summarize_output_transfer(
+        [], action_audit_available=False
+    )
     unavailable = {
+        "output_transfer": output_transfer_availability,
         "webcodex_service_timing": {"available": False, "reason": "tool_handler_returned duration is not the canonical request-observed to response-handoff service interval"},
         "tool_runtime_timing": {"available": False, "reason": "events.jsonl does not persist canonical ModelErgonomics runtime duration evidence"},
         "window_timing": {"available": False, "reason": "events.jsonl does not persist canonical meaningful/continuity transition facts"},
@@ -1835,9 +1955,11 @@ def _summarize_trace_only(trace_events: list[dict[str, Any]], variant: str | Non
             "webcodex_service_ms": _metric_distribution([], missing=len(handlers)),
             "tool_runtime_ms": _metric_distribution([], missing=len(handlers)),
             "outside_webcodex_gap_ms": _metric_distribution([]),
+            "outside_webcodex_gap_by_tool_pair": {},
             "overlap_count": None,
         },
         "results": {"serialized_tool_result_bytes": _metric_distribution([], missing=len(handlers))},
+        "output_transfer": output_transfer,
         "failures": {"error_kind_by_name": {}, "failure_kind_by_name": {}, "recovery_guidance_by_kind": {}, "child_failure_kind_by_name": None, "resolved_recoveries": None},
         "availability": {
             "action_audit": {"available": False, "reason": "no ActionAudit DB evidence was provided"},
@@ -1897,6 +2019,64 @@ def _job_summary(trace_events: list[dict[str, Any]], trace_root_present: bool) -
         {"runner_job_ids_observed": len(job_ids) if trace_root_present else None, "handoffs": None, "terminal": None},
         {"available": False, "reason": "runner_job_id may be allocated before synchronous completion and does not prove a same-execution model-visible handoff or terminal observation"},
     )
+
+
+def _summarize_result_bytes_by_tool(
+    audit_events: list[dict[str, Any]],
+    *,
+    action_audit_available: bool,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Group existing outer ToolResult sizes by the existing ActionAudit tool key.
+
+    The report consumes only canonical numeric telemetry. No tool arguments,
+    result payloads, paths, identities or fingerprints are materialized.
+    """
+    if not action_audit_available:
+        return {}, {
+            "available": False,
+            "reason": "trace-only events do not provide canonical ToolResult byte sizes",
+            "unattributed_calls": None,
+        }
+
+    calls: Counter[str] = Counter()
+    measured: dict[str, list[int]] = {}
+    unattributed_calls = 0
+    selected_calls = 0
+    for event in audit_events:
+        if event.get("action_name") != "toolsCall":
+            continue
+        selected_calls += 1
+        tool = event.get("operation")
+        if not isinstance(tool, str) or not tool:
+            unattributed_calls += 1
+            continue
+        calls[tool] += 1
+        telemetry = _telemetry(event)
+        value = telemetry.get("serialized_result_bytes") if isinstance(telemetry, dict) else None
+        if type(value) is int and 0 <= value <= (1 << 64) - 1:
+            measured.setdefault(tool, []).append(value)
+
+    by_tool = {
+        tool: _metric_distribution(
+            measured.get(tool, []),
+            missing=calls[tool] - len(measured.get(tool, [])),
+        )
+        for tool in sorted(calls)
+    }
+    complete = bool(selected_calls) and unattributed_calls == 0 and all(
+        metric["missing"] == 0 for metric in by_tool.values()
+    )
+    reason = (
+        None if complete
+        else "no selected ActionAudit tool-call records" if not selected_calls
+        else "one or more outer calls lack a tool name" if unattributed_calls
+        else "one or more calls lack a valid unsigned serialized ToolResult byte count"
+    )
+    return by_tool, {
+        "available": complete,
+        "reason": reason,
+        "unattributed_calls": unattributed_calls,
+    }
 
 
 def _is_exact_hex(value: Any, length: int) -> bool:
@@ -2112,6 +2292,11 @@ def summarize(*, trace_root: Path | None, audit_db: Path | None, workflow_sessio
     annotation = load_run_annotation(run_annotation) if run_annotation is not None else None
     annotated = _annotation_projection(annotation, benchmark)
     core["availability"].update(annotated["availability"])
+    by_tool_bytes, by_tool_availability = _summarize_result_bytes_by_tool(
+        audit_events, action_audit_available=audit_db is not None
+    )
+    core["results"]["serialized_tool_result_bytes_by_tool"] = by_tool_bytes
+    core["availability"]["serialized_tool_result_bytes_by_tool"] = by_tool_availability
     core["availability"]["native_batch_usage"] = {
         "available": False,
         "reason": "current payload-safe ActionAudit composition does not persist native batch item counts",
@@ -2137,6 +2322,8 @@ def summarize(*, trace_root: Path | None, audit_db: Path | None, workflow_sessio
             "Runner request counts are observed enqueue events, not an asserted complete total",
             "repair_turns come only from the bounded run annotation sidecar and are never inferred from model text or private reasoning",
             "task_wall_time_ms is reported only when the sidecar supplies explicit independent task start/end timestamps",
+            "output_transfer counts rendered text/log UTF-8 bytes, not JSON escaping, network overhead, tokens or cross-call duplication; Job reset tails can be required recovery evidence",
+            "output_transfer covers only measured outer read_files/observe_jobs; nested Code Mode child transfers are not individually attributable",
             "job_scheduling.pending_then_independent_work counts only exact immediate serial follow-up calls from a conservative read/review allowlist; generic process/script work is not inferred to be independent",
             "job_scheduling.deadline_then_nearby_rewait counts only exact serial readiness adjacency within the reported nearby_rewait_max_gap_ms; it does not prove one Host turn or the same blocked Job set",
         ],
