@@ -1,5 +1,7 @@
 use super::client_handoff_service::{copy_text_to_clipboard, mcp_url, ClipboardCopyOutcome};
-use super::openai_tunnel_service::{prepare_openai_tunnel, start_openai_tunnel_with_stop};
+use super::openai_tunnel_service::{
+    prepare_openai_tunnel, start_openai_tunnel_with_stop, OpenAiTunnelRecovery,
+};
 use super::setup_service::create_private_dir;
 use super::ProductError;
 use serde_json::{json, Value};
@@ -58,6 +60,7 @@ async fn run_regular_server_tunnel_inner(
     stop: impl Future<Output = ()>,
 ) -> Result<(), ProductError> {
     let local_server_url = validate_local_server_url(&options.local_server_url)?;
+    let startup_clock = Instant::now();
     let session = RegularTunnelSession::create(&options.runtime_parent)?;
     // The parent lease covers preparation and connection startup too. Waiting
     // until readiness to observe EOF can leave the owner fenced on Windows exit.
@@ -79,6 +82,7 @@ async fn run_regular_server_tunnel_inner(
         &prerequisites,
         &mcp_endpoint,
         &options.bootstrap_token,
+        OpenAiTunnelRecovery::Durable,
         deadline,
         &mut stop,
     )
@@ -92,6 +96,14 @@ async fn run_regular_server_tunnel_inner(
     let managed = std::env::var("WEBCODEX_TUNNEL_PROFILE_ID").is_ok();
     let clipboard = copy_text_to_clipboard(&prerequisites.tunnel_id, !managed).await;
     let mut ready = machine_regular_tunnel_ready_event(clipboard);
+    let health = tunnel.health();
+    let poll_details = health.initial_poll_details();
+    ready["startup_timings_ms"] = json!({
+        "cli_total": startup_clock.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        "initial_poll": health.initial_poll_ms(),
+        "poll_attempts": poll_details.map(|(attempts, _)| attempts),
+        "poll_request_ms": poll_details.map(|(_, request_ms)| request_ms),
+    });
     ready["runtime"] = json!({
         "directory": session.directory,
         "local_mcp_url": mcp_url(&local_server_url),

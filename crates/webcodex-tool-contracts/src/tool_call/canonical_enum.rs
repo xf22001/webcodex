@@ -1535,7 +1535,7 @@ pub enum ToolCall {
     },
 
     /// Run one portable project build. The Runner resolves the nearest supported
-    /// Rust/Go recipe, plans canonical argv, and admits one typed build Job.
+    /// Rust/Go/Python recipe, plans canonical argv, and admits one typed build Job.
     ProjectBuild {
         /// Exact registered Runner Project.
         project: String,
@@ -1544,7 +1544,7 @@ pub enum ToolCall {
         /// Project-relative directory; Runner resolves the nearest recipe root.
         #[serde(default)]
         cwd: Option<String>,
-        /// Omission means auto. Rust and Go are supported; Node/Python return unavailable.
+        /// Omission means auto. Supports Rust, Go, Python packaging and manifest-declared Node build scripts.
         #[serde(default)]
         adapter: Option<webcodex_core::project_build::ProjectBuildAdapter>,
         /// Optional portable scope: bounded explicit packages or all_packages=true, never both.
@@ -1554,6 +1554,10 @@ pub enum ToolCall {
         /// repairing dependency selection state; it does not imply offline execution.
         #[serde(default)]
         dependency_policy: Option<webcodex_core::project_build::ProjectDependencyPolicy>,
+        /// Rust-only Cargo dependency fetching (not an OS/network sandbox).
+        #[serde(default)]
+        dependency_resolution_policy:
+            Option<webcodex_core::project_build::ProjectDependencyResolutionPolicy>,
         /// Total build execution budget, default 1800 seconds, clamped to 7 days.
         /// Host handoff timing never extends this budget or starts a second build.
         #[serde(default)]
@@ -1571,6 +1575,9 @@ pub enum ToolCall {
         /// Project-relative directory; nearest recipe root is resolved on Runner.
         #[serde(default)]
         cwd: Option<String>,
+        /// check uses Runner priority (check/typecheck/lint); lint selects only the
+        /// Node lint script with check identity, or Rust Clippy with distinct lint evidence.
+        /// Rust lint fixes --all-targets -- -D clippy::correctness; offline policy is unsupported.
         action: webcodex_core::project_validation::ProjectValidationAction,
         /// Omission means auto. Rust and Go are supported; Python supports test through pytest and
         /// check/format_check through project-local Ruff with explicit target-version.
@@ -1586,6 +1593,10 @@ pub enum ToolCall {
         /// repairing dependency selection state; it does not imply offline execution.
         #[serde(default)]
         dependency_policy: Option<webcodex_core::project_validation::ProjectDependencyPolicy>,
+        /// Cargo dependency fetching only (not an OS network sandbox).
+        #[serde(default)]
+        dependency_resolution_policy:
+            Option<webcodex_core::project_validation::ProjectDependencyResolutionPolicy>,
         /// Test-only selector and count postconditions. Rust uses a libtest substring,
         /// Go uses native -run regexp, and Python pytest uses -k. Node TAP supports
         /// count requirements but rejects test filters. Omission keeps unfiltered positive-test proof by default.
@@ -1870,12 +1881,12 @@ pub enum ToolCall {
             pattern = "^(wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})|~s[1-9][0-9]{0,18})$"
         ))]
         session_id: String,
-        /// Fixed durable completion intent; the Server does not evaluate natural-language conditions.
+        /// Durable completion intent, editable with update_goal; the Server does not evaluate natural-language conditions.
         /// At most 8 conditions, each additionally bounded to 512 UTF-8 bytes.
         #[serde(default)]
         #[schemars(schema_with = "goal_conditions_schema")]
         completion_conditions: Vec<String>,
-        /// Fixed bounded plan. Stable ids are unique; all steps start pending.
+        /// Initial bounded plan. Stable ids are unique; all steps start pending.
         #[serde(default)]
         #[schemars(length(max = 32))]
         steps: Vec<GoalStepInputCall>,
@@ -1897,12 +1908,12 @@ pub enum ToolCall {
 
     /// Create explicit high-level durable intent/control state without execution authority.
     CreateGoal {
-        /// Fixed durable completion intent; the Server does not evaluate natural-language conditions.
+        /// Durable completion intent, editable with update_goal; the Server does not evaluate natural-language conditions.
         /// At most 8 conditions, each additionally bounded to 512 UTF-8 bytes.
         #[serde(default)]
         #[schemars(schema_with = "goal_conditions_schema")]
         completion_conditions: Vec<String>,
-        /// Fixed bounded plan. Stable ids are unique; all steps start pending. Use checkpoint_goal
+        /// Initial bounded plan. Stable ids are unique; all steps start pending. Use checkpoint_goal
         /// for atomic progress at recovery-worthy milestones, not after every tool call.
         #[serde(default)]
         #[schemars(length(max = 32))]
@@ -1949,6 +1960,23 @@ pub enum ToolCall {
     GoalPlanSync {
         #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
         goal_id: String,
+    },
+
+    /// Replace the full ordered plan of one exact owned active Goal without changing progress or completion intent.
+    ReviseGoalPlan {
+        #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
+        goal_id: String,
+        #[schemars(range(min = 1))]
+        expected_revision: i64,
+        /// Full replacement. Completed ids/titles must remain, retained statuses are preserved, and new ids start pending.
+        #[schemars(length(max = 32))]
+        steps: Vec<GoalStepInputCall>,
+        /// Why the unfinished plan changed; additionally bounded to 2048 UTF-8 bytes.
+        #[schemars(length(min = 1, max = 2048))]
+        reason: String,
+        /// Exact replay is inert; changed reuse conflicts. Re-read get_goal after a stale revision.
+        #[schemars(length(min = 1, max = 128))]
+        idempotency_key: String,
     },
 
     /// Atomically checkpoint one Goal's mechanical plan and recovery summary.
@@ -2053,6 +2081,12 @@ pub enum ToolCall {
         #[schemars(length(min = 1, max = 8192))]
         #[serde(default)]
         objective: Option<String>,
+        /// Optional replacement completion intent. Omission preserves it; an empty list clears it.
+        /// At most 8 nonempty trimmed conditions, each bounded to 512 UTF-8 bytes by the Server.
+        /// Existing steps and progress are preserved; conditions are never evaluated automatically.
+        #[serde(default)]
+        #[schemars(schema_with = "goal_conditions_schema")]
+        completion_conditions: Option<Vec<String>>,
         /// Optional replacement durable Goal controller Agent. Omission preserves the current routing identity;
         /// setting it re-authorizes the exact Agent and never inherits authority from prior routing.
         #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
@@ -2432,95 +2466,16 @@ pub enum ToolCall {
     },
 
     /// Create a durable Server-owned Agent identity and mutable self-description card.
-    CreateAgentIdentity {
-        /// Mutable non-unique Agent handle. It is self-description metadata, not canonical identity or
-        /// authority.
-        #[schemars(length(min = 1, max = 64))]
-        #[schemars(regex(pattern = "^[A-Za-z0-9._-]+$"))]
-        handle: String,
-        /// Mutable non-unique Agent display name.
-        #[schemars(length(min = 1, max = 128))]
-        display_name: String,
-        #[schemars(extend("default" = ""))]
-        /// Optional Agent Card description, bounded by 2048 UTF-8 bytes server-side.
-        #[schemars(length(max = 2048))]
-        #[serde(default)]
-        description: Option<String>,
-        /// Bounded self-description labels. Labels never grant authority.
-        #[schemars(length(max = 16))]
-        #[schemars(inner(length(min = 1, max = 64)))]
-        #[serde(default)]
-        specialty_labels: Vec<String>,
-        /// Caller-generated operation key. Exact replay under the same communication principal returns the
-        /// original durable resource; reuse with changed input is rejected.
-        #[schemars(length(min = 1, max = 128))]
-        idempotency_key: String,
-    },
+    CreateAgentIdentity(CreateAgentIdentityInput),
 
     /// List Agent identities owned by the current communication principal.
-    ListAgentIdentities {
-        /// Optional exact canonical Agent id owned by the current communication principal.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        agent_id: Option<String>,
-        #[schemars(extend("default" = 0))]
-        /// Zero-based bounded page offset.
-        #[schemars(range(min = 0))]
-        #[serde(default)]
-        offset: Option<usize>,
-        #[schemars(extend("default" = 50))]
-        /// Maximum records to return. Values above 100 are accepted and clamped to 100.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        limit: Option<usize>,
-    },
+    ListAgentIdentities(ListAgentIdentitiesInput),
 
     /// CAS-update mutable Agent Card metadata without changing canonical identity.
-    UpdateAgentIdentity {
-        /// Canonical durable Agent id to update.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        agent_id: String,
-        /// Exact profile revision fence. A stale value is rejected without mutation.
-        #[schemars(range(min = 1))]
-        expected_profile_revision: i64,
-        #[schemars(length(min = 1, max = 64))]
-        #[schemars(regex(pattern = "^[A-Za-z0-9._-]+$"))]
-        #[serde(default)]
-        handle: Option<String>,
-        /// Replacement display name.
-        #[schemars(length(min = 1, max = 128))]
-        #[serde(default)]
-        display_name: Option<String>,
-        /// Replacement description, bounded by 2048 UTF-8 bytes server-side.
-        #[schemars(length(max = 2048))]
-        #[serde(default)]
-        description: Option<String>,
-        /// Bounded self-description labels. Labels never grant authority.
-        #[schemars(length(max = 16))]
-        #[schemars(inner(length(min = 1, max = 64)))]
-        #[serde(default)]
-        specialty_labels: Option<Vec<String>>,
-    },
+    UpdateAgentIdentity(UpdateAgentIdentityInput),
 
     /// Rotate the server-local continuation Endpoint/controller generation for a durable Agent.
-    RotateAgentContinuationEndpoint {
-        /// Canonical durable Agent id owned by the current communication principal.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        agent_id: String,
-        /// Server-local continuation adapter label, for example ChatGPT. This is recorded metadata only: it
-        /// does not initiate, configure, or authorize an external connection.
-        #[schemars(length(min = 1, max = 64))]
-        host: String,
-        /// Optional opaque host-local attachment label copied into server-local Endpoint metadata. It is
-        /// not durable Agent identity, remote-host authority, or a connection selector.
-        #[schemars(length(max = 128))]
-        #[serde(default)]
-        client_attachment_id: Option<String>,
-        /// Caller-generated operation key. Exact replay under the same communication principal returns the
-        /// original durable resource; reuse with changed input is rejected.
-        #[schemars(length(min = 1, max = 128))]
-        idempotency_key: String,
-    },
+    RotateAgentContinuationEndpoint(RotateAgentContinuationEndpointInput),
 
     /// Present one exact Agent/Endpoint continuation controller card. Never infers a target.
     /// Pass agent_continuation_ref, or the explicit tuple. Do not pass both.
@@ -2648,173 +2603,25 @@ pub enum ToolCall {
     },
 
     /// Detach an Endpoint while preserving the durable Agent.
-    DetachAgentEndpoint {
-        /// Canonical Agent Endpoint id attached by the current communication principal.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        endpoint_id: String,
-    },
+    DetachAgentEndpoint(DetachAgentEndpointInput),
 
     /// Create a durable Conversation with the current Human principal and Agents.
-    CreateConversation {
-        /// Optional mutable room title.
-        #[schemars(length(max = 200))]
-        #[serde(default)]
-        title: Option<String>,
-        /// Owned Agent participants to add with the current Human principal.
-        #[schemars(length(min = 1, max = 16))]
-        #[schemars(inner(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$")))]
-        agent_ids: Vec<String>,
-        /// Caller-generated operation key. Exact replay under the same communication principal returns the
-        /// original durable resource; reuse with changed input is rejected.
-        #[schemars(length(min = 1, max = 128))]
-        idempotency_key: String,
-    },
+    CreateConversation(CreateConversationInput),
 
     /// List Conversations for a Human view or an explicitly attached Agent view.
-    ListConversations {
-        /// Optional Agent view. Must be paired with exact Endpoint fencing; omit all three fields for the
-        /// current Human principal.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        agent_id: Option<String>,
-        /// Active Endpoint proving the optional Agent view.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        endpoint_id: Option<String>,
-        /// Exact Server-assigned current Endpoint generation. Stale generations fail closed.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        expected_controller_generation: Option<i64>,
-        #[schemars(extend("default" = 0))]
-        /// Zero-based bounded page offset.
-        #[schemars(range(min = 0))]
-        #[serde(default)]
-        offset: Option<usize>,
-        #[schemars(extend("default" = 50))]
-        /// Maximum records to return. Values above 100 are accepted and clamped to 100.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        limit: Option<usize>,
-    },
+    ListConversations(ListConversationsInput),
 
     /// Read an ordered append-only Conversation transcript page.
-    ReadConversation {
-        /// Canonical Conversation id.
-        #[schemars(regex(pattern = "^wc_conv_[A-Za-z0-9_-]{16}$"))]
-        conversation_id: String,
-        /// Optional Agent view. Must be paired with exact Endpoint fencing; omit all three fields for the
-        /// current Human principal.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        agent_id: Option<String>,
-        /// Active Endpoint proving the optional Agent view.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        endpoint_id: Option<String>,
-        /// Exact Server-assigned current Endpoint generation. Stale generations fail closed.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        expected_controller_generation: Option<i64>,
-        #[schemars(extend("default" = 0))]
-        /// Return append-only transcript messages with seq greater than this cursor.
-        #[schemars(range(min = 0))]
-        #[serde(default)]
-        after_seq: Option<i64>,
-        #[schemars(extend("default" = 50))]
-        /// Maximum records to return. Values above 100 are accepted and clamped to 100.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        limit: Option<usize>,
-    },
+    ReadConversation(ReadConversationInput),
 
     /// Atomically append a Message and recipient-specific Agent deliveries.
-    PostConversationMessage {
-        /// Canonical Conversation id.
-        #[schemars(regex(pattern = "^wc_conv_[A-Za-z0-9_-]{16}$"))]
-        conversation_id: String,
-        /// Append-only message body, bounded by 4096 UTF-8 bytes server-side.
-        #[schemars(length(min = 1, max = 4096))]
-        body: String,
-        /// Agent author provenance. Omit for the current Human principal; Agent authors require
-        /// endpoint_id.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        author_agent_id: Option<String>,
-        /// Active Endpoint proving an Agent-authored message. Omit for Human authors.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        endpoint_id: Option<String>,
-        /// Exact Server-assigned current Endpoint generation. Stale generations fail closed.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        expected_controller_generation: Option<i64>,
-        /// Optional explicit Agent Inbox recipients. Omit to deliver to every Agent participant except the
-        /// author; an explicit empty array posts to the transcript/room without Agent deliveries.
-        #[schemars(length(min = 0, max = 16))]
-        #[schemars(inner(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$")))]
-        #[serde(default)]
-        recipient_agent_ids: Option<Vec<String>>,
-        /// Optional parent Message in the same Conversation.
-        #[schemars(regex(pattern = "^wc_cmsg_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        reply_to: Option<String>,
-        /// Caller-generated operation key. Exact replay under the same communication principal returns the
-        /// original durable resource; reuse with changed input is rejected.
-        #[schemars(length(min = 1, max = 128))]
-        #[serde(default)]
-        idempotency_key: Option<String>,
-        /// Exact durable Wake that already crossed a Host dispatch or explicit-activation fence and
-        /// provides stable resumed-turn reply replay identity. Use with reply_operation_index instead of
-        /// idempotency_key.
-        #[schemars(regex(pattern = "^wc_wake_[A-Za-z0-9_-]{16}$"))]
-        #[serde(default)]
-        wake_reply_id: Option<String>,
-        /// Stable per-send index within one Wake. Reuse the same index only for an exact uncertain retry;
-        /// use a different index for each intentional additional Message.
-        #[schemars(range(min = 0, max = 31))]
-        #[serde(default)]
-        reply_operation_index: Option<i64>,
-    },
+    PostConversationMessage(PostConversationMessageInput),
 
     /// List queued deliveries for an Agent proven by an active Endpoint.
-    ListAgentInbox {
-        /// Canonical recipient Agent id.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        agent_id: String,
-        /// Active Endpoint proving access to this Agent Inbox.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        endpoint_id: String,
-        /// Exact Server-assigned current Endpoint generation. Stale generations fail closed.
-        #[schemars(range(min = 1))]
-        expected_controller_generation: i64,
-        #[schemars(extend("default" = 0))]
-        /// Return queued deliveries with durable delivery_order greater than this cursor.
-        #[schemars(range(min = 0))]
-        #[serde(default)]
-        after_delivery_order: Option<i64>,
-        #[schemars(extend("default" = 50))]
-        /// Maximum records to return. Values above 100 are accepted and clamped to 100.
-        #[schemars(range(min = 1))]
-        #[serde(default)]
-        limit: Option<usize>,
-    },
+    ListAgentInbox(ListAgentInboxInput),
 
     /// Mark exact recipient-specific Agent deliveries consumed.
-    ConsumeAgentDeliveries {
-        /// Canonical recipient Agent id.
-        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
-        agent_id: String,
-        /// Active Endpoint proving access to this Agent Inbox.
-        #[schemars(regex(pattern = "^wc_endpoint_[A-Za-z0-9_-]{16}$"))]
-        endpoint_id: String,
-        /// Exact Server-assigned current Endpoint generation. Stale generations fail closed.
-        #[schemars(range(min = 1))]
-        expected_controller_generation: i64,
-        /// Deliveries to mark consumed. Repeating already-consumed ids is a safe desired-state retry.
-        #[schemars(length(min = 1, max = 100))]
-        #[schemars(inner(regex(pattern = "^wc_delivery_[A-Za-z0-9_-]{16}$")))]
-        delivery_ids: Vec<String>,
-    },
+    ConsumeAgentDeliveries(ConsumeAgentDeliveriesInput),
 
     /// Verify one exact Agent/Endpoint activation and return bounded current
     /// Conversation, Inbox, Wake, Host-binding, and reply-replay context.
@@ -3966,7 +3773,6 @@ pub enum ToolCall {
         #[serde(default)]
         session_id: Option<String>,
     },
-
     /// Locate an already registered workspace without creating a Session or registration.
     /// Exactly one selector is required: an exact registered path or a non-empty literal query.
     ResolveWorkspace {

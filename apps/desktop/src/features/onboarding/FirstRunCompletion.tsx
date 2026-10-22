@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useConnectionsTools } from "../../i18n/connections-tools";
 import { useLocale } from "../../i18n/locale";
 import { useProduct } from "../../i18n/product";
 import type { DesktopState } from "../../models/topology";
@@ -33,7 +34,7 @@ export function FirstReadGuide({ state, onProjects }: { state: DesktopState; onP
         setCopyFailed(false);
         void writeText(prompt).then(() => setCopiedIdentity(identity)).catch(() => setCopyFailed(true));
       }}>{t(copiedIdentity === identity ? "completion.copied" : "completion.copy")}</button>
-      {copyFailed && <p role="alert">{t("common.retry")}</p>}
+      {copyFailed && <p role="alert" className="workspace-notice">{t("completion.copyFailed")}</p>}
       <label className="checkbox-row"><input type="checkbox" checked={reportedIdentity === identity} disabled={busy}
         onChange={event => setReportedIdentity(event.target.checked ? identity : null)} />{t("completion.confirm")}</label>
       {reportedIdentity === identity && <p className="field-help" role="status">{t("completion.reported")}</p>}
@@ -48,7 +49,7 @@ export function FirstRunCompletion({ state, onState, onComplete, onProjects, onC
   state: DesktopState; onState: (state: DesktopState) => void; onComplete: () => void;
   onProjects: () => void; onConnection: () => void; onRuntime?: () => void;
 }) {
-  const { t } = useLocale();
+  const { t } = useLocale(); const c = useConnectionsTools();
   const [editor, setEditor] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { heading.current?.focus(); }, []);
@@ -61,7 +62,7 @@ export function FirstRunCompletion({ state, onState, onComplete, onProjects, onC
     <section className="form-card"><h2>{t("completion.connection")}</h2><p>{t(create ? "completion.createHelp" : "completion.joinHelp")}</p>
       {create && <div className="setup-actions">
         <button type="button" className="primary-button" disabled={busy || state.connections?.config_error} onClick={() => setEditor(true)}>{t("completion.addTunnel")}</button>
-        <button type="button" className="secondary-button" disabled={busy} onClick={onConnection}>{t("nav.connection")}</button>
+        <button type="button" className="secondary-button" disabled={busy} onClick={onConnection}>{c("connections")}</button>
       </div>}
     </section>
     <FirstReadGuide state={state} onProjects={onProjects} />

@@ -14,10 +14,33 @@ fn project_validation_rechecks_manifest_and_dependency_state_after_queueing() {
         ("Cargo.toml", "Cargo.lock", true, false, None),
         ("go.mod", "go.sum", false, false, None),
         ("go.mod", "go.sum", true, false, None),
+        ("package.json", "package-lock.json", false, false, None),
+        ("package.json", "package-lock.json", true, false, None),
         ("pyproject.toml", "pytest.ini", false, false, None),
         ("pyproject.toml", "pytest.ini", true, false, None),
         ("Cargo.toml", "Cargo.lock", false, true, None),
         ("Cargo.toml", "Cargo.lock", true, true, None),
+        (
+            "Cargo.toml",
+            "Cargo.lock",
+            false,
+            false,
+            Some(ProjectValidationAction::Lint),
+        ),
+        (
+            "Cargo.toml",
+            "Cargo.lock",
+            true,
+            false,
+            Some(ProjectValidationAction::Lint),
+        ),
+        (
+            "Cargo.toml",
+            "Cargo.lock",
+            true,
+            true,
+            Some(ProjectValidationAction::Lint),
+        ),
         (
             "pyproject.toml",
             "unused",
@@ -60,7 +83,9 @@ edition = "2021"
         } else {
             std::fs::write(
                 root.join(marker),
-                if ruff_action.is_some() {
+                if marker == "package.json" {
+                    r#"{"scripts":{"test":"vitest run"}}"#
+                } else if marker == "pyproject.toml" && ruff_action.is_some() {
                     "[tool.ruff]\ntarget-version='py311'\n"
                 } else {
                     ""
@@ -87,7 +112,7 @@ edition = "2021"
             cwd: member_cwd.then(|| "member".into()),
             action: if let Some(action) = ruff_action {
                 action
-            } else if marker == "pyproject.toml" {
+            } else if matches!(marker, "pyproject.toml" | "package.json") {
                 ProjectValidationAction::Test
             } else {
                 ProjectValidationAction::Check
@@ -95,6 +120,7 @@ edition = "2021"
             adapter: ProjectValidationAdapter::Auto,
             scope: None,
             dependency_policy: None,
+            dependency_resolution_policy: None,
             test: None,
         };
         let (plan, cwd) =
@@ -105,7 +131,10 @@ edition = "2021"
             project_validation: Some(plan.provenance.clone()),
             source_fence: None,
             tool: "project_validate".into(),
-            kind: request.action.kind().into(),
+            kind: request
+                .action
+                .kind_for_backend(&plan.provenance.backend)
+                .into(),
             steps: vec![plan.step.clone()],
             effective_timeout_secs: 60,
             sync_wait_secs: 10,
@@ -272,6 +301,7 @@ fn go_project_validation_overrides_ambient_gowork_but_direct_go_test_does_not() 
                 adapter: ProjectValidationAdapter::Go,
                 scope: None,
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 test: None,
             };
             let (plan, cwd) =
@@ -423,6 +453,7 @@ fn enqueue_python_validation_fixture(
         adapter: ProjectValidationAdapter::Python,
         scope: None,
         dependency_policy: None,
+        dependency_resolution_policy: None,
         test: filter.map(|filter| ProjectValidationTestOptions {
             filter: Some(filter.into()),
             ..Default::default()
@@ -627,4 +658,23 @@ fn project_validation_ruff_missing_interpreter_is_definitely_not_started() {
             format!("python:ruff:{}", action.kind())
         );
     }
+}
+
+#[test]
+fn rust_clippy_activity_keeps_lint_step_identity() {
+    let step = ShellJobValidationStep {
+        name: "lint".into(),
+        program: "cargo".into(),
+        args: ["clippy", "--all-targets", "--", "-D", "clippy::correctness"]
+            .map(str::to_string)
+            .to_vec(),
+        env: vec![],
+    };
+    let activity = validation_step_activity(&step);
+    assert_eq!(activity.phase, ShellJobActivityPhase::ValidationCheck);
+    assert_eq!(
+        cargo_activity_from_stderr(&step, "Finished dev profile\n"),
+        Some(activity)
+    );
+    assert_eq!(step.name, "lint");
 }

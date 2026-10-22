@@ -1,21 +1,16 @@
 import {
   BriefcaseBusiness,
   FolderKanban,
-  Languages,
   Lock,
-  MoonStar,
   PanelLeftClose,
   PanelLeftOpen,
   Settings2,
   Server,
-  Sun,
   X,
 } from "lucide-react";
-import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LANGUAGE_STORAGE_KEY,
-  RUNTIME_LANGUAGES,
   loadLanguagePreference,
   translate,
   type RuntimeLanguage,
@@ -37,6 +32,7 @@ import {
   normalizeAccent,
   persistAccentPreference,
 } from "../ui/accent.js";
+import { useFlowingSelection } from "../ui/useFlowingSelection.js";
 import { locateSession } from "./api/sessions.js";
 import { useProjects } from "./state/useProjects.js";
 import { projectFamilyId } from "../ui/projectPresentation.js";
@@ -44,7 +40,8 @@ import { RuntimeV2Client } from "./api/client.js";
 import { SessionWindowNavigation } from "./components/SessionWindowNavigation.js";
 import { AuthGate } from "./components/AuthGate.js";
 import { BrandMark } from "./components/ui/BrandMark.js";
-import { AccentPicker } from "./components/ui/AccentPicker.js";
+import { ActionIcon, Tooltip } from "@mantine/core";
+import { RuntimePreferences } from "./components/ui/RuntimePreferences.js";
 import { IconButton } from "./components/ui/IconButton.js";
 import type { WorkSurface } from "./components/GoalWorkbench.js";
 import type { Availability } from "./model/types.js";
@@ -97,6 +94,11 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const sessionLocator = useRef<AbortController | null>(null);
+  const navigationRef = useRef<HTMLElement | null>(null);
+  const mobileNavigationRef = useRef<HTMLElement | null>(null);
+  const navigationSelection = { variant: "filled", itemSelector: "button", selectedSelector: "button[aria-current]" } as const;
+  useFlowingSelection(navigationRef, view, navigationSelection);
+  useFlowingSelection(mobileNavigationRef, view, navigationSelection);
 
   if (token) client.setToken(token);
   else client.clearToken();
@@ -105,7 +107,11 @@ export function App() {
   useEffect(() => {
     if (!mobileSettingsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMobileSettingsOpen(false);
+      // Let the library close its child popup and restore its trigger first.
+      if (event.key === "Escape" && !event.defaultPrevented &&
+          !(event.target instanceof Element && event.target.closest(".appearance-preference-popover"))) {
+        setMobileSettingsOpen(false);
+      }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
@@ -258,41 +264,18 @@ export function App() {
     persistAccentPreference(color);
   };
 
-  const languageControl = () => (
-    <label className="runtime-language-control">
-      <Languages size={17} aria-hidden="true" />
-      <select aria-label={translate("Language", language)} value={language}
-        onChange={event => setLanguage(event.currentTarget.value as RuntimeLanguage)}>
-        {RUNTIME_LANGUAGES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-      </select>
-    </label>
-  );
-
-  const preferenceControls = () => (
-    <>
-      {languageControl()}
-      <button type="button" title={translate("Appearance", language)} aria-label={translate("Appearance", language)} onClick={cycleAppearance}>
-        {appearance === "dark" ? <MoonStar size={17} /> : <Sun size={17} />}
-        <span>{translate("Appearance", language)} · {translate(appearance === "system" ? "System" : appearance === "light" ? "Light" : "Dark", language)}</span>
-      </button>
-      <AccentPicker color={accent} onChange={changeAccent} language={language} />
-      <button type="button" title={translate("Lock", language)} aria-label={translate("Lock", language)} onClick={() => lock()}>
-        <Lock size={17} /><span>{translate("Lock", language)}</span>
-      </button>
-    </>
-  );
+  const preferenceControls = () => <RuntimePreferences accent={accent} appearance={appearance} language={language}
+    onAccentChange={changeAccent} onAppearanceCycle={cycleAppearance} onLanguageChange={setLanguage} />;
+  const lockControl = () => <Tooltip label={translate("Lock", language)} openDelay={400}>
+    <ActionIcon className="runtime-lock-button" variant="subtle" color="gray" size={36} radius="md"
+      aria-label={translate("Lock", language)} onClick={() => lock()}><Lock size={18} /></ActionIcon>
+  </Tooltip>;
 
   if (!token) {
     return (
       <>
         <AuthGate language={language} onConnect={connect} />
-        <div className="auth-preferences-v2">
-          {languageControl()}
-          <button type="button" onClick={cycleAppearance} aria-label={translate("Appearance", language)}>
-            {appearance === "dark" ? <MoonStar size={16} /> : <Sun size={16} />}
-          </button>
-          <AccentPicker color={accent} onChange={changeAccent} language={language} />
-        </div>
+        <div className="auth-preferences-v2">{preferenceControls()}</div>
         {notice && <div className="auth-notice" role="alert">{notice}</div>}
       </>
     );
@@ -318,21 +301,18 @@ export function App() {
           </IconButton>
         </div>
 
-        <nav aria-label={translate("Workspace views", language)}>
+        <nav ref={navigationRef} aria-label={translate("Workspace views", language)}>
           <button className={"nav-button " + (view === "work" ? "active" : "")} type="button" onClick={openWork} aria-current={view === "work" ? "page" : undefined} title={translate("Work", language)}>
-            {view === "work" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
             <span className="nav-icon"><BriefcaseBusiness size={18} /></span>
             <span className="nav-label">{translate("Work", language)}</span>
             <small>{overview?.active_windows || ""}</small>
           </button>
           <button className={"nav-button " + (view === "projects" ? "active" : "")} type="button" onClick={() => setView("projects")} aria-current={view === "projects" ? "page" : undefined} title={translate("Projects", language)}>
-            {view === "projects" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
             <span className="nav-icon"><FolderKanban size={18} /></span>
             <span className="nav-label">{translate("Projects", language)}</span>
             <small>{visibleProjectFamilyCount || ""}</small>
           </button>
           <button className={"nav-button " + (view === "runtime" ? "active" : "")} type="button" onClick={() => setView("runtime")} aria-current={view === "runtime" ? "page" : undefined} title={translate("Runtime", language)}>
-            {view === "runtime" && <motion.span className="ui-selection-rail" layoutId="runtime-nav-rail" aria-hidden="true" />}
             <span className="nav-icon"><Server size={18} /></span>
             <span className="nav-label">{translate("Runtime", language)}</span>
             <small>{overview?.active_jobs || ""}</small>
@@ -345,7 +325,8 @@ export function App() {
 
         <div className="profile">
           <span className="profile-avatar" aria-hidden="true"><Server size={16} /></span>
-          <span><strong>{translate("Current Runtime", language)}</strong><small>{overview?.service || "WebCodex Server"}</small></span>
+          <span className="runtime-profile-copy"><strong>{translate("Current Runtime", language)}</strong><small title={overview?.service || "WebCodex Server"}>{overview?.service || "WebCodex Server"}</small></span>
+          {lockControl()}
         </div>
       </aside>
 
@@ -353,7 +334,7 @@ export function App() {
         <div className="mobile-brand"><BrandMark /><strong>WebCodex</strong><span className={"status-dot " + availabilityDotClass(overviewState.availability)} /></div>
         <IconButton label={translate(mobileSettingsOpen ? "Close" : "Preferences", language)} aria-expanded={mobileSettingsOpen} aria-controls={mobileSettingsOpen ? "mobile-preferences" : undefined} onClick={() => setMobileSettingsOpen((value) => !value)}>{mobileSettingsOpen ? <X size={18} /> : <Settings2 size={18} />}</IconButton>
       </div>
-      {mobileSettingsOpen && <div id="mobile-preferences" className="mobile-preferences ui-glass" role="group" aria-label={translate("Preferences", language)}>{preferenceControls()}</div>}
+      {mobileSettingsOpen && <div id="mobile-preferences" className="mobile-preferences ui-glass" role="group" aria-label={translate("Preferences", language)}>{preferenceControls()}<div className="mobile-lock-action">{lockControl()}</div></div>}
 
       <section className="app-content">
         {notice && <div className="global-notice" role="status">{notice}<IconButton label={translate("Close", language)} onClick={() => setNotice("")}><X size={16} /></IconButton></div>}
@@ -413,11 +394,13 @@ export function App() {
         onOpenRecord={openSessionRecord} onUnauthorized={handleUnauthorized}
       />}
 
-      <nav className="mobile-primary-nav ui-glass" aria-label={translate("Workspace views", language)}>
-        <button className={view === "work" ? "active" : ""} type="button" onClick={openWork} aria-current={view === "work" ? "page" : undefined}><BriefcaseBusiness size={18} /><span>{translate("Work", language)}</span></button>
-        <button className={view === "projects" ? "active" : ""} type="button" onClick={() => setView("projects")} aria-current={view === "projects" ? "page" : undefined}><FolderKanban size={18} /><span>{translate("Projects", language)}</span></button>
-        <button className={view === "runtime" ? "active" : ""} type="button" onClick={() => setView("runtime")} aria-current={view === "runtime" ? "page" : undefined}><Server size={18} /><span>{translate("Runtime", language)}</span></button>
-      </nav>
+      <div className="mobile-navigation-dock">
+        <nav ref={mobileNavigationRef} className="mobile-primary-nav" aria-label={translate("Workspace views", language)}>
+          <button className={view === "work" ? "active" : ""} type="button" onClick={openWork} aria-current={view === "work" ? "page" : undefined}><BriefcaseBusiness size={18} /><span>{translate("Work", language)}</span></button>
+          <button className={view === "projects" ? "active" : ""} type="button" onClick={() => setView("projects")} aria-current={view === "projects" ? "page" : undefined}><FolderKanban size={18} /><span>{translate("Projects", language)}</span></button>
+          <button className={view === "runtime" ? "active" : ""} type="button" onClick={() => setView("runtime")} aria-current={view === "runtime" ? "page" : undefined}><Server size={18} /><span>{translate("Runtime", language)}</span></button>
+        </nav>
+      </div>
     </div>
   );
 }

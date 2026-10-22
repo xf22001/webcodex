@@ -971,6 +971,32 @@ fn computer_accessibility_tree_validator_accepts_bounded_parent_first_tree() {
 }
 
 #[test]
+fn computer_subtree_scope_requires_exact_runner_receipt_and_keeps_legacy_wire() {
+    let legacy = accessibility_tree_payload("surface_test", None, 8, 256).unwrap();
+    assert_eq!(
+        legacy,
+        json!({"surface_id":"surface_test", "max_depth":8, "max_nodes":256})
+    );
+    let scoped = accessibility_tree_payload("surface_test", Some("element_root"), 8, 256).unwrap();
+    assert_eq!(scoped["root_element_id"], "element_root");
+    for invalid in ["", "element_", "surface_root"] {
+        assert!(accessibility_tree_payload("surface_test", Some(invalid), 8, 256).is_err());
+    }
+    let mut tree = accessibility_tree();
+    assert!(normalize_accessibility_scope(&mut tree, Some("element_root")).is_err());
+    assert!(normalize_accessibility_scope(&mut tree, None).is_ok());
+    for receipt in [json!("element_other"), Value::Null, json!(12)] {
+        tree["root_element_id"] = receipt;
+        assert!(normalize_accessibility_scope(&mut tree, Some("element_root")).is_err());
+        assert!(normalize_accessibility_scope(&mut tree, None).is_err());
+    }
+    tree["root_element_id"] = json!("element_root");
+    assert!(normalize_accessibility_scope(&mut tree, Some("element_root")).is_ok());
+    assert!(tree.get("root_element_id").is_none());
+    assert!(validate_accessibility_tree(tree, "surface_test", 2, 8).success);
+}
+
+#[test]
 fn computer_accessibility_read_validators_accept_windows_platform() {
     let status = validate_accessibility_status(json!({
         "platform": "windows",
@@ -1340,6 +1366,26 @@ fn computer_scroll_validator_is_exact_and_post_dispatch_mismatch_is_unknown() {
 
 #[test]
 fn computer_key_input_normalizes_closed_vocabulary_and_modifiers() {
+    let modifiers = COMPUTER_KEY_INPUT_MODIFIERS
+        .iter()
+        .map(|modifier| modifier.to_string())
+        .collect::<Vec<_>>();
+    for key in COMPUTER_KEY_INPUT_KEYS {
+        assert_eq!(
+            normalize_computer_key_input(key, None).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_computer_key_input(key, Some(vec![])).unwrap(),
+            Vec::<String>::new()
+        );
+        let mut reversed = modifiers.clone();
+        reversed.reverse();
+        assert_eq!(
+            normalize_computer_key_input(key, Some(reversed)).unwrap(),
+            modifiers
+        );
+    }
     assert_eq!(
         normalize_computer_key_input(
             "tab",
@@ -1355,6 +1401,7 @@ fn computer_key_input_normalizes_closed_vocabulary_and_modifiers() {
     )
     .is_err());
     assert!(normalize_computer_key_input("enter", Some(vec!["caps_lock".to_string()]),).is_err());
+    assert!(normalize_computer_key_input("tab", Some(vec!["shift".to_string(); 5])).is_err());
 }
 
 #[test]

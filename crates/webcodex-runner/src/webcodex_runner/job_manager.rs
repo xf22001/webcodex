@@ -300,6 +300,7 @@ fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
         validation_progress: None,
         test_count_evidence: None,
         format_mutation: None,
+        build_artifacts: None,
         activity: None,
     }
 }
@@ -337,6 +338,7 @@ struct RunnerJobDelta {
     validation_progress: Option<ShellJobValidationProgress>,
     test_count_evidence: Option<ShellJobTestCountEvidence>,
     format_mutation: Option<webcodex_core::project_format::ProjectFormatMutationReport>,
+    build_artifacts: Option<Vec<webcodex_core::project_build::ProjectBuildArtifact>>,
     activity: Option<ShellJobActivity>,
     finished: bool,
 }
@@ -350,10 +352,7 @@ pub(crate) use lifecycle::decode_failure_prestart_lifecycle;
 use shutdown::JobManagerOwnerLifetime;
 mod admission;
 #[cfg(test)]
-use delivery::{
-    job_update_from_delivery, queue_job_heartbeat_batch, spawn_job_heartbeat_worker_with_interval,
-    PendingJobUpdateDelivery,
-};
+use delivery::{job_update_from_delivery, queue_job_heartbeat_batch, PendingJobUpdateDelivery};
 mod delivery;
 mod detached;
 #[cfg(test)]
@@ -368,6 +367,7 @@ mod input;
 mod interactive;
 mod lifecycle;
 mod local_shell;
+mod node_report;
 mod process;
 #[cfg(test)]
 use retained::{append_runner_stream, trim_runner_stream_to};

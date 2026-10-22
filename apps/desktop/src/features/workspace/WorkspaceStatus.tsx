@@ -1,6 +1,6 @@
 import { useLocale } from "../../i18n/locale";
 import { productText, useProduct, type ProductKey } from "../../i18n/product";
-import type { DesktopState } from "../../models/topology";
+import type { DesktopState, ExposureReadiness } from "../../models/topology";
 import type { ConnectionsSnapshot } from "../../models/connections-tools";
 
 export function observationTime(timestamp: number | null | undefined, locale: string, now = Date.now()): string {
@@ -19,6 +19,17 @@ export function statusKey(status: string | undefined): ProductKey {
   if (!status || status === "stopped" || status === "disabled") return "stopped";
   return "unknown";
 }
+export function exposureStatusKey(exposure: ExposureReadiness): ProductKey {
+  switch (exposure) {
+    case "remote_ready": return "readyState";
+    case "local_ready": return "exposureLocalOnly";
+    case "degraded": return "exposureDegraded";
+    case "starting": return "starting";
+    case "disabled": return "exposureOff";
+    case "error": return "unavailable";
+    default: return "projectStatusUnconfirmed";
+  }
+}
 export function tunnelReadinessText(connections: ConnectionsSnapshot | undefined, p: (key: ProductKey) => string): string {
   if (!connections || connections.config_error) return p("tunnelStatusUnavailable");
   if (!connections.profiles.length) return p("noTunnels");
@@ -32,7 +43,7 @@ export function desktopStatusPresentation(state: DesktopState, p: (key: ProductK
   const quickShareStatus = state.readiness.exposure === "remote_ready" ? "ready" : state.readiness.exposure;
   return {
     localRunnerConfigured,
-    primaryLabel: p(localRunnerConfigured ? "localExecutionService" : "serverConnection"),
+    primaryLabel: p(localRunnerConfigured ? "localRunner" : "serverConnection"),
     primaryStatus: localRunnerConfigured ? state.readiness.runner : state.readiness.server,
     primaryReady: localRunnerConfigured ? state.readiness.runtime_ready : state.readiness.server === "ready",
     connectionLabel: quickShare ? "Quick Share" : p("tunnels"),
@@ -45,7 +56,7 @@ export function WorkspaceStatus({ state }: { state: DesktopState }) {
   const p = useProduct();
   const presentation = desktopStatusPresentation(state, p);
   const values: Array<[string, string]> = [[p("serverConnection"), state.readiness.server]];
-  if (presentation.localRunnerConfigured) values.push([p("localExecutionService"), state.readiness.runner]);
+  if (presentation.localRunnerConfigured) values.push([p("localRunner"), state.readiness.runner]);
   if (state.topology?.experience === "quick_share") values.push(["Quick Share", state.readiness.exposure === "remote_ready" ? "ready" : state.readiness.exposure]);
   return <dl className="workspace-status-strip" aria-label={p("workspace")} role="status">
     {values.map(([name, status]) => <div key={name}><dt>{name}</dt><dd><i className={`status-dot ${status === "ready" ? "ready" : status === "error" ? "error" : "unknown"}`} aria-hidden="true" />{p(statusKey(status))}</dd></div>)}

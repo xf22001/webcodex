@@ -7,6 +7,7 @@ use crate::project_validation::{
 
 fn build_request(scope: ProjectBuildScope) -> ProjectBuildRequest {
     ProjectBuildRequest {
+        dependency_resolution_policy: None,
         project_id: "demo".into(),
         cwd: None,
         adapter: ProjectBuildAdapter::Auto,
@@ -44,6 +45,7 @@ fn validation_request(scope: ProjectValidationScope) -> ProjectValidationRequest
         adapter: ProjectValidationAdapter::Auto,
         scope: Some(scope),
         dependency_policy: None,
+        dependency_resolution_policy: None,
         test: None,
     }
 }

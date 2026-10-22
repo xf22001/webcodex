@@ -363,10 +363,75 @@ for (const ref of ["~ac1", "~ac9999999999999999999"]) {
     await flush();
     assert.equal(view.calls("bind_agent_continuation").length, 0);
     assert.equal(view.nodes.status.textContent, "Waiting for Agent connection…");
-    view.toolResult({ agent_continuation: { ...projection, endpoint_id: null } });
-    assert.equal(view.calls("bind_agent_continuation").length, 0);
     view.toolResult({ agent_continuation: projection });
     assert.equal(view.calls("bind_agent_continuation").length, 1);
+  });
+}
+
+const unavailableInitialResults = [
+  ["text-only", { content: [{ type: "text", text: "private-initial-result" }] }],
+  ["tool-error", { isError: true, content: [{ type: "text", text: "private-initial-result" }] }],
+  ["server-error", { structuredContent: { success: false, error: { message: "private-initial-result" } } }],
+  ["missing-projection", toolResult({})],
+  ["invalid-projection", toolResult({ agent_continuation: { ...projection, endpoint_id: null } })],
+  ["error-with-projection", { ...toolResult({ agent_continuation: projection }), isError: true }],
+];
+
+for (const [kind, result] of unavailableInitialResults) {
+  for (const order of [
+    ["initialize", "input", "result"], ["input", "initialize", "result"],
+    ["result", "initialize", "input"], ["initialize", "result", "input"],
+    ["input", "result", "initialize"], ["result", "input", "initialize"],
+  ]) {
+    test(`ref-only final ${kind} closes without binding: ${order.join(" -> ")}`, async () => {
+      const view = app("mcp_agent_continuation_app.html");
+      for (const step of order) {
+        if (step === "initialize") await view.initialize();
+        else if (step === "input") view.toolInput({ agent_continuation_ref: "~ac1" });
+        else view.notification("ui/notifications/tool-result", result);
+      }
+      await flush();
+      assert.equal(view.nodes.binding.textContent, "Unavailable");
+      assert.equal(view.nodes.status.textContent, "Connection unavailable. Agent connection could not be verified.");
+      assert.doesNotMatch(view.nodes.status.textContent, /private-initial-result|~ac|wc_dagent_|wc_endpoint_/);
+      assert.equal(view.sent.filter(message => message.method === "tools/call").length, 0);
+      assert.equal(hostMessages(view).length, 0);
+      assert.equal(view.timers.size, 0);
+      view.toolInput(input);
+      view.toolResult({ agent_continuation: projection });
+      await view.fireTimers(10000);
+      assert.equal(view.calls("bind_agent_continuation").length, 0, "late notifications cannot restart the failed carrier");
+    });
+  }
+
+  test(`a late valid result cannot replace final ${kind} before ref input`, async () => {
+    const view = app("mcp_agent_continuation_app.html");
+    view.notification("ui/notifications/tool-result", result);
+    view.toolResult({ agent_continuation: projection });
+    view.toolInput({ agent_continuation_ref: "~ac1" });
+    await view.initialize();
+    assert.equal(view.calls("bind_agent_continuation").length, 0);
+    assert.equal(view.nodes.binding.textContent, "Unavailable");
+  });
+
+  test(`canonical input retains its authorized bind after final ${kind}`, async () => {
+    const view = app("mcp_agent_continuation_app.html");
+    view.notification("ui/notifications/tool-result", result);
+    view.toolInput(input);
+    await view.initialize();
+    assert.equal(view.calls("bind_agent_continuation").length, 1);
+    assert.deepEqual(businessArgs(view.calls("bind_agent_continuation")[0]), { ...input, binding_id: bindingId(view) });
+    await view.reply(view.calls("bind_agent_continuation")[0], toolResult({ agent_continuation: projection }));
+    assert.equal(view.nodes.binding.textContent, "Connected");
+  });
+
+  test(`late final ${kind} does not tear down an established binding`, async () => {
+    const view = await boundView();
+    view.notification("ui/notifications/tool-result", result);
+    await flush();
+    assert.equal(view.nodes.binding.textContent, "Connected");
+    assert.equal(view.calls("bind_agent_continuation").length, 1);
+    assert.equal(view.calls("unbind_agent_continuation").length, 0);
   });
 }
 
@@ -883,6 +948,54 @@ test("teardown before a prepare response never dispatches a Host message", async
   assert.equal(hostMessages(view).length, 0);
 });
 
+for (const { label, mode, outcome, duration } of [
+  { label: "accepted", mode: "accept", outcome: "dispatch_accepted", duration: 37 },
+  { label: "rejected", mode: "reject", outcome: "delivery_unknown", duration: 37 },
+  { label: "timed out", mode: "timeout", outcome: "delivery_unknown", duration: 10000 },
+]) {
+  test(`opt-in Host dispatch timing reports ${label} without disclosing the message or changing delivery`, async () => {
+    const view = await boundView();
+    assert.equal(view.document.getElementById("timing-log").textContent, "", "diagnostics must be disabled by default");
+    view.nodes["timing-toggle"].onclick();
+    await view.reply(view.calls("get_agent_continuation_state").at(-1), toolResult({ agent_continuation: projection }));
+    await view.reply(view.calls("acquire_agent_continuation_wake").at(-1), toolResult({ wake }));
+    const sensitiveMessage = "PRIVATE_CONTINUATION_MESSAGE_CONTENT";
+    await view.reply(view.calls("prepare_agent_continuation_wake").at(-1), prepared(wake, sensitiveMessage));
+
+    assert.equal(hostMessages(view).length, 1);
+    const hostMessage = hostMessages(view)[0];
+    const before = view.nodes["timing-log"].textContent.split("\n").map(JSON.parse);
+    const starts = before.filter(event => event.event === "host_dispatch_start");
+    assert.equal(starts.length, 1);
+    assert.deepEqual(Object.keys(starts[0]).sort(), ["at_ms", "event", "hidden"]);
+    if (mode === "timeout") {
+      await view.fireTimers(10000);
+    } else {
+      view.advanceTime(duration);
+      if (mode === "reject") {
+        await view.reject(hostMessage, { code: -32000, message: "PRIVATE_HOST_ERROR" });
+      } else {
+        await view.reply(hostMessage, {});
+      }
+    }
+    const finish = view.calls("finish_agent_continuation_wake").at(-1);
+    assert.equal(finish.params.arguments.outcome, outcome);
+    assert.equal(hostMessages(view).length, 1, "diagnostics must not repeat an unknown delivery");
+
+    const logged = view.nodes["timing-log"].textContent;
+    const events = logged.split("\n").map(JSON.parse);
+    const results = events.filter(event => event.event === "host_dispatch_result");
+    assert.equal(results.length, 1);
+    assert.deepEqual(Object.keys(results[0]).sort(), ["at_ms", "duration_ms", "event", "hidden", "outcome"]);
+    assert.equal(results[0].outcome, outcome);
+    assert.equal(results[0].duration_ms, duration);
+    assert.ok(!logged.includes(sensitiveMessage));
+    assert.ok(!logged.includes("PRIVATE_HOST_ERROR"));
+    assert.ok(!logged.includes(wake.wake_id));
+    assert.ok(!logged.includes(wake.attempt_id));
+  });
+}
+
 test("Host dispatch rejection after prepare is unknown and never resent", async () => {
   const view = await boundView();
   await view.visibility(true);
@@ -1168,6 +1281,7 @@ test("published outputSchema projection preserves restart recovery and triggers 
 
 test("server-restart success observation performs one exact bounded rebind and resumes polling", async () => {
   const view = await boundView();
+  view.nodes["timing-toggle"].onclick();
   const originalBinding = bindingId(view);
   const state = view.calls("get_agent_continuation_state")[0];
   const restartRecovery = {
@@ -1178,6 +1292,7 @@ test("server-restart success observation performs one exact bounded rebind and r
   await view.reply(state, toolResult({ agent_continuation: restartRecovery }));
   assert.equal(view.nodes.binding.textContent, "Reconnecting");
   assert.equal(view.nodes.status.textContent, "Reconnecting…");
+  view.advanceTime(80000);
   await view.fireTimers(3000);
   const rebind = view.calls("bind_agent_continuation")[1];
   assert.ok(rebind, "recoverable loss must issue one fresh bind");
@@ -1190,6 +1305,7 @@ test("server-restart success observation performs one exact bounded rebind and r
   await view.reply(view.calls("get_agent_continuation_state")[1], toolResult({ agent_continuation: quiet }));
   assert.equal(view.nodes.binding.textContent, "Connected");
   assert.equal(hostMessages(view).length, 0);
+  assert.ok(view.nodes["timing-log"].textContent.split("\n").map(JSON.parse).some(event => event.event === "poll_actual" && event.timer_gap_ms === 80000));
 });
 
 test("repeated restart success observation is bounded and does not rebind-loop", async () => {
@@ -1451,4 +1567,25 @@ test("Agent Wait sparse reference still requires the exact durable target on App
   assert.equal(view.nodes.status.textContent, "Invalid or conflicting Wait identity");
   assert.notEqual(view.nodes.waitSummary?.hidden, false);
   assert.equal(hostMessages(view).length, 0);
+});
+
+test("Agent opt-in timing stays local, bounded and clears across remount", async () => {
+  const view = app("mcp_agent_continuation_app.html");
+  view.nodes["timing-toggle"].onclick();
+  await view.initialize();
+  view.toolInput(input);
+  const bind = view.calls("bind_agent_continuation")[0];
+  view.advanceTime(9000);
+  await view.reject(bind);
+  for (let i = 0; i < 80; i++) await view.visibility(i % 2 === 0);
+  const events = view.nodes["timing-log"].textContent.split("\n").map(JSON.parse);
+  assert.equal(events.length, 64);
+  assert.ok(events.every(event => typeof event.hidden === "boolean"));
+  assert.ok(!view.nodes["timing-log"].textContent.includes(projection.display_name));
+  await view.teardown();
+  assert.equal(hostMessages(view).length, 0);
+  assert.equal(view.timers.size, 0);
+  const remount = app("mcp_agent_continuation_app.html");
+  assert.equal(remount.document.getElementById("timing-log").textContent, "");
+  await remount.teardown();
 });

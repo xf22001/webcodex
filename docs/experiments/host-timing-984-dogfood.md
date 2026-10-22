@@ -61,7 +61,18 @@ python3 scripts/host_timing_dogfood.py compare \
 
 Times are **examples**, not a claim these runs occurred. Run this only on self-hosted data that the operator is authorized to inspect.
 
+The offline CLI also bounds **each operator-supplied JSON input** (cohort policy,
+baseline summary, candidate summary) to 64 KiB **before UTF-8 decoding and JSON
+parsing**. A larger file fails with a static error; no file content, source path
+or private field is printed. This protects the existing read-only comparison
+workflow from unexpectedly large or untrusted input files.
+
 ## Interpretation and guardrails
+
+The read-only query streams at most 100,000 selected events. Each event's
+`summary_json` must be no larger than 64 KiB in UTF-8 to enter the model
+ergonomics parser. Larger summaries remain in the selected-event total but
+count as unavailable canonical evidence; no raw summary text is exported.
 
 The report uses only ActionAudit `action_events` and `summary_json.model_ergonomics` (existing schema). Exact `toolsCall` records must have matching canonical `tool_name`, schema version and boolean `success`; anything else is counted as unavailable. `pending`/`running` are **observed handoff states**; `completed` is a separately observed in-call completion state; other or missing structured states are explicitly unclassified. Never replace missing states with `status=success`. No Job state is inferred from the HTTP status alone.
 

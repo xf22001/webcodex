@@ -10,7 +10,7 @@ const controllerId = "wc_dagent_controller1234";
 const workerId = "wc_dagent_worker123456";
 const windowKey = "a".repeat(64);
 
-function client(): RuntimeV2Client {
+function client(continuityOverrides: Record<string, unknown> = {}): RuntimeV2Client {
   return {
     post: vi.fn(async (path: string) => {
       if (path === "goals") return {
@@ -52,7 +52,7 @@ function client(): RuntimeV2Client {
             ],
             progress_summary: "Survey and design complete", checkpoint_at_unix_ms: 1_790_000_490_000, controller_agent_id: controllerId, lifecycle: "active", revision: 5, updated_at_unix_ms: 1_790_000_500_000, terminal_at_unix_ms: null, agent_task_count: 1, workflow_session_count: 1,
             activity: { available: true, state: "active", idle_threshold_ms: 300000, observation_lease_ms: 60000, last_seen_at_ms: 1_790_000_499_000, last_meaningful_activity_at_ms: 1_790_000_498_000, quiet_for_ms: 2000, linked_window_count: 1, active_meaningful_request_count: 1, coverage_partial: false },
-            continuity: { available: true, state: "ready", production_auto_resume_available: true, wake_state: null, host_delivery: "not_started", fresh_turn: "not_confirmed", last_resume_at_unix_ms: 1_790_000_400_000 },
+            continuity: { available: true, state: "ready", production_auto_resume_available: true, wake_state: null, host_delivery: "not_started", fresh_turn: "not_confirmed", last_resume_at_unix_ms: 1_790_000_400_000, ...continuityOverrides },
           },
           projects: [{ id: "agent:special:webcodex", client_id: "special", name: "WebCodex", path: "/root/git/webcodex", connected: true }],
           sessions: [{ session_id: sessionId, title: "Goal implementation Session", lifecycle: "active", mode: "normal", updated_at: 1_790_000_498, running_jobs: 1, project_id: "agent:special:webcodex", project_name: "WebCodex", client_id: "special" }],
@@ -70,7 +70,6 @@ function client(): RuntimeV2Client {
 
 describe("Goal Workbench", () => {
   it("renders durable Goal truth and navigates to exact existing resources", async () => {
-    const onSurfaceChange = vi.fn();
     const onOpenSession = vi.fn();
     const onOpenAgent = vi.fn();
     const onOpenWindow = vi.fn();
@@ -79,8 +78,6 @@ describe("Goal Workbench", () => {
         client={client()}
         language="en"
         projects={[{ id: "agent:special:webcodex", client_id: "special", name: "WebCodex", path: "/root/git/webcodex", connected: true }]}
-        surface="goals"
-        onSurfaceChange={onSurfaceChange}
         onOpenSession={onOpenSession}
         onOpenAgent={onOpenAgent}
         onOpenWindow={onOpenWindow}
@@ -107,8 +104,6 @@ describe("Goal Workbench", () => {
     expect(onOpenAgent).toHaveBeenCalledWith(controllerId);
     fireEvent.click(screen.getByText(/Window aaaaaaaaaa/));
     expect(onOpenWindow).toHaveBeenCalledWith(windowKey);
-    fireEvent.click(screen.getByRole("radio", { name: /Activity/ }));
-    expect(onSurfaceChange).toHaveBeenCalledWith("windows");
   });
 
   it("keeps Goal list and detail read-only", async () => {
@@ -117,8 +112,6 @@ describe("Goal Workbench", () => {
         client={client()}
         language="en"
         projects={[]}
-        surface="goals"
-        onSurfaceChange={vi.fn()}
         onOpenSession={vi.fn()}
         onOpenAgent={vi.fn()}
         onOpenWindow={vi.fn()}
@@ -131,4 +124,26 @@ describe("Goal Workbench", () => {
     expect(screen.queryByRole("button", { name: /complete goal/i })).toBeNull();
     await waitFor(() => expect(rendered.container.querySelectorAll(".goal-resource-row").length).toBeGreaterThan(0));
   });
+  it.each([true, false])("distinguishes continuation conditions from actual resumed work (%s)", async (ready) => {
+    render(<UiProvider><GoalWorkbench client={client({ production_auto_resume_available: ready, host_delivery: "accepted", fresh_turn: "not_confirmed" })}
+      language="en" projects={[]} onOpenSession={vi.fn()}
+      onOpenAgent={vi.fn()} onOpenWindow={vi.fn()} onUnauthorized={vi.fn()} /></UiProvider>);
+    await screen.findByRole("heading", { name: "Runtime V2 Goal Workbench" });
+    expect(screen.getAllByText(ready ? "Ready · not a guarantee" : "Not ready · continue manually").length).toBeGreaterThan(0);
+    expect(screen.getByText("The chat application may require confirmation or delay continuation. Only a confirmed fresh turn proves this continuation ran.")).toBeTruthy();
+    expect(screen.getByText(/Host delivery.*accepted.*Fresh turn.*not_confirmed/i)).toBeTruthy();
+    expect(screen.queryByText("Auto-resume ready")).toBeNull();
+  });
+
+});
+
+it.each([403, 503])("explains unavailable Goal details instead of asking for selection (status %s)", async (status) => {
+  const backing = client();
+  const failing = { post: (path: string, ...args: unknown[]) => path === "goal"
+    ? Promise.resolve({ ok: false, status }) : (backing.post as (...args: unknown[]) => unknown)(path, ...args) } as RuntimeV2Client;
+  render(<UiProvider><GoalWorkbench client={failing} language="en" projects={[]}
+    onOpenSession={vi.fn()} onOpenAgent={vi.fn()} onOpenWindow={vi.fn()} onUnauthorized={vi.fn()} /></UiProvider>);
+  const message = status === 403 ? "Goal details are not available with this access key." : "Goal details could not be loaded.";
+  expect(await screen.findByRole("heading", { name: message })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Select a Goal" })).toBeNull();
 });

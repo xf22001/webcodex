@@ -322,6 +322,18 @@ fn project_build_schema_is_closed_bounded_and_has_no_raw_execution_fields() {
     )
     .is_ok());
 
+    assert!(test_support::validate_schema_instance(
+        &serde_json::json!({"project":"demo","adapter":"python"}),
+        &schema
+    )
+    .is_ok());
+    assert!(test_support::validate_schema_instance(
+        &serde_json::json!({"project":"demo","adapter":"rust","dependency_resolution_policy":"offline"}), &schema).is_ok());
+    assert!(test_support::validate_schema_instance(
+        &serde_json::json!({"project":"demo","dependency_resolution_policy":"online"}),
+        &schema
+    )
+    .is_err());
     for forbidden in [
         "executable",
         "args",
@@ -1482,17 +1494,48 @@ fn project_validation_python_adapter_is_public_without_a_pytest_tool() {
 }
 
 #[test]
+fn project_validation_offline_dependency_policy_has_public_typed_contract() {
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "project_validate");
+    assert!(spec.description.contains("dependency_resolution_policy"));
+    assert!(spec
+        .description
+        .contains("build scripts/tests may use network"));
+    let schema = &spec.input_schema;
+    let valid = json!({
+        "project": "demo",
+        "action": "check",
+        "adapter": "rust",
+        "dependency_resolution_policy": "offline",
+        "dependency_policy": {"mode": "locked"}
+    });
+    test_support::validate_schema_instance(&valid, schema).unwrap();
+    assert!(ToolCall::from_tool_name("project_validate", valid.clone()).is_ok());
+    let mut invalid = valid;
+    invalid["dependency_resolution_policy"] = json!("online");
+    assert!(test_support::validate_schema_instance(&invalid, schema).is_err());
+    assert!(ToolCall::from_tool_name("project_validate", invalid).is_err());
+}
+
+#[test]
 fn project_validation_node_contract_advertises_bounded_test_and_execution_effects() {
     let specs = registered_tool_specs();
     let spec = spec_named(&specs, "project_validate");
     let description = spec.description.as_str();
-    assert!(description.contains("Node >=22.3: check via node --run"));
-    assert!(description.contains(
-        "native TAP test when scripts.test equals node --test or node --test --test-reporter=tap"
-    ));
-    assert!(description.contains("fixed Runner argv"));
-    assert!(description.contains("Node TAP rejects filters"));
-    assert!(description.contains("Project scripts may modify files or use network"));
+    // Assert behavioral guidance, not the exact prose of a compacted tool card.
+    for phrase in [
+        "Node >=22.3",
+        "lint selects only scripts.lint",
+        "node --run without pre/post",
+        "Node TAP test only for exact scripts.test=node --test",
+        "fixed installed CLI",
+        "project_validation_node_json_v1",
+        "not for Node",
+        "Project scripts may modify files or access network",
+        "No arbitrary executable, argv or shell",
+    ] {
+        assert!(description.contains(phrase), "missing guidance: {phrase}");
+    }
     assert_eq!(
         lookup_tool_definition("project_validate")
             .unwrap()
@@ -1503,7 +1546,7 @@ fn project_validation_node_contract_advertises_bounded_test_and_execution_effect
 
     let schema = &spec.input_schema;
     assert_eq!(schema["additionalProperties"], false);
-    for action in ["check", "test"] {
+    for action in ["check", "lint", "test"] {
         let value = json!({"project":"demo", "adapter":"node", "action":action});
         assert!(test_support::validate_schema_instance(&value, schema).is_ok());
         assert!(ToolCall::from_tool_name("project_validate", value).is_ok());
@@ -1528,5 +1571,29 @@ fn project_validation_node_contract_advertises_bounded_test_and_execution_effect
             ToolCall::from_tool_name("project_validate", invalid).is_err(),
             "{field}"
         );
+    }
+}
+
+#[test]
+fn rust_clippy_uses_project_validate_without_new_tool_or_argv() {
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "project_validate");
+    for phrase in [
+        "cargo clippy --all-targets -- -D clippy::correctness",
+        "project_validation_rust_clippy_v1",
+        "Rust lint explicitly rejects offline",
+    ] {
+        assert!(spec.description.contains(phrase), "{phrase}");
+    }
+    for hint in ["rust", "auto"] {
+        let value = json!({"project":"demo", "action":"lint", "adapter":hint, "scope":{"packages":["demo"]}, "dependency_policy":{"mode":"locked"}});
+        test_support::validate_schema_instance(&value, &spec.input_schema).unwrap();
+        assert!(ToolCall::from_tool_name("project_validate", value).is_ok());
+    }
+    assert!(!specs.iter().any(|s| s.name == "cargo_clippy"));
+    for field in ["argv", "command", "executable"] {
+        let value = json!({"project":"demo", "action":"lint", (field): "cargo clippy"});
+        assert!(test_support::validate_schema_instance(&value, &spec.input_schema).is_err());
+        assert!(ToolCall::from_tool_name("project_validate", value).is_err());
     }
 }

@@ -4,9 +4,9 @@ use webcodex_core::project_build::{
     ProjectBuildPlan, ProjectBuildProvenance, ProjectBuildRequest,
 };
 use webcodex_core::project_validation::{
-    ProjectDependencyMode, ProjectDependencyPolicy, ProjectValidationAction,
-    ProjectValidationAdapter, ProjectValidationProvenance, ProjectValidationRequest,
-    ProjectValidationScope, ProjectValidationTestOptions,
+    ProjectDependencyMode, ProjectDependencyPolicy, ProjectDependencyResolutionPolicy,
+    ProjectValidationAction, ProjectValidationAdapter, ProjectValidationProvenance,
+    ProjectValidationRequest, ProjectValidationScope, ProjectValidationTestOptions,
 };
 use webcodex_core::runner_protocol::RunnerCapabilityId;
 
@@ -44,6 +44,7 @@ fn registration(supported: bool) -> RunnerRegisterRequest {
 
 fn locked_build_request() -> ProjectBuildRequest {
     ProjectBuildRequest {
+        dependency_resolution_policy: None,
         project_id: "demo".into(),
         cwd: None,
         adapter: ProjectBuildAdapter::Rust,
@@ -60,6 +61,7 @@ fn locked_validation_request() -> ProjectValidationRequest {
         adapter: ProjectValidationAdapter::Rust,
         scope: None,
         dependency_policy: Some(locked_policy()),
+        dependency_resolution_policy: None,
         test: None,
     }
 }
@@ -303,6 +305,7 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
                 action: ProjectValidationAction::Check,
                 adapter: ProjectValidationAdapter::Python,
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -312,6 +315,7 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
                 action: ProjectValidationAction::FormatCheck,
                 adapter: ProjectValidationAdapter::Python,
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -321,6 +325,7 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
                 action: ProjectValidationAction::Test,
                 adapter: ProjectValidationAdapter::Python,
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -332,6 +337,7 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
                     all_packages: true,
                 }),
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -340,11 +346,20 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
             locked_validation_request(),
         ),
         (
+            RunnerCapabilityId::ProjectDependencyResolutionOffline,
+            ProjectValidationRequest {
+                dependency_policy: None,
+                dependency_resolution_policy: Some(ProjectDependencyResolutionPolicy::Offline),
+                ..locked_validation_request()
+            },
+        ),
+        (
             RunnerCapabilityId::ProjectValidationTestOptions,
             ProjectValidationRequest {
                 action: ProjectValidationAction::Test,
                 test: Some(ProjectValidationTestOptions::default()),
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -356,6 +371,7 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
                     all_packages: false,
                 }),
                 dependency_policy: None,
+                dependency_resolution_policy: None,
                 ..locked_validation_request()
             },
         ),
@@ -384,6 +400,73 @@ async fn project_validation_optional_capability_errors_identify_runner_without_d
             .await
             .unwrap()
             .is_none());
+    }
+}
+
+#[tokio::test]
+async fn offline_project_build_requires_additive_capability_at_planning_and_job_admission() {
+    for supported in [false, true] {
+        let registry = RunnerRegistry::default();
+        let mut runner = registration(true);
+        runner.capabilities.project_dependency_resolution_offline_v1 = supported;
+        registry.register(runner).await.unwrap();
+        let access = auth_context(None, true);
+        let mut request = locked_build_request();
+        request.dependency_policy = None;
+        request.dependency_resolution_policy = Some(ProjectDependencyResolutionPolicy::Offline);
+        let planned = registry
+            .enqueue_project_build_plan("policy-runner".into(), request.clone(), Some(&access))
+            .await;
+        if supported {
+            assert!(planned.is_ok(), "{planned:?}");
+        } else {
+            let error = planned.unwrap_err();
+            assert!(
+                error.contains("project_dependency_resolution_offline_v1"),
+                "{error}"
+            );
+            assert!(registry
+                .poll(RunnerPollRequest {
+                    client_id: "policy-runner".into(),
+                    runner_instance_id: "inst".into(),
+                })
+                .await
+                .unwrap()
+                .is_none());
+        }
+        let process = canonical_project_build_process("rust", &request).unwrap();
+        let mut plan = locked_build_plan();
+        plan.provenance.request = request;
+        plan.provenance.invocation_digest = project_build_invocation_digest(&process);
+        plan.process = process;
+        assert!(plan.is_valid());
+        let result = registry
+            .start_job_with_metadata_for_access(
+                start_request(""),
+                "test".into(),
+                ShellJobStartMetadata {
+                    project_id: Some("agent:policy-runner:demo".into()),
+                    project_cwd: Some(".".into()),
+                    purpose: Some("build".into()),
+                    shell: Some("direct_argv".into()),
+                    visibility: ShellJobVisibility::Public,
+                    structured_execution: Some(StructuredJobExecution::ProjectBuild(plan)),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .await;
+        if supported {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("project_dependency_resolution_offline_v1"),
+                "{error}"
+            );
+            assert!(registry.list_jobs(Some(10)).await.is_empty());
+        }
     }
 }
 
@@ -528,6 +611,50 @@ async fn dependency_policy_is_fenced_again_at_project_validation_job_admission()
 }
 
 #[tokio::test]
+async fn offline_dependency_resolution_capability_is_rechecked_at_job_admission() {
+    for supported in [false, true] {
+        let registry = RunnerRegistry::default();
+        let mut runner = registration(true);
+        runner.capabilities.project_dependency_resolution_offline_v1 = supported;
+        registry.register(runner).await.unwrap();
+        let mut metadata = locked_validation_metadata();
+        let validation = metadata.validation.as_mut().unwrap();
+        let provenance = validation.project_validation.as_mut().unwrap();
+        provenance.request.dependency_policy = None;
+        provenance.request.dependency_resolution_policy =
+            Some(ProjectDependencyResolutionPolicy::Offline);
+        let step = ShellJobValidationStep {
+            name: "check".into(),
+            program: "cargo".into(),
+            args: vec!["check".into(), "--offline".into(), "--all-targets".into()],
+            env: Vec::new(),
+        };
+        validation.steps = vec![step.clone()];
+        metadata.validation_steps = vec![step];
+        assert!(validation.is_valid());
+        let result = registry
+            .start_job_with_metadata_for_access(
+                start_request("cargo check --offline --all-targets"),
+                "test".into(),
+                metadata,
+                None,
+                None,
+            )
+            .await;
+        if supported {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("project_dependency_resolution_offline_v1"),
+                "{error}"
+            );
+            assert!(registry.list_jobs(Some(10)).await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn project_validation_python_preplan_selects_capability_by_action() {
     for action in [
         ProjectValidationAction::Test,
@@ -557,6 +684,7 @@ async fn project_validation_python_preplan_selects_capability_by_action() {
                         action,
                         adapter: ProjectValidationAdapter::Python,
                         dependency_policy: None,
+                        dependency_resolution_policy: None,
                         ..locked_validation_request()
                     },
                     Some(&auth_context(None, true)),
@@ -577,5 +705,71 @@ async fn project_validation_python_preplan_selects_capability_by_action() {
             assert_eq!(queued.is_some(), supported);
             assert!(registry.list_jobs(Some(10)).await.is_empty());
         }
+    }
+}
+
+#[tokio::test]
+async fn rust_clippy_old_runner_is_fenced_at_planning_and_job_admission() {
+    for hint in [
+        ProjectValidationAdapter::Rust,
+        ProjectValidationAdapter::Auto,
+    ] {
+        let registry = RunnerRegistry::default();
+        let mut runner = registration(true);
+        runner.capabilities.project_validation_rust_clippy_v1 = false;
+        registry.register(runner).await.unwrap();
+        let mut request = locked_validation_request();
+        request.action = ProjectValidationAction::Lint;
+        request.adapter = hint;
+        let access = auth_context(None, true);
+        if hint == ProjectValidationAdapter::Rust {
+            let error = registry
+                .enqueue_project_validation_plan(
+                    "policy-runner".into(),
+                    request.clone(),
+                    Some(&access),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("project_validation_rust_clippy_v1"),
+                "{error}"
+            );
+        } // Auto planning stays available for existing Node lint; resolved Clippy is gated below.
+        let mut metadata = locked_validation_metadata();
+        let validation = metadata.validation.as_mut().unwrap();
+        validation.project_validation.as_mut().unwrap().request = request;
+        validation.adapter = "cargo_clippy".into();
+        validation.kind = "lint".into();
+        validation.steps[0].name = "lint".into();
+        validation.steps[0].args = [
+            "clippy",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "clippy::correctness",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        metadata.validation_steps = validation.steps.clone();
+        assert!(validation.is_valid());
+        let error = registry
+            .start_job_with_metadata(start_request("cargo clippy"), "test".into(), metadata)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("project_validation_rust_clippy_v1"),
+            "{error}"
+        );
+        assert!(registry.list_jobs(Some(10)).await.is_empty());
+        assert!(registry
+            .poll(RunnerPollRequest {
+                client_id: "policy-runner".into(),
+                runner_instance_id: "inst".into()
+            })
+            .await
+            .unwrap()
+            .is_none());
     }
 }

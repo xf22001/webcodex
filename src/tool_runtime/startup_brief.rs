@@ -104,6 +104,7 @@ pub(crate) fn builtin_coding_workflow_projection_with_policy(
                 "purpose": "Review independently within task scope.",
                 "guidance": [
                     "Challenge authority, bounds, malformed data, privacy, replay/races, timeouts, fail-closed behavior.",
+                    "Challenge duplicated facts or execution flows, misplaced responsibilities, presentation round-trips and incomplete migrations introduced or worsened by the change. Cite code and concrete correctness, drift or maintenance impact; distinguish required fixes from optional cleanup. Style alone is not a finding.",
                     "For review-only tasks, report concrete file/line findings and impact; do not edit. Fix only when the task authorizes corrections, with focused regression validation."
                 ]
             }
@@ -645,6 +646,7 @@ fn continuation_projection(
 
     let mut projected = json!({
         "status": status,
+        "task": attempt.get("task_context").cloned().unwrap_or(Value::Null),
         "reason_code": feedback.get("reason_code").cloned().unwrap_or(Value::Null),
         "instruction": {
             "status": attempt
@@ -1018,6 +1020,15 @@ fn startup_verdict(
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     if continuation
+        .pointer("/task/stall/status")
+        .and_then(Value::as_str)
+        == Some("reconcile_required")
+    {
+        if let Some(action) = continuation_actions.first() {
+            push_unique(&mut actions, action);
+        }
+    }
+    if continuation
         .pointer("/validation/open_failures/total")
         .and_then(Value::as_u64)
         .unwrap_or(0)
@@ -1256,6 +1267,11 @@ fn enforce_hard_size_limit(brief: &mut Value) {
     // Extremely large continuation evidence is reduced item-by-item. Every
     // list retains the original total and flips truncated=true.
     const LIST_POINTERS: &[&str] = &[
+        "/continuation/task/recent_progress",
+        "/continuation/task/decisions",
+        "/continuation/task/relevant_files",
+        "/continuation/task/failure_locations",
+        "/continuation/task/next_steps",
         "/continuation/validation/delta/resolved_failures",
         "/continuation/validation/delta/new_failures",
         "/continuation/validation/delta/still_failing",
@@ -2131,6 +2147,20 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .any(|action| action.starts_with("rerun focused target 0")));
+    }
+    #[test]
+    fn startup_unknown_execution_reconciliation_precedes_other_attention_in_minimal_output() {
+        let action =
+            "reconcile the exact Job or execution outcome before considering another execution";
+        let feedback = json!({"status":"available","attempt":{
+            "task_context":{"stall":{"status":"reconcile_required"}},"suggested_next_actions":[action]}});
+        let continuation = continuation_projection(&feedback, &json!({}), true, "continued");
+        assert_eq!(
+            continuation["task"]["stall"]["status"],
+            "reconcile_required"
+        );
+        let verdict = startup_verdict(&["active_jobs_blocking".into()], &[], &continuation, true);
+        assert_eq!(verdict["suggested_next_actions"], json!([action]));
     }
 }
 

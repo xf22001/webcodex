@@ -1,3 +1,4 @@
+import { selectOption, selectListbox } from "../../test/select-option";
 import { useLayoutEffect } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -178,12 +179,12 @@ describe("product workspace task flows", () => {
       persistent_environment, connections: connectionSnapshot(),
       topology: { ...state.topology!, server: { kind: "remote" as const, url }, runner: { kind: "none" as const } } } as DesktopState;
     render(wrap(<><WorkspaceStatus state={viewer} /><Sidebar state={viewer} navigation="home" setNavigation={vi.fn()} /></>, viewer));
-    expect(screen.getByRole("status")).toHaveTextContent("Server ConnectionRunning");
-    expect(screen.getByRole("status")).not.toHaveTextContent("Local task service");
+    expect(screen.getByRole("status")).toHaveTextContent("Server connectionRunning");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Local Runner");
     expect(screen.getByRole("status")).toHaveTextContent("Desktop Tunnel connectionsNo Tunnel connections saved in Desktop");
-    expect(screen.getByRole("complementary")).toHaveTextContent("Server Connection · Running");
+    expect(screen.getByRole("complementary")).toHaveTextContent("Server connection · Running");
     expect(screen.getByRole("complementary")).toHaveTextContent("No Tunnel connections saved in Desktop");
-    expect(screen.getByRole("complementary")).not.toHaveTextContent("Local task service");
+    expect(screen.getByRole("complementary")).not.toHaveTextContent("Local Runner");
     expect(screen.queryByText("ChatGPT connected")).not.toBeInTheDocument();
     expect(native.invoke.mock.calls.every(([command]) => command === "workspace_query")).toBe(true);
     expect(api.restartOwnedRunner).not.toHaveBeenCalled();
@@ -194,32 +195,32 @@ describe("product workspace task flows", () => {
     const serverOnly = { ...state, persistent_environment, topology: { ...state.topology!, runner: { kind: "none" as const } },
       connections: connectionSnapshot(connectionFixture({ pid: null })) };
     render(wrap(<><WorkspaceStatus state={serverOnly} /><Sidebar state={serverOnly} navigation="home" setNavigation={vi.fn()} /></>, serverOnly));
-    expect(screen.getByRole("status")).toHaveTextContent("Server ConnectionRunning");
-    expect(screen.getByRole("status")).not.toHaveTextContent("Local task service");
-    expect(screen.getByRole("status")).toHaveTextContent("1 of 1 Desktop tunnels locally ready");
-    expect(screen.getByRole("complementary")).toHaveTextContent("Server Connection · Running");
+    expect(screen.getByRole("status")).toHaveTextContent("Server connectionRunning");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Local Runner");
+    expect(screen.getByRole("status")).toHaveTextContent("1 of 1 Desktop Tunnels locally ready");
+    expect(screen.getByRole("complementary")).toHaveTextContent("Server connection · Running");
   });
 
   it("does not invent a configured Runner before topology is available", () => {
     const unknown = { ...state, topology: null };
     render(wrap(<><WorkspaceStatus state={unknown} /><Sidebar state={unknown} navigation="home" setNavigation={vi.fn()} /></>, unknown));
-    expect(screen.getByRole("status")).not.toHaveTextContent("Local task service");
-    expect(screen.getByRole("complementary")).not.toHaveTextContent("Local task service");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Local Runner");
+    expect(screen.getByRole("complementary")).not.toHaveTextContent("Local Runner");
   });
 
   it.each([null, "full-environment"])("keeps configured local Runner readiness in a Full Runtime (%s)", persistent_environment => {
     const full = { ...state, persistent_environment, readiness: { ...state.readiness, runner: "error" as const, runtime_ready: false } };
     render(wrap(<><WorkspaceStatus state={full} /><Sidebar state={full} navigation="home" setNavigation={vi.fn()} /></>, full));
-    expect(screen.getByRole("status")).toHaveTextContent("Local task serviceUnavailable");
-    expect(screen.getByRole("complementary")).toHaveTextContent("Local task service · Unavailable");
+    expect(screen.getByRole("status")).toHaveTextContent("Local RunnerUnavailable");
+    expect(screen.getByRole("complementary")).toHaveTextContent("Local Runner · Unavailable");
   });
 
   it("shows the configured Runner when joining an independently managed Server", () => {
     const joined = { ...state, persistent_environment: "joined-environment",
       topology: { ...state.topology!, server: { kind: "remote" as const, url: "https://central.example" } }, connections: connectionSnapshot() };
     render(wrap(<><WorkspaceStatus state={joined} /><Sidebar state={joined} navigation="home" setNavigation={vi.fn()} /></>, joined));
-    expect(screen.getByRole("status")).toHaveTextContent("Local task serviceRunning");
-    expect(screen.getByRole("complementary")).toHaveTextContent("Local task service · Running");
+    expect(screen.getByRole("status")).toHaveTextContent("Local RunnerRunning");
+    expect(screen.getByRole("complementary")).toHaveTextContent("Local Runner · Running");
     expect(screen.getByRole("status")).toHaveTextContent("No Tunnel connections saved in Desktop");
   });
 
@@ -243,8 +244,8 @@ describe("product workspace task flows", () => {
   it("describes locally ready tunnels without counting a live but unhealthy process as ready", () => {
     const selected = { ...state, connections: connectionSnapshot(connectionFixture({ ready: false, process_started: true, lifecycle: "running" })) };
     render(wrap(<><WorkspaceStatus state={selected} /><Sidebar state={selected} navigation="home" setNavigation={vi.fn()} /></>, selected));
-    expect(screen.getByRole("status")).toHaveTextContent("0 of 1 Desktop tunnels locally ready");
-    expect(screen.getByRole("complementary")).toHaveTextContent("0 of 1 Desktop tunnels locally ready");
+    expect(screen.getByRole("status")).toHaveTextContent("0 of 1 Desktop Tunnels locally ready");
+    expect(screen.getByRole("complementary")).toHaveTextContent("0 of 1 Desktop Tunnels locally ready");
     expect(screen.queryByText("ChatGPT connected")).not.toBeInTheDocument();
   });
   it.each([
@@ -283,7 +284,7 @@ describe("product workspace task flows", () => {
     native.invoke.mockImplementation((name, value) => value.request.kind === "overview"
       ? Promise.resolve({ ...overview, runners: [{ client_id: "mini", connected: true, computer_session_availability: true }] }) : normal(name, value));
     render(wrap(<ProjectsPanel />));
-    const fleet = await screen.findByRole("region", { name: "Task execution devices" });
+    const fleet = await screen.findByRole("region", { name: "Devices" });
     expect(fleet).toHaveTextContent("Desktop session connected");
     native.invoke.mockRejectedValue({ code: "workspace_server_unreachable" });
     fireEvent(document, new Event("visibilitychange"));
@@ -293,7 +294,7 @@ describe("product workspace task flows", () => {
     expect(fleet).not.toHaveTextContent("Desktop session unavailable");
     native.invoke.mockRejectedValue({ code: "workspace_permission_denied" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Task execution devices" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Devices" })).not.toBeInTheDocument());
     expect(screen.queryByRole("row", { name: "alpha" })).not.toBeInTheDocument();
   });
 
@@ -308,10 +309,11 @@ describe("product workspace task flows", () => {
       ? Promise.resolve({ ...overview, runners: [{ client_id: "mini", connected: true, computer_session_availability: availability }] }) : normal(name, value));
     const openSettings = vi.fn();
     render(wrap(<ProjectsPanel onComputerSettings={openSettings} />));
-    const devices = await screen.findByRole("region", { name: "Task execution devices" });
+    const devices = await screen.findByRole("region", { name: "Devices" });
     expect(within(devices).getByRole("heading", { name: "This computer" })).toBeInTheDocument();
     expect(devices).toHaveTextContent(label);
-    expect(screen.getByRole("row", { name: "alpha" })).toHaveTextContent("Runs on · This computer");
+    expect(within(screen.getByRole("row", { name: "alpha" })).getByTitle("Runs on · mini")).toHaveTextContent("This computer");
+    expect(within(devices).getByText(label).closest("details")).not.toHaveAttribute("open");
     if (availability === true) {
       expect(devices).toHaveTextContent("still require system permissions");
       expect(within(devices).queryByRole("button", { name: "Desktop access settings" })).not.toBeInTheDocument();
@@ -336,7 +338,7 @@ describe("product workspace task flows", () => {
         ] })
       : value.request.kind === "projects" ? Promise.resolve({ projects, total: 2, truncated: false }) : normal(name, value));
     render(wrap(<ProjectsPanel />, viewer));
-    const fleet = await screen.findByRole("region", { name: "Task execution devices" });
+    const fleet = await screen.findByRole("region", { name: "Devices" });
     const rows = within(fleet).getAllByRole("listitem");
     expect(rows[0]).toHaveTextContent("Runner identifier · B");
     expect(rows[0]).toHaveTextContent("Connected to Server");
@@ -344,8 +346,8 @@ describe("product workspace task flows", () => {
     expect(rows[1]).toHaveTextContent("Runner identifier · C");
     expect(rows[1]).toHaveTextContent("Refresh to confirm status");
     expect(rows[1]).not.toHaveTextContent("Desktop session connected");
-    expect(screen.getByRole("row", { name: "alpha" })).toHaveTextContent("Runs on · B");
-    expect(screen.getByRole("row", { name: "beta" })).toHaveTextContent("Runs on · C");
+    expect(within(screen.getByRole("row", { name: "alpha" })).getByTitle("Runs on · B")).toHaveTextContent(/^B$/);
+    expect(within(screen.getByRole("row", { name: "beta" })).getByTitle("Runs on · C")).toHaveTextContent(/^C$/);
     expect(screen.queryByRole("button", { name: "Add Project" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Remove project/ })).not.toBeInTheDocument();
   });
@@ -358,7 +360,7 @@ describe("product workspace task flows", () => {
   });
 
   it("shows Runner Projects as read-only observed runtime inventory", async () => {
-    render(wrap(<ProjectsPanel />));    await screen.findByLabelText("2 open sessions"); expect(await screen.findAllByText("feat/export")).toHaveLength(2);
+    render(wrap(<ProjectsPanel />));    await screen.findByLabelText("Open sessions: 2"); expect(await screen.findAllByText("feat/export")).toHaveLength(2);
     expect(screen.getAllByRole("row")).toHaveLength(3);
     for (const row of screen.getAllByRole("row")) expect(within(row).queryByRole("button", { name: /Use project|Select project/ })).not.toBeInTheDocument();
     expect(screen.queryByText("Current")).not.toBeInTheDocument();
@@ -403,7 +405,7 @@ describe("product workspace task flows", () => {
     api.prepareProjectUnregister.mockResolvedValue(observation);
     api.unregisterProject.mockResolvedValue({ ...state, project: state.project, saved_projects: [state.saved_projects![0]] });
     render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByLabelText("2 open sessions");
+    await screen.findByLabelText("Open sessions: 2");
     fireEvent.click(screen.getByRole("button", { name: "Remove project beta" }));
     const dialog = await screen.findByRole("dialog", { name: "Remove project" });
     expect(dialog).toHaveTextContent("file access permissions are unchanged");
@@ -464,8 +466,8 @@ describe("product workspace task flows", () => {
     const onState = vi.fn();
     const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
     // The local saved rows are not removable until the Runner inventory lands.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Select / deselect visible" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select all shown" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (2)" }));
     expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(1);
     const next = { ...state, workspace_runner: { ...state.workspace_runner!, config_path: "other.toml" } };
@@ -532,7 +534,7 @@ describe("product workspace task flows", () => {
     api.unregisterProjects.mockImplementation(async (items: { project: string }[]) => ({ state, items: items.map(item => ({ project: item.project, success: true, status: "unregistered" })) }));
     render(wrap(<ProjectsPanel onState={vi.fn()} />));
     await screen.findByRole("checkbox", { name: "Select project-16" });
-    fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (17)" }));
     // Confirm the large batch dialog and its title separately. Mantine can
     // register the dialog accessibility label after the content has mounted.
@@ -558,10 +560,14 @@ describe("product workspace task flows", () => {
     ] });
     const onState = vi.fn();
     render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByLabelText("2 open sessions");
-    fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
+    await screen.findByLabelText("Open sessions: 2");
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
     expect(screen.getByRole("checkbox", { name: "Select alpha" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Select beta" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Deselect shown" }));
+    expect(screen.getByRole("checkbox", { name: "Select alpha" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select beta" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (2)" }));
     const dialog = await screen.findByRole("dialog", { name: "Remove selected (2)" });
     expect(dialog).toHaveTextContent("Your folder and Git files stay on disk");
@@ -591,7 +597,7 @@ describe("product workspace task flows", () => {
         : value.request.kind === "project_git" && !savedId
         ? Promise.reject(new Error("Git metadata unavailable")) : normal(name, value));
     render(wrap(<ProjectsPanel />, selected));
-    await screen.findByLabelText("2 open sessions");
+    await screen.findByLabelText("Open sessions: 2");
     const row = screen.getByRole("row", { name: "repo" });
     expect(screen.getAllByRole("row")).toHaveLength(2);
     expect(within(row).getByText(observationTime(runner.sessions.latest_updated_at * 1000, "en-US"))).toBeInTheDocument();
@@ -605,14 +611,14 @@ describe("product workspace task flows", () => {
   it("keeps the Runner inventory observable without a Desktop default project", async () => {
     const emptyDefault = { ...state, project: null, saved_projects: [], readiness: { ...state.readiness, project: "none" as const, runtime_ready: false } };
     render(wrap(<ProjectsPanel />, emptyDefault));
-    await screen.findByLabelText("2 open sessions");
+    await screen.findByLabelText("Open sessions: 2");
     expect(screen.getAllByRole("row")).toHaveLength(3);
   });
   it("opens a Window's associated Workflow Session and presents product activity rather than a ledger", async () => {
     render(wrap(<ActivityPanel activity={[]} />));
     expect(screen.getByRole("tab", { name: "Tool calls" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(await screen.findByRole("button", { name: /Open call details:.*window-001/ }));
-    const detail = await screen.findByRole("dialog", { name: "Request details · window-001" });
+    const detail = await screen.findByRole("dialog", { name: "Call details · window-001" });
     fireEvent.click(await within(detail).findByRole("button", { name: /Fix export workflow/ }));
     const workflow = await screen.findByRole("dialog", { name: "Fix export workflow" });
     await within(workflow).findByText("Review the export changes");
@@ -637,7 +643,7 @@ describe("product workspace task flows", () => {
     expect(row).not.toHaveTextContent("HTTP");
     expect(row).not.toHaveTextContent("Response handoff");
     fireEvent.click(row);
-    const dialog = await screen.findByRole("dialog", { name: "Request details · window-001" });
+    const dialog = await screen.findByRole("dialog", { name: "Call details · window-001" });
     expect((await within(dialog).findAllByText("Response handoff not confirmed")).length).toBeGreaterThan(0);
   });
   it("does not infer a call result when the preview observation fails", async () => {
@@ -708,7 +714,7 @@ describe("product workspace task flows", () => {
     const runner = { target: state.workspace_runner!, paths: { instruction_files: [], skill_roots: [] }, plugin_ids: ["safe-delete"], can_restart: true };
     api.runnerSettings.mockResolvedValue(runner);
     render(wrap(<ExtensionsPanel state={{ ...state, project: null }} onState={vi.fn()} />));
-    for (const [label, purpose] of [["Coding Agents", "codingAgentsPurpose"], ["SSH Resources", "sshPurpose"], ["MCP servers", "mcpPurpose"], ["Native Plugins", "pluginsPurpose"], ["Skills", "skillsPurpose"], ["Instructions", "instructionsPurpose"]] as const) {
+    for (const [label, purpose] of [["Coding agents", "codingAgentsPurpose"], ["SSH resources", "sshPurpose"], ["MCP servers", "mcpPurpose"], ["Native Plugins", "pluginsPurpose"], ["Skills", "skillsPurpose"], ["Instructions", "instructionsPurpose"]] as const) {
       fireEvent.click(screen.getByRole("tab", { name: label }));
       expect(screen.getByText(productText("en-US", purpose))).toBeVisible();
     }
@@ -745,7 +751,7 @@ describe("product workspace task flows", () => {
     await waitFor(() => expect(overviewCalls).toBe(1));
     const switched = { ...state, workspace_runner: { client_id: "mini", server_url: "http://localhost", config_path: "new-runner.toml" } };
     view.rerender(wrap(<ProjectsPanel />, switched));
-    await screen.findByLabelText("2 open sessions");
+    await screen.findByLabelText("Open sessions: 2");
     await act(async () => { complete({ ...overview, projects: [{ ...alpha, id: "agent:old:other", name: "Stale project", path: "/old" }] }); });
     expect(screen.queryByText("Stale project")).not.toBeInTheDocument();
     expect(screen.getByRole("row", { name: "beta" })).toBeInTheDocument();
@@ -830,7 +836,7 @@ describe("inventory convergence", () => {
 
 it("keeps Runner overview when only the default display Project disappears", async () => {
   const view = render(wrap(<ProjectsPanel />));
-  await screen.findByLabelText("2 open sessions");
+  await screen.findByLabelText("Open sessions: 2");
   const calls = native.invoke.mock.calls.filter(([, value]) => value.request.kind === "overview").length;
   const projectless = { ...state, project: null, saved_projects: [] };
   view.rerender(wrap(<ProjectsPanel />, projectless));
@@ -860,7 +866,7 @@ describe("Workflow Session loaded-record filters", () => {
     const filter = await openSessions(4);
     expect(screen.getByRole("button", { name: /Idle fixture/ })).toHaveTextContent("Open");
     native.invoke.mockClear();
-    fireEvent.change(filter, { target: { value: "running" } });
+    selectOption(filter, "running");
     expect(screen.getByRole("button", { name: /Call fixture/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Job fixture/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Idle fixture/ })).not.toBeInTheDocument();
@@ -868,7 +874,7 @@ describe("Workflow Session loaded-record filters", () => {
     expect(screen.getByText("Matching loaded sessions")).toHaveTextContent("Matching loaded sessions 2");
     expect(native.invoke).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(filter).toHaveValue("all");
+    expect(filter).toHaveValue("All");
     expect(screen.getByText("Matching loaded sessions")).toHaveTextContent("Matching loaded sessions 4");
     expect(native.invoke).not.toHaveBeenCalled();
   });
@@ -876,7 +882,7 @@ describe("Workflow Session loaded-record filters", () => {
   it.each(["open_todos", "open_questions", "open_risks"] as const)("finds positive %s without requiring running work", async field => {
     inventory([record("Attention fixture", { overview: { attention: { open_todos: 0, open_questions: 0, open_risks: 0, [field]: 1 } } }), record("Idle fixture")]);
     render(wrap(<ActivityPanel activity={[]} />));
-    fireEvent.change(await openSessions(2), { target: { value: "attention" } });
+    selectOption(await openSessions(2), "attention");
     expect(screen.getByRole("button", { name: /Attention fixture/ })).toHaveTextContent("Open");
     expect(screen.queryByRole("button", { name: /Idle fixture/ })).not.toBeInTheDocument();
     expect(screen.getByText("Matching loaded sessions")).toHaveTextContent("Matching loaded sessions 1");
@@ -886,7 +892,7 @@ describe("Workflow Session loaded-record filters", () => {
     const states = ["failed", "unavailable", "inconclusive", "not_run", "passed"];
     inventory(states.map(state => record(`${state} fixture`, { overview: { attention: { open_todos: 0, open_questions: 0, open_risks: 0 }, validation: { state } } })));
     render(wrap(<ActivityPanel activity={[]} />));
-    fireEvent.change(await openSessions(5), { target: { value: "attention" } });
+    selectOption(await openSessions(5), "attention");
     expect(screen.getByRole("button", { name: /failed fixture/ })).toHaveTextContent("Checks failed");
     for (const state of states.slice(1)) expect(screen.queryByRole("button", { name: new RegExp(`${state} fixture`) })).not.toBeInTheDocument();
   });
@@ -895,8 +901,8 @@ describe("Workflow Session loaded-record filters", () => {
     inventory([record("Alpha running fixture", { running_call: true }), record("Beta idle fixture", { project_id: beta.id })], true);
     render(wrap(<ActivityPanel activity={[]} />));
     const filter = await openSessions(2);
-    fireEvent.change(filter, { target: { value: "running" } });
-    fireEvent.click(screen.getByRole("button", { name: "Project: All Projects" }));
+    selectOption(filter, "running");
+    fireEvent.click(screen.getByRole("button", { name: "Project: All projects" }));
     const picker = screen.getByRole("dialog", { name: "Project" });
     fireEvent.click(within(picker).getByRole("button", { name: /beta/ }));
     expect(screen.getByText("No matching sessions")).toBeInTheDocument();
@@ -907,8 +913,8 @@ describe("Workflow Session loaded-record filters", () => {
     expect(screen.getByText(/Counts describe loaded records only/)).toBeInTheDocument();
     native.invoke.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(filter).toHaveValue("all");
-    expect(screen.getByRole("button", { name: "Project: All Projects" })).toBeInTheDocument();
+    expect(filter).toHaveValue("All");
+    expect(screen.getByRole("button", { name: "Project: All projects" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Alpha running fixture/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Beta idle fixture/ })).toBeInTheDocument();
     expect(native.invoke).not.toHaveBeenCalled();
@@ -923,13 +929,13 @@ describe("Workflow Session loaded-record filters", () => {
     await screen.findByText(productText("en-US", "noObservedSessions"));
     expect(screen.getByText("History is partial")).toBeInTheDocument();
     native.invoke.mockClear();
-    fireEvent.change(filter, { target: { value: "running" } });
+    selectOption(filter, "running");
     expect(screen.getByText("No matching sessions")).toBeInTheDocument();
     expect(screen.queryByText(productText("en-US", "noObservedSessions"))).not.toBeInTheDocument();
     expect(screen.getByText("Loaded sessions")).toHaveTextContent("Loaded sessions 0");
     expect(screen.getByText("Matching loaded sessions")).toHaveTextContent("Matching loaded sessions 0");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(filter).toHaveValue("all");
+    expect(filter).toHaveValue("All");
     expect(screen.getByText(productText("en-US", "noObservedSessions"))).toBeInTheDocument();
     expect(screen.queryByText("No matching sessions")).not.toBeInTheDocument();
     expect(screen.getByText("History is partial")).toBeInTheDocument();
@@ -939,7 +945,7 @@ describe("Workflow Session loaded-record filters", () => {
   it("keeps Window and System views independent of the session filter", async () => {
     inventory([record("Idle fixture")]);
     render(wrap(<ActivityPanel activity={[]} />));
-    fireEvent.change(await openSessions(1), { target: { value: "running" } });
+    selectOption(await openSessions(1), "running");
     expect(screen.getByText("No matching sessions")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Tool calls" }));
     expect(screen.queryByRole("combobox", { name: "Session filter" })).not.toBeInTheDocument();
@@ -948,7 +954,7 @@ describe("Workflow Session loaded-record filters", () => {
     expect(screen.queryByRole("combobox", { name: "Session filter" })).not.toBeInTheDocument();
     expect(screen.queryByText("No matching sessions")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Workflow Sessions" }));
-    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("running");
+    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("Running");
   });
 
   it("resets session filters on Server changes and authorization loss", async () => {
@@ -967,27 +973,27 @@ describe("Workflow Session loaded-record filters", () => {
     }
     const content = <><ActivityPanel activity={[]} /><BoundaryFrames /></>;
     const view = render(wrap(content));
-    fireEvent.change(await openSessions(1), { target: { value: "running" } });
-    fireEvent.click(screen.getByRole("button", { name: "Project: All Projects" }));
+    selectOption(await openSessions(1), "running");
+    fireEvent.click(screen.getByRole("button", { name: "Project: All projects" }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "Project" })).getByRole("button", { name: /beta/ }));
     view.rerender(wrap(content, { ...state, topology: { ...state.topology!, server: { kind: "remote", url: "https://fixture.example" } } }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("all"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("All"));
     await screen.findByRole("button", { name: /Idle fixture/ });
-    fireEvent.change(screen.getByRole("combobox", { name: "Session filter" }), { target: { value: "attention" } });
+    selectOption(screen.getByRole("combobox", { name: "Session filter" }), "attention");
     native.invoke.mockRejectedValue({ code: "workspace_permission_denied" });
     fireEvent.click(within(screen.getByRole("heading", { name: "Activity" }).parentElement!).getByRole("button", { name: "Refresh" }));
     await screen.findByRole("alert");
-    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("all");
+    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("All");
     expect(screen.queryByRole("button", { name: /Idle fixture/ })).not.toBeInTheDocument();
     native.invoke.mockImplementation(normal);
     fireEvent.click(within(screen.getByRole("heading", { name: "Activity" }).parentElement!).getByRole("button", { name: "Refresh" }));
     await screen.findByRole("button", { name: /Idle fixture/ });
-    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("all");
+    expect(screen.getByRole("combobox", { name: "Session filter" })).toHaveValue("All");
     expect(boundaryFrames.some(frame => frame.kind === "context")).toBe(true);
     expect(boundaryFrames.some(frame => frame.kind === "authorization")).toBe(true);
     for (const frame of boundaryFrames) {
-      expect(frame.status).toBe("all");
-      expect(frame.project).toBe("Project: All Projects");
+      expect(frame.status).toBe("All");
+      expect(frame.project).toBe("Project: All projects");
     }
   });
 
@@ -1002,8 +1008,8 @@ describe("Workflow Session loaded-record filters", () => {
       expect(screen.getByRole("tab", { name: "Workflow Sessions" })).toHaveFocus();
       await waitFor(() => expect(screen.getByText("Loaded sessions")).toHaveTextContent("Loaded sessions 2"));
       const filter = screen.getByRole("combobox", { name: "Session filter" }); filter.focus();
-      expect(filter).toHaveFocus(); fireEvent.change(filter, { target: { value: "running" } });
-      const trigger = screen.getByRole("button", { name: "Project: All Projects" });
+      expect(filter).toHaveFocus(); selectOption(filter, "running");
+      const trigger = screen.getByRole("button", { name: "Project: All projects" });
       fireEvent.click(trigger);
       const picker = screen.getByRole("dialog", { name: "Project" });
       fireEvent.keyDown(picker, { key: "ArrowDown" });
@@ -1023,11 +1029,11 @@ describe("Workflow Session loaded-record filters", () => {
     render(wrap(<ActivityPanel activity={[]} />));
     fireEvent.click(screen.getByRole("tab", { name: productText(locale, "sessions") }));
     const filter = screen.getByRole("combobox", { name: productText(locale, "sessionFilter") });
-    expect(within(filter).getByRole("option", { name: productText(locale, "allSessions") })).toBeInTheDocument();
-    expect(within(filter).getByRole("option", { name: productText(locale, "runningSessions") })).toBeInTheDocument();
-    expect(within(filter).getByRole("option", { name: productText(locale, "sessionsNeedAttention") })).toBeInTheDocument();
+    expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: productText(locale, "allSessions") })).toBeInTheDocument();
+    expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: productText(locale, "runningSessions") })).toBeInTheDocument();
+    expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: productText(locale, "sessionsNeedAttention") })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(productText(locale, "loadedSessions"))).toHaveTextContent("1"));
-    fireEvent.change(filter, { target: { value: "attention" } });
+    selectOption(filter, "attention");
     expect(screen.getByText(productText(locale, "noMatchingSessions"))).toBeInTheDocument();
     expect(screen.getByRole("button", { name: productText(locale, "clearActivityFilters") })).toBeInTheDocument();
   });
@@ -1125,7 +1131,7 @@ describe("project Git overview", () => {
 
   it("renders the same Git overview in narrow-screen project cards", async () => {
     const original = window.matchMedia;
-    const media = vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...original(query), matches: query === "(max-width: 600px)" }));
+    const media = vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...original(query), matches: query === "(max-width: 900px)" }));
     try {
       observe(dirty); render(wrap(<ProjectsPanel />));
       const card = await screen.findByRole("article", { name: "alpha" });
@@ -1164,8 +1170,8 @@ describe("project device filters", () => {
   it("filters exact Runner identities, combines search, and clears both filters", async () => {
     fleet(); render(wrap(<ProjectsPanel />, viewer));
     const filter = screen.getByRole("combobox", { name: productText("en-US", "executionDevice") });
-    await waitFor(() => expect(within(filter).getByRole("option", { name: "remote" })).toBeInTheDocument());
-    fireEvent.change(filter, { target: { value: "remote" } });
+    await waitFor(() => expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: "remote" })).toBeInTheDocument());
+    selectOption(filter, "remote");
     expect(screen.getAllByRole("row", { name: "shared" })).toHaveLength(1);
     expect(screen.getByRole("row", { name: "shared" })).toHaveTextContent("remote");
     expect(screen.getByRole("row", { name: "override" })).toBeInTheDocument();
@@ -1174,10 +1180,10 @@ describe("project device filters", () => {
     expect(screen.queryByRole("row", { name: "override" })).not.toBeInTheDocument();
     expect(screen.getByText("Showing 1 of 3 loaded projects")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(filter).toHaveValue("");
+    expect(filter).toHaveValue(productText("en-US", "allDevices"));
     expect(screen.getByRole("searchbox", { name: productText("en-US", "search") })).toHaveValue("");
     expect(screen.getAllByRole("row", { name: "shared" })).toHaveLength(2);
-    expect(within(filter).queryByRole("option", { name: new RegExp(productText("en-US", "thisComputer")) })).not.toBeInTheDocument();
+    expect(within(selectListbox(filter)).queryByRole("option", { hidden: true, name: new RegExp(productText("en-US", "thisComputer")) })).not.toBeInTheDocument();
   });
 
   it("links offline device cards to the focused filter and supports devices without projects", async () => {
@@ -1199,8 +1205,8 @@ describe("project device filters", () => {
     fleet([{ ...alpha, client_id: undefined }, { ...beta, client_id: undefined }], devices);
     render(wrap(<ProjectsPanel onState={vi.fn()} />));
     const filter = screen.getByRole("combobox", { name: productText("en-US", "executionDevice") });
-    await waitFor(() => expect(within(filter).getByRole("option", { name: `${productText("en-US", "thisComputer")} · mini` })).toBeInTheDocument());
-    fireEvent.change(filter, { target: { value: "mini" } });
+    await waitFor(() => expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: `${productText("en-US", "thisComputer")} · mini` })).toBeInTheDocument());
+    selectOption(filter, "mini");
     expect(screen.getByRole("row", { name: "alpha" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove project alpha" })).toBeInTheDocument();
   });
@@ -1210,10 +1216,10 @@ describe("project device filters", () => {
     fireEvent.click(await screen.findByRole("button", { name: "View projects · remote" }));
     const next = { ...viewer, topology: { ...viewer.topology!, server: { kind: "remote" as const, url: "https://other.example" } } };
     view.rerender(wrap(<ProjectsPanel />, next));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(""));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(productText("en-US", "allDevices")));
     view.rerender(wrap(<ProjectsPanel />, viewer));
     await waitFor(() => expect(screen.getAllByRole("row", { name: "shared" })).toHaveLength(2));
-    expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(productText("en-US", "allDevices"));
   });
 
   it("preserves a selected offline device during stale refresh but clears it on authorization loss", async () => {
@@ -1225,8 +1231,8 @@ describe("project device filters", () => {
     expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue("remote");
     native.invoke.mockRejectedValue({ code: "workspace_permission_denied" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(""));
-    expect(screen.queryByRole("option", { name: "remote" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(productText("en-US", "allDevices")));
+    expect(screen.queryByRole("option", { hidden: true, name: "remote" })).not.toBeInTheDocument();
   });
 
   it("retains the selected option when a partial refresh omits that device", async () => {
@@ -1242,13 +1248,13 @@ describe("project device filters", () => {
     await screen.findByText(productText("en-US", "partial"));
     const filter = screen.getByRole("combobox", { name: productText("en-US", "executionDevice") });
     expect(filter).toHaveValue("remote");
-    expect(within(filter).getByRole("option", { name: "remote" })).toBeInTheDocument();
+    expect(within(selectListbox(filter)).getByRole("option", { hidden: true, name: "remote" })).toBeInTheDocument();
     expect(screen.getByText("Showing 0 of 1 loaded projects")).toBeInTheDocument();
   });
 
   it("shows device-filtered project cards on narrow screens", async () => {
     const original = window.matchMedia;
-    const media = vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...original(query), matches: query === "(max-width: 600px)" }));
+    const media = vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...original(query), matches: query === "(max-width: 900px)" }));
     try {
       fleet(); render(wrap(<ProjectsPanel />, viewer));
       fireEvent.click(await screen.findByRole("button", { name: "View projects · remote" }));
@@ -1281,7 +1287,7 @@ describe("project device filters", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await screen.findByText("Showing 1 of 1 loaded projects");
     expect(frames.length).toBeGreaterThan(0);
-    expect(frames.every(frame => frame.device === "" && frame.count === "Showing 1 of 1 loaded projects")).toBe(true);
+    expect(frames).toEqual(frames.map(() => ({ device: productText("en-US", "allDevices"), count: "Showing 1 of 1 loaded projects" })));
   });
 
   it("clears a device absent from a complete refreshed inventory", async () => {
@@ -1294,7 +1300,7 @@ describe("project device filters", () => {
       return normal(command, value);
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(""));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: productText("en-US", "executionDevice") })).toHaveValue(productText("en-US", "allDevices")));
     expect(screen.getByText("Showing 1 of 1 loaded projects")).toBeInTheDocument();
   });
 });

@@ -1,5 +1,6 @@
 //! Exact Runner access, capability checks, dispatch and bounded response waiting.
 
+use super::accessibility::normalize_accessibility_scope;
 use super::effects::{
     classify_runner_error, computer_application_effect_delivery_failure,
     computer_application_effect_not_started, computer_application_launch_runner_error,
@@ -12,6 +13,26 @@ use super::effects::{
 };
 use super::responses::{validate_computer_response, ComputerResponseContext};
 use super::*;
+
+fn parse_computer_runner_output(
+    stdout: Option<&str>,
+    stdout_truncated: bool,
+) -> Result<Value, String> {
+    let Some(stdout) = stdout else {
+        return Err(format!(
+            "Runner returned invalid computer JSON: stdout_present=false; stdout_truncated={stdout_truncated}"
+        ));
+    };
+    serde_json::from_str(stdout).map_err(|error| {
+        // Parser Display may quote source content. Only its closed category and
+        // numeric location belong in this exceptional diagnostic.
+        format!(
+            "Runner returned invalid computer JSON: stdout_present=true; stdout_bytes={}; stdout_truncated={stdout_truncated}; parse_category={:?}; line={}; column={}",
+            stdout.len(), error.classify(), error.line(), error.column()
+        )
+    })
+}
+
 impl ToolRuntime {
     pub(super) async fn dispatch_computer_request(
         &self,
@@ -23,6 +44,10 @@ impl ToolRuntime {
         expected_surface_id: Option<&str>,
         accessibility_bounds: Option<(usize, usize)>,
     ) -> ToolResult {
+        let expected_root_element_id = payload
+            .get("root_element_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let expected_application_id = payload
             .get("application_id")
             .and_then(Value::as_str)
@@ -230,7 +255,7 @@ impl ToolRuntime {
             }
         };
         let requested_by = crate::runner_http::requested_by_from_auth(auth);
-        let (request_id, receiver) = match self
+        let (request_id, mut receiver) = match self
             .runner_registry
             .enqueue_computer(
                 client_id.to_string(),
@@ -271,9 +296,12 @@ impl ToolRuntime {
         };
         let is_effect = computer_request_is_effect(kind);
         let is_text_input = kind == "computer_input_text";
+        // Timeout cleanup still owns the response waiter until it has read
+        // dispatch certainty under the Registry lock. Dropping it earlier lets
+        // queue polling or an abandoned-request sweep erase that evidence.
         let response = match tokio::time::timeout(
             Duration::from_secs(COMPUTER_WAIT_SECS + 2),
-            receiver,
+            &mut receiver,
         )
         .await
         {
@@ -432,13 +460,11 @@ impl ToolRuntime {
             }
             return computer_error("runner_error", "Runner computer request failed");
         }
-        let output: Value = match response
-            .stdout
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-        {
-            Ok(Some(output)) => output,
+        let mut output = match parse_computer_runner_output(
+            response.stdout.as_deref(),
+            response.stdout_truncated,
+        ) {
+            Ok(output) => output,
             _ if is_pointer => {
                 return computer_pointer_effect_delivery_failure(
                     "Runner returned invalid JSON after possible pointer dispatch",
@@ -469,13 +495,15 @@ impl ToolRuntime {
                     response.request_dispatched,
                 )
             }
-            _ => {
-                return computer_error(
-                    "invalid_runner_response",
-                    "Runner returned invalid computer JSON",
-                )
-            }
+            Err(message) => return computer_error("invalid_runner_response", &message),
         };
+        if kind == "computer_accessibility_tree" {
+            if let Err(message) =
+                normalize_accessibility_scope(&mut output, expected_root_element_id.as_deref())
+            {
+                return computer_error("invalid_runner_response", &message);
+            }
+        }
         validate_computer_response(
             output,
             ComputerResponseContext {
@@ -499,5 +527,51 @@ impl ToolRuntime {
                 clipboard_write_context,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_computer_runner_output;
+    use serde_json::Value;
+
+    #[test]
+    fn computer_json_diagnostics_are_bounded_and_never_quote_payloads() {
+        for truncated in [false, true] {
+            let missing = parse_computer_runner_output(None, truncated).unwrap_err();
+            assert!(missing.contains("stdout_present=false"));
+            assert!(missing.contains(&format!("stdout_truncated={truncated}")));
+            for (raw, category) in [
+                ("", "Eof"),
+                ("{\n\"PRIVATE_SCREENSHOT\":", "Eof"),
+                ("{\"秘密PRIVATE_SCREENSHOT\":?}", "Syntax"),
+            ] {
+                let error = serde_json::from_str::<Value>(raw).unwrap_err();
+                let diagnostic = parse_computer_runner_output(Some(raw), truncated).unwrap_err();
+                assert!(diagnostic.contains(&format!("stdout_bytes={}", raw.len())));
+                assert!(diagnostic.contains(&format!("stdout_truncated={truncated}")));
+                assert!(diagnostic.contains(&format!("parse_category={category}")));
+                assert!(diagnostic.contains(&format!(
+                    "line={}; column={}",
+                    error.line(),
+                    error.column()
+                )));
+                assert!(!diagnostic.contains("PRIVATE_SCREENSHOT"));
+                assert!(!diagnostic.contains("秘密"));
+                assert!(diagnostic.len() < 256);
+            }
+        }
+    }
+
+    #[test]
+    fn computer_json_null_reaches_semantic_validation() {
+        assert_eq!(
+            parse_computer_runner_output(Some("null"), false).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            parse_computer_runner_output(Some("{}"), false).unwrap(),
+            serde_json::json!({})
+        );
     }
 }

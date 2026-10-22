@@ -298,6 +298,8 @@ mod agent_continuation_app;
 mod artifact_export;
 #[path = "mcp_tests/computer_app.rs"]
 mod computer_app;
+#[path = "mcp_tests/computer_contracts.rs"]
+mod computer_contracts;
 #[path = "mcp_tests/conformance.rs"]
 mod conformance;
 #[path = "mcp_tests/execution_control.rs"]
@@ -346,6 +348,8 @@ mod structured_failure;
 mod tools;
 #[path = "mcp_tests/work_result_app.rs"]
 mod work_result_app;
+#[path = "mcp_tests/workbench_http.rs"]
+mod workbench_http;
 
 // =========================================================================
 // HTTP integration tests — exercise the real Salvo router + AuthMiddleware.
@@ -477,6 +481,8 @@ fn readiness_audit_correlation_retains_exact_jobs_without_guessing_project() {
 
 #[path = "mcp_tests/workbench_app.rs"]
 mod workbench_app;
+#[path = "mcp_tests/workbench_upgrade.rs"]
+mod workbench_upgrade;
 
 #[path = "mcp_tests/work_result_thread_empty.rs"]
 mod work_result_thread_empty;

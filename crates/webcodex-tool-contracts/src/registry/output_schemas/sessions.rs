@@ -5,12 +5,13 @@ use webcodex_core::workflow_session_contract::{
 };
 
 use super::common::{
-    array_schema, cargo_test_count_assertion_schema, continuation_feedback_schema,
-    evidence_history_schema, evidence_integrity_schema, external_observation_schema,
+    acceptance_evidence_schema, array_schema, cargo_diagnostic_schema,
+    cargo_test_count_assertion_schema, continuation_feedback_schema, evidence_history_schema,
+    evidence_integrity_schema, external_observation_schema, failed_test_detail_schema,
     handoff_brief_schema, job_lifecycle_summary_schema, nullable_schema, open_object_schema,
-    permission_summary_schema, schema_type, session_execution_context_schema,
-    session_guards_schema, session_lifecycle_schema, session_mode_schema, task_outcome_schema,
-    validation_delta_schema, wrapped_output_schema,
+    permission_summary_schema, review_evidence_schema, schema_type,
+    session_execution_context_schema, session_guards_schema, session_lifecycle_schema,
+    session_mode_schema, task_outcome_schema, validation_delta_schema, wrapped_output_schema,
 };
 
 fn session_handoff_goal_context_schema() -> Value {
@@ -881,6 +882,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "task_outcome",
                 task_outcome_schema("Final task completion outcome with status pass/warn/fail, blocking, and task-only reasons. Resolved validation history and expected-failure audit metadata do not lower this status."),
             ),
+            ("acceptance", acceptance_evidence_schema()),
             (
                 "evidence_history",
                 evidence_history_schema("Validation evidence history status: clean, mixed_resolved, mixed_unresolved, or failed. Does not replace validation.status or validation.latest_status."),
@@ -1075,7 +1077,7 @@ fn validation_event_schema() -> Value {
             "identity": { "type": "string", "maxLength": 256 },
             "assertion_name": { "type": "string", "minLength": 1, "maxLength": MAX_MODEL_VALIDATION_ASSERTION_NAME_CHARS },
             "purpose": { "type": "string", "enum": validation_like_purposes },
-            "validation_kind": { "type": "string", "enum": ["format", "check", "test", "build", "release", "validation"] },
+            "validation_kind": { "type": "string", "enum": ["format", "check", "lint", "test", "build", "release", "validation"] },
             "success": { "type": "boolean", "description": "Immutable raw ToolResult success recorded by the Workflow Session. A request-scoped evidence assertion can make this false even when validator execution and correctness passed." },
             "validation_passed": { "type": "boolean", "description": "True when the validator/correctness execution itself passed. This can remain true while the invocation's evidence assertion is insufficient." },
             "failure_class": { "type": "string", "enum": ["none", "execution_or_correctness", "outcome_unknown", "evidence_assertion", "evidence_insufficient", "expected_result"] },
@@ -1158,37 +1160,6 @@ fn validation_diagnostics_schema() -> Value {
     })
 }
 
-fn cargo_diagnostic_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "severity": { "type": "string", "enum": ["error", "warning", "unknown"] },
-            "code": { "type": "string", "maxLength": 64 },
-            "file": { "type": "string", "maxLength": 512 },
-            "line": { "type": "integer", "minimum": 1 },
-            "column": { "type": "integer", "minimum": 1 },
-            "message": { "type": "string", "maxLength": 240 }
-        },
-        "required": ["severity", "message"]
-    })
-}
-
-fn failed_test_detail_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "name": { "type": "string", "maxLength": 240 },
-            "failure_kind": { "type": "string", "enum": ["assertion", "panic", "unknown"] },
-            "file": { "anyOf": [{"type": "string", "maxLength": 512}, {"type": "null"}] },
-            "line": { "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}] },
-            "column": { "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}] }
-        },
-        "required": ["name", "failure_kind", "file", "line", "column"]
-    })
-}
-
 fn cargo_test_summary_schema() -> Value {
     json!({
         "type": "object",
@@ -1197,30 +1168,6 @@ fn cargo_test_summary_schema() -> Value {
             "passed": { "type": "integer", "minimum": 0 },
             "failed": { "type": "integer", "minimum": 0 },
             "ignored": { "type": "integer", "minimum": 0 }
-        }
-    })
-}
-
-fn review_evidence_schema(description: &str) -> Value {
-    json!({
-        "type": "object",
-        "description": description,
-        "additionalProperties": true,
-        "properties": {
-            "available": schema_type("boolean", "True when review evidence summary is available."),
-            "source": schema_type("string", "Review evidence source, usually session_ledger."),
-            "total": schema_type("integer", "Total successful review evidence tool calls counted."),
-            "read_only_inspection_count": schema_type("integer", "Successful read-only inspection tool calls counted."),
-            "search_count": schema_type("integer", "Successful search tool calls counted."),
-            "diff_review_count": schema_type("integer", "Successful diff review tool calls counted."),
-            "workspace_review_count": schema_type("integer", "Successful workspace review tool calls counted."),
-            "hygiene_review_count": schema_type("integer", "Successful hygiene review tool calls counted."),
-            "tools": {
-                "type": "array",
-                "maxItems": 20,
-                "description": "Bounded unique review evidence tool names only; never file contents, diff hunks, stdout/stderr, command text, tokens, secrets, or raw input payloads.",
-                "items": schema_type("string", "Review evidence tool name.")
-            }
         }
     })
 }

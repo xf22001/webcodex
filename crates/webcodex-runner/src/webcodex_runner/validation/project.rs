@@ -8,7 +8,7 @@ use webcodex_core::validation_identity::{
 };
 use webcodex_validation::{
     detect_validation_recipe, project_validation_operation, resolve_node_native_project_check,
-    resolve_node_native_project_test, resolve_project_validation_recipe,
+    resolve_node_native_project_lint, resolve_node_native_project_test,
     validate_node_project_markers, RecipeId, SemanticCheck,
 };
 
@@ -45,9 +45,25 @@ pub(crate) fn plan(
     }
     let backend = detect_validation_recipe(&root, request.cwd.as_deref(), hint)
         .map_err(|e| unavailable(e.code, None))?;
+    if request.dependency_resolution_policy.is_some() && backend != RecipeId::Rust {
+        return Err(unavailable(
+            "dependency_resolution_policy_unsupported",
+            Some(backend.as_str()),
+        ));
+    }
+    if request.action == ProjectValidationAction::Lint
+        && !matches!(backend, RecipeId::Node | RecipeId::Rust)
+    {
+        return Err(unavailable(
+            "validation_action_unsupported",
+            Some(backend.as_str()),
+        ));
+    }
     let action = match request.action {
         ProjectValidationAction::FormatCheck => SemanticCheck::Format,
         ProjectValidationAction::Check => SemanticCheck::Check,
+        ProjectValidationAction::Lint if backend == RecipeId::Rust => SemanticCheck::Lint,
+        ProjectValidationAction::Lint => SemanticCheck::Check,
         ProjectValidationAction::Test => SemanticCheck::Test,
     };
     let packages = request
@@ -67,17 +83,22 @@ pub(crate) fn plan(
     // resolved recipe below is the sole authority for the executable step.
     let operation = project_validation_operation(backend.as_str(), action, packages, all_packages)
         .and_then(|operation| operation.with_dependency_policy(request.dependency_policy))
+        .and_then(|operation| {
+            operation.with_dependency_resolution_policy(request.dependency_resolution_policy)
+        })
         .and_then(|operation| operation.with_test_filter(filter))
         .map_err(|code| unavailable(code, Some(backend.as_str())))?;
     let profile = operation.compatibility_profile();
     let resolved = if backend == RecipeId::Node {
-        if action == SemanticCheck::Test {
+        if request.action == ProjectValidationAction::Lint {
+            resolve_node_native_project_lint(&root, request.cwd.as_deref())
+        } else if action == SemanticCheck::Test {
             resolve_node_native_project_test(&root, request.cwd.as_deref())
         } else {
             resolve_node_native_project_check(&root, request.cwd.as_deref())
         }
     } else {
-        resolve_project_validation_recipe(
+        webcodex_validation::resolve_project_validation_recipe_with_resolution_policy(
             &root,
             request.cwd.as_deref(),
             hint,
@@ -89,10 +110,24 @@ pub(crate) fn plan(
                 .and_then(ProjectValidationScope::explicit_packages),
             all_packages,
             request.dependency_policy,
+            request.dependency_resolution_policy,
         )
     }
     .map_err(|e| unavailable(e.code, Some(backend.as_str())))?;
-    let identity = if backend == RecipeId::Node && action == SemanticCheck::Check {
+    let node_json = resolved
+        .steps
+        .first()
+        .and_then(|step| step.node_json_framework());
+    let identity = if let Some(framework) = node_json {
+        structured_validation_target_identity(
+            if framework == "vitest" {
+                ToolValidationIdentityKind::NodeVitestTest
+            } else {
+                ToolValidationIdentityKind::NodeJestTest
+            },
+            &serde_json::json!({"cwd": resolved.recipe_root_relative}),
+        )
+    } else if backend == RecipeId::Node && action == SemanticCheck::Check {
         let script = resolved
             .steps
             .first()
@@ -127,7 +162,10 @@ pub(crate) fn plan(
                 manifest_digest: resolved.manifest_digest,
                 invocation_digest: resolved.invocation_digest,
             },
-            adapter: profile.tool_identity.into(),
+            adapter: node_json.map_or_else(
+                || profile.tool_identity.into(),
+                |framework| format!("node:{framework}:test"),
+            ),
             step: resolved
                 .steps
                 .into_iter()

@@ -138,6 +138,18 @@ Record an observation generation (and observation time where useful) with elemen
 
 The first implementation uses a positive process-local generation per observed surface and does not add a wall-clock TTL or observation timestamp. `observe_computer(action=accessibility_tree)` and the Control-side finder expose the generation attached to their fresh element handles. `observe_computer(action=element_state, surface_id, element_id)` re-resolves an existing handle and reports that same generation; it neither creates a new handle nor advances generation. `value_empty` is actionable only for supported unprotected text input and is `null` for protected/secure content or when unavailable.
 
+When an element's semantic action support is unclear, query its current state before choosing an effect:
+
+```json
+{"action":"element_state","client_id":"observed-client","surface_id":"observed-surface","element_id":"observed-element"}
+```
+
+Pass this to `observe_computer`, substituting the exact identities from the latest tree/search on that surface. Use `can_press` to choose `control_computer(action=press)`, `can_focus` for `focus`, and `can_input_text` for `input_text`. These fields describe current native eligibility, not permission or Runner capability admission. Every effect still re-resolves its target and checks live conditions. A role, readable value, or provider keyboard-focusability alone does not establish support for an action.
+
+On Windows, an enabled, unprotected InvokePattern button may support `press` while `can_focus=false`: bounded semantic focus is limited to an exact foreground `AXTextField`. An empty writable text field may support focus before it supports input; after focusing, query state again if input eligibility is uncertain. Non-empty/read-only fields remain ineligible for this text-input slice. A readable ComboBox value does not admit focus, input or selection. A false affordance calls for a different admitted route or changed preconditions rather than repeated guesses of the same action on unchanged state. Missing or failed state observation is unknown, not a false affordance.
+
+Choose the smallest observation that resolves the next decision. State queries are not mandatory before every action and do not authorize retries after uncertain effects. A successful tree/search, including a scoped subtree read, replaces all prior element IDs on that surface; use its newly returned IDs for subsequent state/control calls. `element_state` preserves the existing generation and cannot make a stale ID current.
+
 Stale recovery should remain re-observation, normally:
 
 ```text
@@ -156,6 +168,8 @@ Extend window snapshot observation with a bounded window-relative region and opt
 The first version does not need caller-controlled image quality or a general screenshot backend. Prefer bounded system-selected encoding for model observation. Return enough metadata to correlate the image with what was captured, including source/output dimensions, captured region, MIME type, byte count, digest, and capture time when available.
 
 The model surface uses `observe_computer(action=snapshot_window)`. Calls with only `client_id` + `surface_id` retain the existing `computer_snapshot` Runner wire and `observe_computer` capability for rolling compatibility. Supplying `region`, `max_width`, or `max_height` switches internally to the additive `computer_snapshot_region` Runner wire and requires both the baseline `observe_computer` capability and the additive `computer_snapshot_region` capability, so an older Runner can still serve whole-window snapshots but fails closed for the new transform. Region coordinates remain in the revalidated surface coordinate space; the Runner maps them into captured pixels, crops inside the bounded image, applies aspect-preserving downscale only when requested, and keeps JPEG encoding/quality system-selected.
+
+All three snapshot wires (`computer_snapshot`, `computer_snapshot_region`, and `computer_snapshot_display`) use the shared native-image response retention budget, including dimension-only window requests. Applying ordinary command stdout tail retention to a snapshot destroys its JSON envelope. Parse-failure diagnostics retain only stdout presence/byte count, the reported truncation flag, and the parser category/line/column; they never quote screenshot or log content. The generic Runtime/API image result and MCP-native image framing remain separate contracts.
 
 ### CU-8 — snapshot to project artifact
 
@@ -176,6 +190,10 @@ No lower-level wheel fallback is added in this slice. If a concrete product need
 
 ### CU-10 — closed key input
 
+The model-facing input schema exposes the exact lowercase key enum: `enter`, `escape`, `tab`, `arrow_up`, `arrow_down`, `arrow_left`, `arrow_right`, `page_up`, `page_down`, `home`, `end`. The optional `modifiers` array accepts only unique `shift`, `control`, `option`, and `command` values (at most four); omission or an empty array means no modifiers. The schema and Server/Computer validators share `webcodex_core::computer_input_contract`; the Server normalizes modifier order to that canonical order. These are vocabulary limits, not a promise that every chord is supported on every platform.
+
+For example, Shift+Tab uses `{"action":"key","client_id":"<observed client>","surface_id":"<observed exact surface>","key":"tab","modifiers":["shift"]}`. Do not send `Ctrl+P`, `p`, `ctrl`, or `alt`: letter shortcuts and aliases are outside this contract. On Windows, `option` means Alt, `command` is unsupported, and any chord containing Alt+Tab, Alt+Escape, or Ctrl+Escape is rejected before native input. Windows also rejects interfering held keys. The exact window must already be foreground/focused; key input never activates or focuses it implicitly. Capability and native preflight checks remain authoritative, and an uncertain effect still requires re-observation before retry.
+
 Expose key input as `control_computer(action=key, client_id, surface_id, key, modifiers?)` while retaining the additive `computer_key_input` Runner capability and wire kind. An older Runner that only advertises the semantic `control_computer` capability still fails closed. The model-facing vocabulary is deliberately limited to Enter, Escape, Tab, arrows, PageUp/PageDown, Home/End plus the bounded `shift`, `control`, `option`, and `command` modifier set. Ordinary text continues through `control_computer(action=input_text)`; callers cannot supply characters, virtual keycodes, repeat counts, held-key state, or modifier key-down/up sequences.
 
 On macOS the Runner revalidates the exact surface through the existing native window identity path, then requires its application to already be frontmost and `AXFocusedWindow` to equal that exact window. It never activates or focuses the surface implicitly. When an `AXFocusedUIElement` is available, explicitly protected or secure content fails closed. Accessibility and event-posting permission checks are preflight-only and do not request permission UI. Both key-down and key-up events are constructed and flagged before the first effect, then posted only to the exact surface PID. Quartz exposes no atomic/batch post for the pair, so the two posts are adjacent with no fallible work between them; if the Runner process terminates in that narrow interval, the result is a partial `outcome_unknown`, not a supported held-key state.
@@ -189,6 +207,12 @@ The first Windows parity slice extends the corresponding `observe_computer` acti
 The Windows Runner revalidates the exact xcap-observed HWND/PID before obtaining the UIA root, walks the UIA Control View with the same depth/node bounds, and registers the same ephemeral `element_id` plus observation-generation lineage used by macOS. The native client uses `CUIAutomation8` / `IUIAutomation2` with bounded connection/transaction timeouts plus a top-level observation deadline, so a stalled provider does not turn node bounds into an unbounded call. UIA control types are projected into the existing semantic role vocabulary where a stable equivalent exists. Password/protected elements suppress value observation.
 
 `observe_computer(action=find_elements)` remains a Control-side adapter over the canonical bounded tree, so Windows support adds no finder-specific Runner protocol. `observe_computer(action=element_state)` re-resolves the exact UIA lineage before returning normalized state. W1 deliberately reports all mutation `can_*` affordances false because the corresponding Windows effect capabilities remain independently unavailable until later parity slices.
+
+Windows tree observation reads ComboBox current values independently of text-input eligibility. It prefers the native `ValuePattern`; when unavailable, a single native `SelectionPattern` selection supplies its bounded display name. Missing or ambiguous selection remains unknown. Unavailable or unsupported properties on the selected item also leave its value unknown; an unavailable password/protection property prevents reading its name. Native deadlines and unexpected provider failures remain errors. Protected controls suppress values. This read-only observation does not admit ComboBox focus, text input, selection or pointer effects.
+
+Both `accessibility_tree` and `find_elements` accept an optional `root_element_id` from the latest observation on that exact surface. The existing `computer_accessibility_tree` Runner operation re-resolves the complete window-to-element lineage before a scoped read. On macOS, the root must carry positive identifier, title, description or placeholder evidence, using the same admission as `element_state`; anonymous roots return `stale_element` without expanding to an unscoped read. Secure text roles and subroles contribute to the same inherited protection marker as `AXProtectedContent`: their titles, descriptions, placeholders and values, and those of their descendants, remain redacted across repeated scoped observations. Relative depth remains at most 8 and returned nodes at most 256; absolute lineage is capped at 32 edges, and existing native deadlines include root resolution. The returned tree starts at relative depth zero, retains full private lineage and inherited protection, and replaces all prior element IDs on that surface. Concurrent retirement of the supplied root discards the result. No cursor store or new authority is introduced.
+
+For a truncated search, acquire a fresh tree, choose a visible branch and pass its current `element_id` as `root_element_id` to a tree/search call. Only IDs from the latest observation remain usable; reusing the previous root after a successful scoped read is stale. `count=0` with `truncated=true` remains inconclusive. This supports deeper/narrower branch reads, not pagination through unseen siblings beyond the node cap. Unscoped calls retain their existing wire shape. Scoped calls require an updated Runner: it echoes the exact requested root in a wire-only receipt which the Server verifies and removes before projecting results. Missing/mismatched receipts are rejected rather than accepting an old Runner's unscoped tree.
 
 ### Windows UIA parity W2 — exact window activation
 
@@ -255,6 +279,33 @@ Do not introduce these as shortcuts while implementing earlier slices:
 - browser tasks forced through desktop coordinates when a future DOM/ARIA-native browser surface is the better substrate.
 
 Browser-native automation may become a separate branch of Computer Use later, sharing high-level safety principles without forcing DOM/ARIA semantics into the desktop AX/UIA backend.
+
+## Cancellation and late observations
+
+A synchronous Computer request remains owned by its exact response waiter while
+queued. If that waiter is closed when the Registry checks the queue, the request
+is retired before dispatch. This applies to that request only. An operation
+already selected for dispatch keeps its existing completion and uncertain-effect
+semantics; closing a waiter does not stop a durable Job or authorize replay.
+Timeout cleanup retains its response waiter until it has consumed dispatch
+certainty under the Registry lock, so a cleanup sweep cannot erase that evidence.
+
+For a Host Stop investigation, record the UI Stop time separately from Server
+receipt, queue exit, accepted Runner result and response handoff. Metadata tracing
+records `tool_runner_request_dequeued` with Server-monotonic `queue_wait_ms`.
+Queue abandonment, abandoned-request sweeps and explicit cancellation record one
+`tool_runner_request_cancelled` event with the retained `dispatched` state and a
+bounded `reason` (`waiter_closed` or `explicit_cancel`), then finalize the exact
+synchronous request correlation. This event retires local pending bookkeeping;
+when `dispatched=true`, effects remain uncertain. Durable Job correlation keeps
+its separate terminal owner.
+
+Streaming dispatch selection precedes the bounded writer channel and wire send.
+A request can wait for channel capacity after selection, and closing its waiter
+does not retract that envelope. Dequeue therefore records Server dispatch
+selection, not wire delivery, native execution or Host receipt. Missing events
+remain unknown within trace retention/capture limits. A late read-only call
+alone does not establish a failed cancellation; see [MCP lifecycle](MCP.md).
 
 ## Validation loop
 

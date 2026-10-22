@@ -16,6 +16,22 @@ fn project_format_preserves_session_shell_and_write_guards() {
 }
 
 #[test]
+fn project_format_go_schema_exposes_only_the_closed_adapter() {
+    let schema = crate::input_schema_for_tool("project_format");
+    let sample =
+        serde_json::json!({"project":"agent:runner:demo", "adapter":"go", "files":["main.go"]});
+    assert!(test_support::validate_schema_instance(&sample, &schema).is_ok());
+    for field in ["command", "flags", "executable"] {
+        let mut injected = sample.clone();
+        injected[field] = serde_json::json!("gofmt -w");
+        assert!(test_support::validate_schema_instance(&injected, &schema).is_err());
+    }
+    let mut unsupported = sample;
+    unsupported["adapter"] = serde_json::json!("goimports");
+    assert!(test_support::validate_schema_instance(&unsupported, &schema).is_err());
+}
+
+#[test]
 fn tool_definition_source_has_no_module_wide_dead_code_allowance() {
     let source = include_str!("../tool_definition.rs");
     assert!(
@@ -25,14 +41,12 @@ fn tool_definition_source_has_no_module_wide_dead_code_allowance() {
 }
 
 #[test]
-fn tool_definitions_cover_known_names_and_public_specs() {
-    let definition_names = tool_definitions()
-        .map(|definition| definition.name)
-        .collect::<BTreeSet<_>>();
+fn tool_definition_helpers_preserve_order_lookup_and_hidden_partition() {
+    // Exact registration sets are owned by the exhaustive registration test;
+    // this test covers ordering and helper APIs rather than repeating set checks.
     let definition_order = tool_definitions()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
-    let known_names = known_tool_names().collect::<BTreeSet<_>>();
     let hidden_names = model_hidden_tool_names().collect::<BTreeSet<_>>();
     let definition_hidden_names = tool_definitions()
         .filter(|definition| definition.visibility.is_model_hidden())
@@ -44,18 +58,10 @@ fn tool_definitions_cover_known_names_and_public_specs() {
             "{name} missing ToolDefinition lookup"
         );
     }
-    assert_eq!(definition_names, known_names);
     assert_eq!(definition_order, known_tool_names().collect::<Vec<_>>());
     assert_eq!(hidden_names, definition_hidden_names);
 
     let specs = registered_tool_specs();
-    let spec_names = specs
-        .iter()
-        .map(|spec| spec.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let visible_definition_names = model_visible_tool_definitions()
-        .map(|definition| definition.name)
-        .collect::<BTreeSet<_>>();
     let spec_order = specs
         .iter()
         .map(|spec| spec.name.clone())
@@ -63,7 +69,6 @@ fn tool_definitions_cover_known_names_and_public_specs() {
     let visible_definition_order = model_visible_tool_definitions()
         .map(|definition| definition.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(spec_names, visible_definition_names);
     assert_eq!(visible_definition_order, spec_order);
     assert_eq!(registered_tool_names(), visible_definition_order);
 }

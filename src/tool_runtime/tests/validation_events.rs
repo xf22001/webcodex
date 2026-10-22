@@ -2,7 +2,7 @@ use super::support::*;
 use crate::tool_runtime::sessions::SessionTransport;
 use crate::tool_runtime::validation_parser::{NO_STABLE_DIAGNOSTICS_REASON, PARSER_KIND};
 use crate::tool_runtime::{ExecutionPurpose, ExecutionShell, ToolCall};
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[tokio::test]
 async fn run_shell_declared_validation_enters_unified_summary_with_shell_and_root_cwd() {
@@ -136,26 +136,19 @@ async fn completed_run_job_validation_enters_handoff_from_job_authority() {
     runtime
         .runner_registry
         .update_job(crate::runner_protocol::RunnerJobUpdateRequest {
-            client_id: "validation-job".to_string(),
-            runner_instance_id: "inst-validation-job".to_string(),
-            update_seq: None,
-            job_id: job_id.clone(),
             request_id: Some(request.request_id),
-            status: "completed".to_string(),
             stdout_chunk: Some(
                 "running 1 test\n\ntest result: ok. 1 passed; 0 failed; 0 ignored\n".to_string(),
             ),
-            stderr_chunk: None,
-            log_snapshot: None,
             exit_code: Some(0),
             duration_ms: Some(12),
-            error: None,
-            command_execution_state: None,
-            validation_progress: None,
-            test_count_evidence: None,
-            format_mutation: None,
-            activity: None,
-            finished: true,
+            ..runner_job_update(
+                "validation-job".to_string(),
+                "inst-validation-job".to_string(),
+                job_id.clone(),
+                "completed".to_string(),
+                true,
+            )
         })
         .await
         .unwrap();
@@ -269,27 +262,15 @@ async fn promoted_run_process_cargo_test_materializes_canonical_validation_evide
     runtime
         .runner_registry
         .update_job(crate::runner_protocol::RunnerJobUpdateRequest {
-            client_id: "validation-process-job".to_string(),
-            runner_instance_id: "inst-validation-process-job".to_string(),
-            update_seq: None,
-            job_id: job_id.clone(),
             request_id: Some(request.request_id),
-            status: "completed".to_string(),
             stdout_chunk: Some(
                 "running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
                     .to_string(),
             ),
-            stderr_chunk: None,
-            log_snapshot: None,
             exit_code: Some(0),
             duration_ms: Some(12),
-            error: None,
             command_execution_state: Some(crate::runner_protocol::ShellCommandExecutionState::Completed),
-            validation_progress: None,
-            test_count_evidence: None,
-            format_mutation: None,
-            activity: None,
-            finished: true,
+            ..runner_job_update("validation-process-job".to_string(), "inst-validation-process-job".to_string(), job_id.clone(), "completed".to_string(), true)
         })
         .await
         .unwrap();
@@ -595,33 +576,6 @@ async fn finish_coding_task_validation_available_when_ledger_has_validation_even
     assert!(finish_compact.output["validation"].get("events").is_none());
     assert!(finish_compact.output["validation"].get("latest").is_none());
 }
-fn json_contains_key(value: &Value, key: &str) -> bool {
-    match value {
-        Value::Object(map) => {
-            map.contains_key(key) || map.values().any(|value| json_contains_key(value, key))
-        }
-        Value::Array(values) => values.iter().any(|value| json_contains_key(value, key)),
-        _ => false,
-    }
-}
-
-fn assert_no_raw_validation_output_fields(value: &Value, context: &str) {
-    for key in [
-        "stdout",
-        "stderr",
-        "stdout_tail",
-        "stderr_tail",
-        "stdout_tail_excerpt",
-        "stderr_tail_excerpt",
-        "validation_output_summary",
-    ] {
-        assert!(
-            !json_contains_key(value, key),
-            "{context} must not include {key}: {value}"
-        );
-    }
-}
-
 fn cargo_toml() -> &'static str {
     "[package]\nname = \"validation-finish\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n"
 }

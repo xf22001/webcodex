@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { NativeSelect } from "@mantine/core";
+import { useFlowingSelection } from "../../../../../frontend/src/ui/useFlowingSelection";
+import { useRef, useEffect, useMemo, useState } from "react";
+import { Select } from "@mantine/core";
 import { MessageSquare, TerminalSquare, ArrowRight } from "lucide-react";
 import { useLocale } from "../../i18n/locale";
 import { useProduct } from "../../i18n/product";
@@ -56,6 +57,8 @@ export function ActivityPanel({ activity }: { activity: ActivityEntry[] }) {
   const p = useProduct(); const s = useShellText(); const { locale } = useLocale(); const workspace = useWorkspace();
   const [tab, setTab] = useState<Tab>("windows"); const [selectedProject, setProject] = useState(""); const [page, setPage] = useState(0);
   const [selectedSessionFilter, setSessionFilter] = useState<SessionFilter>("all");
+  const selectionRef = useRef<HTMLDivElement | null>(null);
+  useFlowingSelection(selectionRef, tab, { variant: "underline" });
   const [filterContext, setFilterContext] = useState(workspace.contextKey);
   const authorizationLost = workspace.error && ["authenticationRequired", "permissionDenied"].includes(workspace.errorReason);
   // A new inventory or permission boundary must never render with the previous
@@ -82,14 +85,14 @@ export function ActivityPanel({ activity }: { activity: ActivityEntry[] }) {
   const descriptions: Record<Tab, string> = { windows: p("callHistoryHelp"), sessions: p("sessionHistoryHelp"), system: p("serviceHistoryHelp") };
   return <div className="page-section workspace-page" data-webcodex-page="activity">
     <header className="page-heading-row"><h1>{p("activity")}</h1><button type="button" className="secondary-button" onClick={workspace.refresh} disabled={workspace.busy}>{p("refresh")}</button></header>
-    <div className="workspace-tabs" role="tablist" aria-label={p("activity")}>{TABS.map(value => <button key={value} type="button" role="tab" id={`activity-tab-${value}`} aria-controls={`activity-view-${value}`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1} onClick={() => setTab(value)} onKeyDown={event => {
+    <div ref={selectionRef} className="workspace-tabs" role="tablist" aria-label={p("activity")}>{TABS.map(value => <button key={value} type="button" role="tab" id={`activity-tab-${value}`} aria-controls={`activity-view-${value}`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1} onClick={() => setTab(value)} onKeyDown={event => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       event.preventDefault(); const next = event.key === "Home" ? TABS[0] : event.key === "End" ? TABS[TABS.length - 1] : TABS[(TABS.indexOf(value) + (event.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length]; setTab(next); document.getElementById(`activity-tab-${next}`)?.focus();
     }}>{labels[value]}</button>)}</div>
     <p className="activity-description">{descriptions[tab]}</p>
     {tab !== "system" && <div className="activity-view-toolbar">
       <div className="activity-project-filter"><span className="filter-label">{s("Project")}</span><ProjectPicker label={s("Project")} allLabel={p("allProjects")} emptyLabel={p("noMatches")} searchLabel={p("search")} value={project} onChange={setProject} options={workspace.projects.filter(row => row.id).map(row => ({ value: row.id, label: projectName(row), detail: displayProjectPath(row.path) }))} /></div>
-      {tab === "sessions" && <div className="activity-session-filter"><NativeSelect id="activity-session-filter" size="md" classNames={{ input: "ui-mantine-input", label: "ui-mantine-label" }} label={p("sessionFilter")} value={sessionFilter} onChange={event => setSessionFilter(event.currentTarget.value as SessionFilter)} data={[
+      {tab === "sessions" && <div className="activity-session-filter"><Select id="activity-session-filter" size="md" classNames={{ input: "ui-mantine-input", label: "ui-mantine-label" }} label={p("sessionFilter")} value={sessionFilter} searchValue={p(sessionFilter === "all" ? "allSessions" : sessionFilter === "running" ? "runningSessions" : "sessionsNeedAttention")} allowDeselect={false} onChange={value => { if (value) setSessionFilter(value as SessionFilter); }} data={[
         { value: "all", label: p("allSessions") }, { value: "running", label: p("runningSessions") }, { value: "attention", label: p("sessionsNeedAttention") },
       ]} /></div>}
       <div className="activity-counts" aria-live={tab === "sessions" ? "polite" : undefined}>{tab === "windows" ? <><span>{p("callSources")} <strong>{windows.length}</strong></span><span>{p("callsInProgress")} <strong>{windows.reduce((total, row) => total + row.active_count, 0)}</strong></span></> : <><span>{p("loadedSessions")} <strong>{workspace.sessions.length}</strong></span><span>{p("matchingLoadedSessions")} <strong>{sessions.length}</strong></span></>}</div>

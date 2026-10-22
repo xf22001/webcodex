@@ -135,6 +135,20 @@ fn tool_recommended_flows_reference_visible_defined_tools() {
 }
 
 #[test]
+fn computer_observation_flow_exposes_existing_action_state_discovery() {
+    let flow = TOOL_RECOMMENDED_FLOWS
+        .iter()
+        .find(|flow| flow.name == "observe_computer")
+        .expect("Computer observation flow");
+    assert_eq!(flow.tools, &["observe_computer"]);
+    for text in [flow.summary, flow.manifest_purpose] {
+        for term in ["element_state", "can_press", "can_focus", "can_input_text"] {
+            assert!(text.contains(term), "Computer discovery omits {term}");
+        }
+    }
+}
+
+#[test]
 fn continuation_recipes_reference_admitted_model_tools() {
     for flow in TOOL_RECOMMENDED_FLOWS {
         assert!(flow
@@ -199,6 +213,7 @@ fn single_window_goal_workflow_prefers_atomic_admission_and_keeps_host_setup_sep
             "prepare_goal_workflow",
             "present_goal_plan",
             "checkpoint_goal",
+            "revise_goal_plan",
             "finish_coding_task",
             "update_goal",
         ]

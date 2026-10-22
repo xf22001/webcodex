@@ -97,6 +97,13 @@ impl RetainedJobReceipt {
         {
             return Err("invalid format receipt context");
         }
+        crate::project_build::validate_build_artifact_report(
+            &self.kind,
+            &snapshot.status,
+            snapshot.exit_code,
+            snapshot.command_execution_state,
+            snapshot.build_artifacts.as_deref(),
+        )?;
         crate::project_format::validate_mutation_report(
             &self.kind,
             &snapshot.status,
@@ -144,7 +151,7 @@ impl RetainedJobReceipt {
             || context
                 .validation_steps
                 .iter()
-                .any(|step| !matches!(step.as_str(), "format" | "check" | "test"))
+                .any(|step| !matches!(step.as_str(), "format" | "check" | "lint" | "test"))
             || snapshot
                 .validation_progress
                 .as_ref()

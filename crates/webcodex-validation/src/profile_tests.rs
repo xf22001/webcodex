@@ -85,6 +85,7 @@ fn semantic_read_only_operations_preserve_legacy_leaf_plans_and_identity_profile
                     packages: Some(vec!["package-a".to_string(), "package-b".to_string()]),
                     all_packages: false,
                     dependency_mode: None,
+                    dependency_resolution_policy: None,
                 },
             )),
             "cargo_check",
@@ -111,6 +112,7 @@ fn semantic_read_only_operations_preserve_legacy_leaf_plans_and_identity_profile
                     all_packages: false,
                     no_run: Some(true),
                     dependency_mode: None,
+                    dependency_resolution_policy: None,
                 },
             )),
             "cargo_test",
@@ -368,6 +370,72 @@ fn locked_project_dependency_policy_maps_to_native_validation_argv_and_identity(
         format.with_dependency_policy(policy).unwrap_err(),
         "dependency_policy_unsupported"
     );
+}
+
+#[test]
+fn rust_dependency_offline_policy_is_typed_and_has_a_distinct_identity() {
+    use webcodex_core::project_validation::{
+        ProjectDependencyMode, ProjectDependencyPolicy, ProjectDependencyResolutionPolicy,
+    };
+    let offline = Some(ProjectDependencyResolutionPolicy::Offline);
+    for (check, plain, offline_argv, locked_argv) in [
+        (
+            SemanticCheck::Check,
+            vec!["check", "--all-targets"],
+            vec!["check", "--offline", "--all-targets"],
+            vec!["check", "--locked", "--offline", "--all-targets"],
+        ),
+        (
+            SemanticCheck::Test,
+            vec!["test"],
+            vec!["test", "--offline"],
+            vec!["test", "--locked", "--offline"],
+        ),
+    ] {
+        let base = project_validation_operation("rust", check, None, false).unwrap();
+        let base_id = base.validation_target_id(Some(".")).unwrap();
+        assert_eq!(
+            base.build_readonly_plan().unwrap().structured_step.args,
+            plain
+        );
+        let selected = base
+            .clone()
+            .with_dependency_resolution_policy(offline)
+            .unwrap();
+        let plan = selected.build_readonly_plan().unwrap();
+        assert_eq!(plan.structured_step.args, offline_argv);
+        assert!(plan.structured_step.is_canonical());
+        assert_ne!(selected.validation_target_id(Some(".")).unwrap(), base_id);
+        let combined = base
+            .with_dependency_policy(Some(ProjectDependencyPolicy {
+                mode: ProjectDependencyMode::Locked,
+            }))
+            .unwrap()
+            .with_dependency_resolution_policy(offline)
+            .unwrap();
+        assert_eq!(
+            combined.build_readonly_plan().unwrap().structured_step.args,
+            locked_argv
+        );
+        assert_ne!(
+            combined.validation_target_id(Some(".")).unwrap(),
+            selected.validation_target_id(Some(".")).unwrap()
+        );
+    }
+    for (backend, action) in [
+        ("go", SemanticCheck::Check),
+        ("python", SemanticCheck::Test),
+        ("node", SemanticCheck::Check),
+        ("rust", SemanticCheck::Format),
+    ] {
+        let operation = project_validation_operation(backend, action, None, false).unwrap();
+        assert_eq!(
+            operation
+                .with_dependency_resolution_policy(offline)
+                .unwrap_err(),
+            "dependency_resolution_policy_unsupported"
+        );
+    }
 }
 
 #[test]
@@ -1052,5 +1120,138 @@ fn node_native_tap_parser_matches_real_node_process() {
         assert_eq!(summary.failed, Some(failed), "{report:?}");
         assert!(parse_node_native_test_diagnostics(&stdout, true)
             .test_summary.is_none());
+    }
+}
+
+#[test]
+fn rust_clippy_scope_policy_identity_and_evidence_are_distinct() {
+    use webcodex_core::project_validation::{
+        ProjectDependencyMode, ProjectDependencyPolicy, ProjectDependencyResolutionPolicy,
+    };
+    let lint = project_validation_operation("rust", SemanticCheck::Lint, None, false).unwrap();
+    let plain = lint.validation_target_id(Some("."));
+    assert_eq!(lint.compatibility_profile().tool_identity, "cargo_clippy");
+    let step = lint.build_readonly_plan().unwrap().structured_step;
+    assert_eq!(step.name, "lint");
+    assert_eq!(
+        step.args,
+        ["clippy", "--all-targets", "--", "-D", "clippy::correctness"]
+    );
+    assert!(step.is_canonical());
+    assert!(!is_known_tool_name("cargo_clippy"));
+    for action in [SemanticCheck::Check, SemanticCheck::Test] {
+        assert_ne!(
+            plain,
+            project_validation_operation("rust", action, None, false)
+                .unwrap()
+                .validation_target_id(Some("."))
+        );
+    }
+    let scoped = project_validation_operation(
+        "rust",
+        SemanticCheck::Lint,
+        Some(vec!["b".into(), "a".into(), "a".into()]),
+        false,
+    )
+    .unwrap();
+    let reordered = project_validation_operation(
+        "rust",
+        SemanticCheck::Lint,
+        Some(vec!["a".into(), "b".into()]),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        scoped.validation_target_id(Some(".")),
+        reordered.validation_target_id(Some("."))
+    );
+    assert_ne!(plain, scoped.validation_target_id(Some(".")));
+    assert_eq!(
+        scoped.build_readonly_plan().unwrap().structured_step.args,
+        [
+            "clippy",
+            "--all-targets",
+            "-p",
+            "a",
+            "-p",
+            "b",
+            "--",
+            "-D",
+            "clippy::correctness"
+        ]
+    );
+    let all = project_validation_operation("rust", SemanticCheck::Lint, None, true).unwrap();
+    assert_ne!(plain, all.validation_target_id(Some(".")));
+    let all_step = all.build_readonly_plan().unwrap().structured_step;
+    assert!(all_step.is_project_workspace_cargo());
+    assert!(!all_step.is_canonical());
+    let locked = lint
+        .clone()
+        .with_dependency_policy(Some(ProjectDependencyPolicy {
+            mode: ProjectDependencyMode::Locked,
+        }))
+        .unwrap();
+    assert_ne!(plain, locked.validation_target_id(Some(".")));
+    assert_eq!(
+        locked.build_readonly_plan().unwrap().structured_step.args,
+        [
+            "clippy",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "clippy::correctness"
+        ]
+    );
+    assert!(lint
+        .clone()
+        .with_dependency_resolution_policy(Some(ProjectDependencyResolutionPolicy::Offline))
+        .is_err());
+    assert!(lint.clone().with_test_filter(Some("a")).is_err());
+    for backend in ["go", "python", "node"] {
+        assert!(project_validation_operation(backend, SemanticCheck::Lint, None, false).is_err());
+    }
+    let adapter = lint.evidence_profile();
+    assert_eq!(adapter.validation_kind(), "lint");
+    let warnings = adapter.parse(
+        "",
+        "warning: unused variable: `x`\n --> src/lib.rs:1:5\n",
+        false,
+    );
+    let failure = adapter.map_failure_kind(ValidationFailureEvidence {
+        success: false,
+        exit_code: Some(101),
+        reported_failure_kind: None,
+        stdout_excerpt: "",
+        stderr_excerpt: "",
+        diagnostics: Some(&warnings),
+    });
+    assert_eq!(failure, "process_exit");
+    assert_eq!(
+        adapter.map_failure_kind(ValidationFailureEvidence {
+            success: true,
+            exit_code: Some(0),
+            reported_failure_kind: None,
+            stdout_excerpt: "",
+            stderr_excerpt: "",
+            diagnostics: Some(&warnings),
+        }),
+        "unknown"
+    );
+    for args in [
+        vec!["clippy", "--all-targets"],
+        vec!["clippy", "--all-targets", "--", "-D", "warnings"],
+        vec![
+            "clippy",
+            "--offline",
+            "--all-targets",
+            "--",
+            "-D",
+            "clippy::correctness",
+        ],
+    ] {
+        let mut bad = step.clone();
+        bad.args = args.into_iter().map(str::to_string).collect();
+        assert!(!bad.is_canonical_project_step());
     }
 }

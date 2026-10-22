@@ -86,25 +86,11 @@ async fn register_and_start_sequenced_agent_job(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
-            computer_session_availability: None,
-            process_started_at: None,
-            build: None,
-            job_concurrency_limit: None,
             job_inventory: Some(ShellJobInventory {
                 active_complete: true,
                 jobs: Vec::new(),
             }),
-            coding_agent_providers: None,
-            coding_agent_inventory: None,
-            client_id: client_id.to_string(),
-            runner_instance_id: "inst".to_string(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
-            display_name: None,
-            owner: None,
-            hostname: None,
-            host_context: None,
-            capabilities: crate::test_support::current_runner_capabilities(caps),
-            policy: None,
+            ..crate::test_support::runner_registration(client_id, "inst", caps)
         })
         .await
         .unwrap();
@@ -157,24 +143,18 @@ async fn update_observed_job(
     runtime
         .runner_registry
         .update_job(RunnerJobUpdateRequest {
-            client_id: client_id.to_string(),
-            runner_instance_id: "inst".to_string(),
-            update_seq: None,
-            job_id: request.job_id.clone().expect("Job request id"),
             request_id: Some(request.request_id.clone()),
-            status: status.to_string(),
             stdout_chunk: stdout_chunk.map(str::to_string),
-            stderr_chunk: None,
-            log_snapshot: None,
             exit_code: finished.then_some(0),
             duration_ms: finished.then_some(25),
-            error: None,
-            command_execution_state: None,
-            validation_progress: None,
-            test_count_evidence: None,
-            format_mutation: None,
             activity,
-            finished,
+            ..runner_job_update(
+                client_id.to_string(),
+                "inst".to_string(),
+                request.job_id.clone().expect("Job request id"),
+                status.to_string(),
+                finished,
+            )
         })
         .await
         .unwrap();
@@ -190,24 +170,16 @@ async fn update_sequenced_observed_job(
     runtime
         .runner_registry
         .update_job(RunnerJobUpdateRequest {
-            client_id: client_id.to_string(),
-            runner_instance_id: "inst".to_string(),
             update_seq: Some(sequence),
-            job_id: request.job_id.clone().expect("Job request id"),
             request_id: Some(request.request_id.clone()),
-            status: "running".to_string(),
             stdout_chunk: stdout_chunk.map(str::to_string),
-            stderr_chunk: None,
-            log_snapshot: None,
-            exit_code: None,
-            duration_ms: None,
-            error: None,
-            command_execution_state: None,
-            validation_progress: None,
-            test_count_evidence: None,
-            format_mutation: None,
-            activity: None,
-            finished: false,
+            ..runner_job_update(
+                client_id.to_string(),
+                "inst".to_string(),
+                request.job_id.clone().expect("Job request id"),
+                "running".to_string(),
+                false,
+            )
         })
         .await
         .unwrap();
@@ -994,14 +966,38 @@ fn observe_jobs_canonical_and_compact_success_both_match_output_schema() {
         "immediate",
         0,
     );
-    let projected = compact_projection(&canonical);
     let schema = super::super::registry::output_schema_for_tool("observe_jobs");
-    for (label, result) in [("canonical", canonical), ("compact", projected)] {
-        let value = serde_json::to_value(&result).unwrap();
-        assert!(
-            super::super::startup_brief::validate_schema_instance_for_test(&value, &schema).is_ok(),
-            "{label} observe_jobs result did not satisfy output schema: {value}"
-        );
+    for kind in [
+        None,
+        Some("meaningful_change"),
+        Some("heartbeat"),
+        Some("change"),
+    ] {
+        let mut canonical = ToolResult::ok(canonical.output.clone());
+        if let Some(kind) = kind {
+            canonical.output["wait"]["outcome"] = json!("updated");
+            canonical.output["wait"]["update_kind"] = json!(kind);
+            canonical.output["changed_count"] = json!(1);
+            let observation = &mut canonical.output["items"][0]["output"];
+            observation["changed"] = json!(true);
+            observation["meaningful_changed"] = json!(kind == "meaningful_change");
+            observation["heartbeat_changed"] = json!(kind == "heartbeat");
+        }
+        let projected = compact_projection(&canonical);
+        for (label, result) in [("canonical", canonical), ("compact", projected)] {
+            assert_eq!(result.output["wait"]["update_kind"].as_str(), kind);
+            let mut value = serde_json::to_value(&result).unwrap();
+            assert!(
+                super::super::startup_brief::validate_schema_instance_for_test(&value, &schema)
+                    .is_ok(),
+                "{label} observe_jobs result did not satisfy output schema: {value}"
+            );
+            value["output"]["wait"]["update_kind"] = json!("invalid");
+            assert!(
+                super::super::startup_brief::validate_schema_instance_for_test(&value, &schema)
+                    .is_err()
+            );
+        }
     }
 }
 
@@ -1426,7 +1422,7 @@ async fn observe_jobs_missing_baseline_is_immediate_and_projects_activity_withou
             ToolCall::ObserveJobs {
                 items: vec![item(&job_id, None)],
                 tail_lines: 40,
-                wait_secs: Some(60),
+                wait_secs: Some(120),
                 wake_on: ObserveJobsWakeOn::Terminal,
 
                 summary_only: false,
@@ -1437,6 +1433,11 @@ async fn observe_jobs_missing_baseline_is_immediate_and_projects_activity_withou
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["wait"]["outcome"], "immediate");
     assert_eq!(result.output["wait"]["waited_ms"], 0);
+    // A normalized request must not be echoed as the original duration, and
+    // a baseline read has no triggering update to classify.
+    for field in ["requested_secs", "wake_on", "reason", "update_kind"] {
+        assert!(result.output["wait"].get(field).is_none(), "{field}");
+    }
     assert_eq!(result.output["items"][0]["output"]["status"], "running");
     assert_eq!(
         result.output["items"][0]["output"]["activity"],
@@ -1570,6 +1571,7 @@ async fn observe_jobs_one_item_update_wakes_shared_wait_and_refreshes_all_snapsh
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["wait"]["outcome"], "updated");
+    assert_eq!(result.output["wait"]["update_kind"], "meaningful_change");
     assert!(result.output["wait"]["waited_ms"].as_u64().unwrap() < 5_000);
     assert_eq!(result.output["items"][0]["output"]["status"], "running");
     assert_eq!(result.output["items"][1]["output"]["status"], "running");
@@ -1617,6 +1619,7 @@ async fn observe_jobs_meaningful_change_suppresses_heartbeat_then_change_reports
         .expect("meaningful output must wake promptly");
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["wait"]["outcome"], "updated");
+    assert_eq!(result.output["wait"]["update_kind"], "meaningful_change");
     let output = &result.output["items"][0]["output"];
     assert_eq!(output["changed"], true);
     assert_eq!(output["meaningful_changed"], true);
@@ -1639,6 +1642,7 @@ async fn observe_jobs_meaningful_change_suppresses_heartbeat_then_change_reports
         .expect("change policy must expose sequence-only liveness");
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["wait"]["outcome"], "updated");
+    assert_eq!(result.output["wait"]["update_kind"], "heartbeat");
     let output = &result.output["items"][0]["output"];
     assert_eq!(output["changed"], true);
     assert_eq!(output["meaningful_changed"], false);
@@ -1782,24 +1786,18 @@ async fn ordinary_receipts_production_sqlite_dual_restart_observe_and_list_filte
     runtime
         .runner_registry
         .update_job(RunnerJobUpdateRequest {
-            client_id: client.into(),
-            runner_instance_id: "inst".into(),
-            update_seq: None,
-            job_id: job_id.clone(),
             request_id: Some(request.request_id),
-            status: "completed".into(),
             stdout_chunk: Some("bounded stdout\n".into()),
             stderr_chunk: Some("bounded stderr\n".into()),
-            log_snapshot: None,
             exit_code: Some(0),
             duration_ms: Some(42),
-            error: None,
-            command_execution_state: None,
-            validation_progress: None,
-            test_count_evidence: None,
-            format_mutation: None,
-            activity: None,
-            finished: true,
+            ..runner_job_update(
+                client.into(),
+                "inst".into(),
+                job_id.clone(),
+                "completed".into(),
+                true,
+            )
         })
         .await
         .unwrap();
@@ -1950,24 +1948,16 @@ async fn observe_jobs_terminal_policy_coalesces_noisy_jobs_with_one_deadline_and
         runtime
             .runner_registry
             .update_job(RunnerJobUpdateRequest {
-                client_id: "coalesce-b".into(),
-                runner_instance_id: "inst".into(),
-                update_seq: None,
-                job_id: job_b.clone(),
                 request_id: Some(request_b.request_id.clone()),
-                status: "running".into(),
-                stdout_chunk: None,
                 stderr_chunk: Some("stderr during wait\n".into()),
-                log_snapshot: None,
-                exit_code: None,
-                duration_ms: None,
-                error: None,
-                command_execution_state: None,
-                validation_progress: None,
-                test_count_evidence: None,
-                format_mutation: None,
                 activity: Some(process_activity()),
-                finished: false,
+                ..runner_job_update(
+                    "coalesce-b".into(),
+                    "inst".into(),
+                    job_b.clone(),
+                    "running".into(),
+                    false,
+                )
             })
             .await
             .unwrap();
@@ -2310,26 +2300,20 @@ async fn observe_jobs_generic_failed_test_identity_survives_small_model_tail() {
         runtime
             .runner_registry
             .update_job(RunnerJobUpdateRequest {
-                client_id: client.into(),
-                runner_instance_id: "inst".into(),
-                update_seq: None,
-                job_id: job.into(),
                 request_id: Some(request.request_id),
-                status: "failed".into(),
                 stdout_chunk: Some(stdout),
-                stderr_chunk: None,
-                log_snapshot: None,
                 exit_code: Some(101),
                 duration_ms: Some(100),
-                error: None,
                 command_execution_state: Some(
                     crate::runner_protocol::ShellCommandExecutionState::Completed,
                 ),
-                validation_progress: None,
-                test_count_evidence: None,
-                format_mutation: None,
-                activity: None,
-                finished: true,
+                ..runner_job_update(
+                    client.into(),
+                    "inst".into(),
+                    job.into(),
+                    "failed".into(),
+                    true,
+                )
             })
             .await
             .unwrap();

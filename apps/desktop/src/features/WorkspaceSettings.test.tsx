@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,7 +31,13 @@ const onState = vi.fn();
 const wrap = (element: React.ReactNode) => <MantineProvider><LocaleProvider><WorkspaceProvider state={state}>{element}</WorkspaceProvider></LocaleProvider></MantineProvider>;
 function FileAccessHarness() {
   const [current, setCurrent] = useState(settings);
-  return <RunnerFileAccess settings={current} disabled={false} onState={onState} onSettings={next => { settings = next; setCurrent(next); }} />;
+  return <RunnerFileAccess state={state} settings={current} disabled={false} onState={onState} onSettings={next => { settings = next; setCurrent(next); }} />;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(yes => { resolve = yes; });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -48,7 +54,7 @@ beforeEach(() => {
   api.authorizeRunnerCapabilities.mockResolvedValue({ target, can_authorize: true, coding_agents: true, ssh_resources: true });
   api.sshResources.mockResolvedValue({ runner: target.client_id, available: true, observation_id: "observed", resources: [], error_kind: null });
   api.updateRunnerSettings.mockImplementation(async (_target, _expected, paths) => { settings.paths = paths; return state; });
-  api.updateRunnerAllowedRoots.mockImplementation(async (_target, expected, roots) => { expect(expected).toEqual(settings.file_access.configured_roots); settings.file_access = { configured_roots: roots, default_roots: ["/Users/fixture"], effective_roots: roots.length ? roots : ["/Users/fixture"], using_default_roots: roots.length === 0, allow_cwd_anywhere: false }; return state; });
+  api.updateRunnerAllowedRoots.mockImplementation(async (_target, expected, roots) => { expect(expected).toEqual(settings.file_access.configured_roots); settings = { ...settings, file_access: { configured_roots: roots, default_roots: ["/Users/fixture"], effective_roots: roots.length ? roots : ["/Users/fixture"], using_default_roots: roots.length === 0, allow_cwd_anywhere: false } }; return state; });
   api.addRunnerPlugin.mockImplementation(async (_target, provider) => { settings.plugin_ids.push(provider.id); return state; });
   api.restartOwnedRunner.mockResolvedValue(state); api.getState.mockResolvedValue(state); api.updateTunnelConfig.mockResolvedValue(state);
   api.computerPermissions.mockResolvedValue({ supported: true, foreground: false, execution_process: "WebCodex Runner", execution_path: "/Applications/WebCodex.app/Contents/Resources/webcodex-runner", runner_accessibility: "unknown", runner_screen_recording: "unknown", desktop_accessibility: false, desktop_screen_recording: false });
@@ -59,11 +65,11 @@ beforeEach(() => {
 describe("workspace configuration boundaries", () => {
   it("edits running Tunnel credentials and clears the write-only key", async () => {
     render(wrap(<TunnelConfigDiagnostics state={state} onState={onState} />));
-    const id = screen.getByLabelText("Tunnel ID"), key = screen.getByLabelText("API Key");
+    const id = screen.getByLabelText("Tunnel ID"), key = screen.getByLabelText("API key");
     expect(id).not.toBeDisabled(); expect(key).not.toBeDisabled();
     fireEvent.change(id, { target: { value: "tunnel_replacement" } });
     fireEvent.change(key, { target: { value: "fixture-only-key" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save and Apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     await waitFor(() => expect(api.updateTunnelConfig).toHaveBeenCalledWith({ action: "save", tunnelId: "tunnel_replacement", apiKey: "fixture-only-key" }));
     expect(key).toHaveValue(""); expect(document.body.textContent).not.toContain("fixture-only-key");
   });
@@ -72,8 +78,8 @@ describe("workspace configuration boundaries", () => {
     api.updateTunnelConfig.mockRejectedValue({ code: "tunnel_config_apply_failed", message: "Saved", next_action: "Retry" });
     api.getState.mockResolvedValue({ ...state, openai_tunnel_config: { ...state.openai_tunnel_config, saved_tunnel_id: "tunnel_saved", effective_tunnel_id: "tunnel_saved" } });
     render(wrap(<TunnelConfigDiagnostics state={state} onState={onState} />));
-    fireEvent.click(screen.getByRole("button", { name: "Save and Apply" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Configuration saved, but the tunnel needs recovery");
+    fireEvent.click(screen.getByRole("button", { name: "Save and apply" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Configuration saved, but the Tunnel needs recovery");
     await waitFor(() => expect(api.getState).toHaveBeenCalledTimes(1));
     expect(api.updateTunnelConfig).toHaveBeenCalledTimes(1);
   });
@@ -120,6 +126,96 @@ describe("workspace configuration boundaries", () => {
     await waitFor(() => expect(api.runnerSettings).toHaveBeenCalled());
   });
 
+
+  it("cancels a folder choice when file-access settings unmount", async () => {
+    const pick = deferred<string | null>();
+    dialog.open.mockReturnValueOnce(pick.promise);
+    const onSettings = vi.fn();
+    const view = render(wrap(<RunnerFileAccess state={state} settings={settings} disabled={false} onState={onState} onSettings={onSettings} />));
+    fireEvent.click(screen.getByRole("button", { name: "Authorize folder" }));
+    view.unmount();
+    await act(async () => { pick.resolve("/Volumes/Late"); });
+    expect(api.updateRunnerAllowedRoots).not.toHaveBeenCalled();
+    expect(api.runnerSettings).not.toHaveBeenCalled();
+    expect(onState).not.toHaveBeenCalled();
+    expect(onSettings).not.toHaveBeenCalled();
+  });
+
+  it("owns one folder picker until its choice completes", async () => {
+    const pick = deferred<string | null>();
+    dialog.open.mockReturnValueOnce(pick.promise);
+    render(wrap(<FileAccessHarness />));
+    const add = screen.getByRole("button", { name: "Authorize folder" });
+    fireEvent.click(add); fireEvent.click(add);
+    expect(dialog.open).toHaveBeenCalledTimes(1);
+    expect(add).toBeDisabled();
+    await act(async () => { pick.resolve(null); });
+    expect(add).toBeEnabled();
+    expect(api.updateRunnerAllowedRoots).not.toHaveBeenCalled();
+  });
+
+  it.each(["target", "roots", "operation"] as const)("discards a folder choice after an intervening %s change, even when it changes back", async kind => {
+    const pick = deferred<string | null>();
+    dialog.open.mockReturnValueOnce(pick.promise);
+    const original = structuredClone(settings);
+    const onSettings = vi.fn();
+    const panel = (snapshot: RunnerSettings, disabled = false) => wrap(<RunnerFileAccess state={state} settings={snapshot} disabled={disabled} onState={onState} onSettings={onSettings} />);
+    const view = render(panel(original));
+    fireEvent.click(screen.getByRole("button", { name: "Authorize folder" }));
+    const changed = structuredClone(original);
+    if (kind === "target") changed.target.client_id = "another-runner";
+    if (kind === "roots") changed.file_access.configured_roots = ["/Volumes/Elsewhere"];
+    view.rerender(panel(changed, kind === "operation"));
+    view.rerender(panel(original));
+    await act(async () => { pick.resolve("/Volumes/Late"); });
+    expect(api.updateRunnerAllowedRoots).not.toHaveBeenCalled();
+    expect(onSettings).not.toHaveBeenCalled();
+  });
+
+  it("ignores a file-access mutation that completes after leaving the settings page", async () => {
+    const save = deferred<DesktopState>();
+    api.updateRunnerAllowedRoots.mockReturnValueOnce(save.promise);
+    settings.file_access = { ...settings.file_access, configured_roots: ["/fixture/work"], effective_roots: ["/fixture/work"], using_default_roots: false };
+    const onSettings = vi.fn();
+    const view = render(wrap(<RunnerFileAccess state={state} settings={settings} disabled={false} onState={onState} onSettings={onSettings} />));
+    fireEvent.click(screen.getByRole("button", { name: "Restore default access" }));
+    expect(api.updateRunnerAllowedRoots).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => { save.resolve(state); });
+    expect(onState).not.toHaveBeenCalled();
+    expect(api.runnerSettings).not.toHaveBeenCalled();
+    expect(onSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not replace new roots with a late canonical readback", async () => {
+    const readback = deferred<RunnerSettings>();
+    api.runnerSettings.mockReturnValueOnce(readback.promise);
+    api.updateRunnerAllowedRoots.mockResolvedValueOnce(state);
+    settings.file_access = { ...settings.file_access, configured_roots: ["/fixture/work"], effective_roots: ["/fixture/work"], using_default_roots: false };
+    const original = structuredClone(settings), onSettings = vi.fn();
+    const panel = (snapshot: RunnerSettings) => wrap(<RunnerFileAccess state={state} settings={snapshot} disabled={false} onState={onState} onSettings={onSettings} />);
+    const view = render(panel(original));
+    fireEvent.click(screen.getByRole("button", { name: "Restore default access" }));
+    await waitFor(() => expect(api.runnerSettings).toHaveBeenCalledTimes(1));
+    const newer = { ...original, file_access: { ...original.file_access, configured_roots: ["/Volumes/Newer"], effective_roots: ["/Volumes/Newer"] } };
+    view.rerender(panel(newer));
+    await act(async () => { readback.resolve(original); });
+    expect(onState).toHaveBeenCalledTimes(1);
+    expect(onSettings).not.toHaveBeenCalled();
+    expect(screen.getAllByText("/Volumes/Newer").length).toBeGreaterThan(0);
+  });
+
+  it("retries only the file-access readback when a background refresh temporarily owns the core", async () => {
+    settings.file_access = { ...settings.file_access, configured_roots: ["/fixture/work"], effective_roots: ["/fixture/work"], using_default_roots: false };
+    api.runnerSettings.mockRejectedValueOnce({ code: "desktop_state_unavailable", message: "Refreshing", next_action: "Refresh" });
+    render(wrap(<FileAccessHarness />));
+    fireEvent.click(screen.getByRole("button", { name: "Restore default access" }));
+    await screen.findByText("No custom folders configured.");
+    expect(api.updateRunnerAllowedRoots).toHaveBeenCalledTimes(1);
+    expect(api.runnerSettings).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("applies exact-target instruction and Skill paths without Runner restart", async () => {
     render(wrap(<ExtensionsPanel state={state} onState={onState} />));
     fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
@@ -137,9 +233,9 @@ describe("workspace configuration boundaries", () => {
     dialog.open.mockResolvedValueOnce("/fixture/picked-skills");
     render(wrap(<ExtensionsPanel state={state} onState={onState} />));
     fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
-    await screen.findByLabelText("Configured Skill roots");
-    fireEvent.click(screen.getByRole("button", { name: "Add Skill Folder" }));
-    await waitFor(() => expect(screen.getByLabelText("Configured Skill roots 2")).toHaveValue("/fixture/picked-skills"));
+    await screen.findByLabelText("Configured Skill folders");
+    fireEvent.click(screen.getByRole("button", { name: "Add Skill folder" }));
+    await waitFor(() => expect(screen.getByLabelText("Configured Skill folders 2")).toHaveValue("/fixture/picked-skills"));
     expect(dialog.open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }));
     expect(api.updateRunnerSettings).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -150,7 +246,7 @@ describe("workspace configuration boundaries", () => {
   it("keeps path drafts visible through a failed settings refresh and permits recovery", async () => {
     render(wrap(<ExtensionsPanel state={state} onState={onState} />));
     fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
-    const input = await screen.findByLabelText("Configured Skill roots");
+    const input = await screen.findByLabelText("Configured Skill folders");
     fireEvent.change(input, { target: { value: "/fixture/unsaved-skills" } });
     api.runnerSettings.mockRejectedValueOnce(new Error("fixture settings unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -204,7 +300,7 @@ describe("workspace configuration boundaries", () => {
     expect(await screen.findByText("WebCodex Runner")).toBeInTheDocument();
     expect(screen.getByText("/Applications/WebCodex.app/Contents/Resources/webcodex-runner")).toBeInTheDocument();
     const runner = document.querySelector('[data-webcodex-permission-owner="runner"]') as HTMLElement;
-    expect(runner).toHaveTextContent("Not observed here · Requires system check");
+    expect(runner).toHaveTextContent("Unknown · Check in System Settings");
     api.computerPermissions.mockResolvedValueOnce({ supported: true, foreground: false, execution_process: "WebCodex Runner", execution_path: "/Applications/WebCodex.app/Contents/Resources/webcodex-runner", runner_accessibility: "granted", runner_screen_recording: "denied", desktop_accessibility: false, desktop_screen_recording: false });
     fireEvent.click(screen.getByRole("button", { name: "Recheck permissions" }));
     await waitFor(() => expect(runner).toHaveTextContent("✓ Granted"));
@@ -232,7 +328,7 @@ describe("workspace configuration boundaries", () => {
     fireEvent.focus(window);
     expect(await screen.findByRole("dialog")).toHaveAccessibleName("Computer Use");
     expect(api.requestComputerPermission).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Continue · available in Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set up later in Settings" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(localStorage.getItem("desktop-permissions-explained")).toBe("1");
   });
@@ -245,7 +341,7 @@ describe("workspace configuration boundaries", () => {
     fireEvent.click(screen.getByRole("button", { name: "Recheck permissions" }));
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.getAllByText("Not granted")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "Grant Permission · Desktop · Screen Recording" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Grant permission · Desktop · Screen Recording" })).toBeEnabled();
     expect(api.requestComputerPermission).not.toHaveBeenCalled();
   });
 });
@@ -254,8 +350,8 @@ describe("workspace configuration boundaries", () => {
 it("preserves capability-first tabs and Coding-only authorization after the shared UI merge", async () => {
   api.runnerCapabilityAuthorization.mockResolvedValue({ target, can_authorize: true, coding_agents: false, ssh_resources: false });
   render(wrap(<ExtensionsPanel state={state} onState={onState} />));
-  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Coding Agents", "SSH Resources", "MCP servers", "Native Plugins", "Skills", "Instructions"]);
-  expect(screen.getByRole("tab", { name: "Coding Agents" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Coding agents", "SSH resources", "MCP servers", "Native Plugins", "Skills", "Instructions"]);
+  expect(screen.getByRole("tab", { name: "Coding agents" })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("button", { name: /^Projects:/ })).not.toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "Authorize Runner Capabilities" }));
   expect(api.authorizeRunnerCapabilities).not.toHaveBeenCalled();
@@ -263,7 +359,7 @@ it("preserves capability-first tabs and Coding-only authorization after the shar
   await waitFor(() => expect(api.authorizeRunnerCapabilities).toHaveBeenCalledExactlyOnceWith(target));
   expect(api.sshResources).not.toHaveBeenCalled();
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-  fireEvent.click(screen.getByRole("tab", { name: "SSH Resources" }));
+  fireEvent.click(screen.getByRole("tab", { name: "SSH resources" }));
   await waitFor(() => expect(api.sshResources).toHaveBeenCalled());
   expect(screen.queryByRole("button", { name: /^Projects:/ })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
@@ -275,7 +371,7 @@ it("retains path and managed-instruction drafts while registered panels change",
   expect(api.managedInstructionsRead).not.toHaveBeenCalled();
   expect(api.sshResources).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
-  const skills = await screen.findByLabelText("Configured Skill roots");
+  const skills = await screen.findByLabelText("Configured Skill folders");
   fireEvent.change(skills, { target: { value: "/fixture/unsaved-skills" } });
   fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
   const instructions = await screen.findByLabelText("Global instruction files");
@@ -286,7 +382,7 @@ it("retains path and managed-instruction drafts while registered panels change",
   const reads = api.runnerSettings.mock.calls.length;
   fireEvent.click(screen.getByRole("tab", { name: "Native Plugins" }));
   fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
-  expect(screen.getByLabelText("Configured Skill roots")).toBe(skills);
+  expect(screen.getByLabelText("Configured Skill folders")).toBe(skills);
   expect(skills).toHaveValue("/fixture/unsaved-skills");
   fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
   expect(screen.getByLabelText("Global instruction files")).toHaveValue("/fixture/unsaved-rules.md");
@@ -309,7 +405,7 @@ it("uses the same registered order for keyboard focus, panel identity and deep l
   expect(instructions).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("tabpanel")).toHaveAttribute("id", instructions.getAttribute("aria-controls"));
   fireEvent.keyDown(instructions, { key: "ArrowDown" });
-  const coding = screen.getByRole("tab", { name: "Coding Agents" });
+  const coding = screen.getByRole("tab", { name: "Coding agents" });
   expect(coding).toHaveFocus();
   expect(coding).toHaveAttribute("aria-selected", "true");
   expect(api.sshResources).not.toHaveBeenCalled();

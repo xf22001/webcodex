@@ -4,6 +4,20 @@ export { RUNTIME_LANGUAGES, type RuntimeLanguage } from "./runtime_locales.js";
 export const LANGUAGE_STORAGE_KEY = "webcodex.runtime.language.v1";
 
 export const RUNTIME_ZH_TEXT: Record<string, string> = {
+  "First observed": "首次记录",
+  "Window ID": "窗口 ID",
+  "Runner ID": "机器 ID",
+  "Project ID": "项目 ID",
+  "Loading Agents…": "正在加载 Agent…",
+  "Agents could not be loaded. Refresh to retry.": "Agent 加载失败，请刷新重试。",
+  "Durable communication refresh failed; previous data retained.": "通信数据刷新失败，已保留上次的数据。",
+  "Goal refresh failed; previous data retained.": "Goal 刷新失败，已保留上次的数据。",
+  "Goals could not be loaded. Refresh to retry.": "Goal 加载失败，请刷新重试。",
+  "Goal details are not available with this access key.": "当前访问凭据无权查看 Goal 详情。",
+  "Goal details could not be loaded.": "Goal 详情加载失败。",
+  "Message refresh failed; previous messages retained.": "消息刷新失败，已保留上次的消息。",
+  "Session messages could not be loaded.": "Session 消息加载失败。",
+
   "Load earlier messages": "加载更早的消息",
   "Return to latest messages": "回到最新消息",
   "Reply to": "回复",
@@ -990,6 +1004,9 @@ Object.assign(RUNTIME_ZH_TEXT, {
   "Expand sidebar": "展开侧栏",
   "Preferences": "偏好设置",
   "Theme color": "主题色",
+  "Selected color": "选中配色",
+  "Black and white": "黑白",
+  "Accent color": "主题色",
   "Custom color": "自定义颜色",
 });
 
@@ -1032,6 +1049,10 @@ Object.assign(RUNTIME_ZH_TEXT, {
   "Controller": "控制 Agent",
   "Controller identity": "控制 Agent 标识",
   "Auto-resume": "自动续轮",
+  "Continuation conditions": "续接条件",
+  "Ready · not a guarantee": "已就绪 · 不保证自动开始",
+  "Not ready · continue manually": "未就绪 · 可手动继续",
+  "The chat application may require confirmation or delay continuation. Only a confirmed fresh turn proves this continuation ran.": "聊天应用可能需要确认或延迟续接。只有已确认的新回合才证明本次已继续。",
   "Ready": "就绪",
   "Not ready": "未就绪",
   "Continuity": "连续性",

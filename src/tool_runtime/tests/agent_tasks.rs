@@ -4,9 +4,7 @@ use crate::auth::scopes::{
     SCOPE_COMMUNICATION_MANAGE, SCOPE_COMMUNICATION_READ, SCOPE_PROJECT_WRITE,
 };
 use crate::runner_http::RunnerRegistry;
-use crate::runner_protocol::{
-    RunnerCapabilities, RunnerRegisterRequest, RunnerResultPayload, RunnerResultRequest,
-};
+use crate::runner_protocol::{RunnerCapabilities, RunnerRegisterRequest, RunnerResultPayload};
 use crate::tool_runtime::metadata::{
     ToolApprovalPolicy, ToolAuthorityPolicy, ToolEffect, ToolIdempotency, ToolRisk,
 };
@@ -30,11 +28,13 @@ fn runtime_with_db() -> (tempfile::TempDir, Arc<crate::db::Database>, ToolRuntim
 fn create_agent(runtime: &ToolRuntime, handle: &str) -> String {
     let result = runtime.create_agent_identity(
         None,
-        handle.to_string(),
-        format!("{handle} display"),
-        None,
-        Vec::new(),
-        format!("create-{handle}"),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: handle.to_string(),
+            display_name: format!("{handle} display"),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: format!("create-{handle}"),
+        },
     );
     assert!(result.success, "{:?}", result.output);
     result.output["agent"]["agent_id"]
@@ -55,29 +55,23 @@ async fn register_coding_agent_task_runner(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
-            computer_session_availability: None,
             process_started_at: Some(1_700_000_000),
-            build: None,
-            job_concurrency_limit: None,
-            job_inventory: None,
             coding_agent_providers: Some(vec![CodingAgentProvider {
                 provider_id: "codex".to_string(),
                 provider_instance_id: "codex-instance-a4a".to_string(),
                 name: "Codex A4a test provider".to_string(),
             }]),
             coding_agent_inventory: Some(inventory),
-            client_id: client_id.to_string(),
-            runner_instance_id: instance_id.to_string(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
             display_name: Some("A4a test runner".to_string()),
             owner: Some(owner.to_string()),
-            hostname: None,
-            host_context: None,
-            capabilities: crate::test_support::current_runner_capabilities(RunnerCapabilities {
-                coding_agent_runs: true,
-                ..Default::default()
-            }),
-            policy: None,
+            ..crate::test_support::runner_registration(
+                client_id,
+                instance_id,
+                RunnerCapabilities {
+                    coding_agent_runs: true,
+                    ..Default::default()
+                },
+            )
         })
         .await
         .unwrap();
@@ -630,11 +624,13 @@ async fn coding_run_attempt_ref_executes_then_reconciles_from_reopened_db_and_fr
     .await;
     let agent_result = runtime.create_agent_identity(
         Some(&auth),
-        "a4a-runtime-agent".to_string(),
-        "A4a Runtime Agent".to_string(),
-        None,
-        Vec::new(),
-        "a4a-runtime-agent-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "a4a-runtime-agent".to_string(),
+            display_name: "A4a Runtime Agent".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "a4a-runtime-agent-create".to_string(),
+        },
     );
     assert!(agent_result.success, "{:?}", agent_result.output);
     let assignee = agent_result.output["agent"]["agent_id"]
@@ -862,18 +858,11 @@ async fn coding_run_attempt_ref_executes_then_reconciles_from_reopened_db_and_fr
     runtime
         .runner_registry
         .complete(RunnerResultPayload {
-            result: RunnerResultRequest {
-                client_id: client_id.to_string(),
-                runner_instance_id: instance_id.to_string(),
-                request_id: request.request_id,
-                exit_code: None,
-                stdout: None,
-                stderr: None,
-                stdout_truncated: false,
-                stderr_truncated: false,
-                duration_ms: None,
-                error: None,
-            },
+            result: runner_result_request(
+                client_id.to_string(),
+                instance_id.to_string(),
+                request.request_id,
+            ),
             command_execution_state: None,
             mcp_gateway: None,
             plugin_gateway: None,
@@ -1088,11 +1077,13 @@ fn foreign_runtime_task_ids_are_existence_hidden_and_project_reference_grants_no
     let alice = auth_context(Some("alice"), false);
     let bob_agent = runtime.create_agent_identity(
         Some(&bob),
-        "bob-task-agent".to_string(),
-        "Bob Task Agent".to_string(),
-        None,
-        Vec::new(),
-        "bob-task-agent-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "bob-task-agent".to_string(),
+            display_name: "Bob Task Agent".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "bob-task-agent-create".to_string(),
+        },
     );
     assert!(bob_agent.success);
     let bob_agent_id = bob_agent.output["agent"]["agent_id"]

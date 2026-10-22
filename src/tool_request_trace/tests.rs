@@ -2,6 +2,9 @@ use super::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "tests/runner_cancellation.rs"]
+mod runner_cancellation;
+
 fn payload_files(root: &Path, trace_id: &str) -> Vec<PathBuf> {
     let payload_dir = root.join(trace_id).join("payloads");
     let Ok(entries) = fs::read_dir(payload_dir) else {
@@ -1200,6 +1203,85 @@ async fn runner_correlation_survives_original_dispatch_scope() {
     );
 }
 
+#[tokio::test]
+async fn metadata_runner_queue_stages_keep_exact_correlation_without_payloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("WEBCODEX_TOOL_REQUEST_TRACE", "metadata");
+    env.set(
+        "WEBCODEX_TOOL_REQUEST_TRACE_DIR",
+        temp.path().to_str().unwrap(),
+    );
+    let trace_id = new_trace_id();
+    let guard = ToolRequestLifecycle::new(
+        "mcp",
+        trace_id.clone(),
+        "queue-test",
+        "tools/call",
+        Some("observe_computer".into()),
+    );
+    let payload = json!({"private_payload_sentinel":"never-serialize-queue-stage"});
+    scope_active_trace(guard.active_trace_id(), async {
+        for request in ["queue-abandoned", "queue-live"] {
+            record_runner_request_enqueued(
+                &payload,
+                request,
+                "runner",
+                "computer_list_windows",
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    })
+    .await;
+    // Queue telemetry may run on a different request/task from the enqueue.
+    scope_active_trace(Some(new_trace_id()), async {
+        record_runner_request_cancelled(
+            "queue-abandoned",
+            false,
+            webcodex_runner_registry::RunnerRequestCancellationReason::WaiterClosed,
+        );
+        finalize_runner_result_correlation("queue-abandoned");
+        record_runner_request_dequeued("queue-live", Duration::from_micros(1250));
+        record_runner_request_dequeued("queue-abandoned", Duration::ZERO);
+        record_runner_request_cancelled(
+            "unknown-request",
+            false,
+            webcodex_runner_registry::RunnerRequestCancellationReason::WaiterClosed,
+        );
+    })
+    .await;
+    flush_full_trace_writer();
+    let directory = temp.path().join(&trace_id);
+    assert!(!directory.join("payloads").exists());
+    let text = fs::read_to_string(directory.join("events.jsonl")).unwrap();
+    assert!(!text.contains("never-serialize-queue-stage"));
+    let stages: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| {
+            matches!(
+                event["event"].as_str(),
+                Some("tool_runner_request_cancelled" | "tool_runner_request_dequeued")
+            )
+        })
+        .collect();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["event"], "tool_runner_request_cancelled");
+    assert_eq!(stages[0]["runner_request_id"], "queue-abandoned");
+    assert_eq!(stages[1]["event"], "tool_runner_request_dequeued");
+    assert_eq!(stages[1]["runner_request_id"], "queue-live");
+    assert_eq!(stages[1]["queue_wait_ms"], 1.25);
+    assert!(stages
+        .iter()
+        .all(|event| event["server_trace_id"] == trace_id));
+    finalize_runner_result_correlation("queue-live");
+    drop(guard);
+}
+
 #[test]
 fn ssh_resource_runner_result_trace_never_persists_result_bodies() {
     let target = "17724@w10";
@@ -1280,5 +1362,46 @@ fn completion_timing_preserves_subsecond_monotonic_precision() {
     assert_eq!(
         timing.response_handed_at_ms - timing.request_observed_at_ms,
         i64::try_from(timing.elapsed_ms).unwrap()
+    );
+}
+
+#[test]
+fn continuation_timing_ids_are_bounded_and_exclude_payloads() {
+    let wake_id = "wc_wake_AAAAAAAAAAAAAAAA";
+    let attempt_id = "wc_wake_attempt_BBBBBBBBBBBBBBBB";
+    let source = json!({"agent_continuation": {"wake": {"wake_id": wake_id, "attempt_id": attempt_id,
+        "consume_token": "private-token", "automatic_message": "private-message", "client_window": "private-window"}},
+        "prompt": "private-prompt"});
+    assert_eq!(
+        lifecycle::continuation_ids(&source),
+        json!({"wake_id": wake_id, "attempt_id": attempt_id})
+    );
+    assert_eq!(
+        lifecycle::continuation_ids(
+            &json!({"wake_id": wake_id, "dispatch_observation": "dispatch_accepted", "state": "consumed"})
+        ),
+        json!({"wake_id": wake_id, "dispatch_observation": "dispatch_accepted", "consumed": true})
+    );
+    assert_eq!(
+        lifecycle::continuation_ids(
+            &json!({"wake_id": wake_id, "dispatch_observation": "private-message", "state": "private-token"})
+        ),
+        json!({"wake_id": wake_id})
+    );
+    for invalid in [
+        "wc_wake_short",
+        "wc_wake_AAAAAAAAAAAAAAAA\nprivate",
+        "private-token",
+    ] {
+        assert_eq!(
+            lifecycle::continuation_ids(&json!({"wake_id": invalid})),
+            json!({})
+        );
+    }
+    assert_eq!(
+        lifecycle::continuation_ids(
+            &json!({"attention": {"event_id": "wc_attention_event_CCCCCCCCCCCCCCCC", "wake_id": wake_id}})
+        ),
+        json!({"event_id": "wc_attention_event_CCCCCCCCCCCCCCCC", "wake_id": wake_id})
     );
 }

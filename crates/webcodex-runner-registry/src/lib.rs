@@ -8,9 +8,12 @@ mod access;
 mod access_control;
 mod capabilities;
 mod console_snapshot;
+mod dispatch_fence;
 pub use console_snapshot::{
     ActiveJobAggregate, ConsoleRegistrySnapshot, WorkspaceObservationIdentity,
 };
+mod execution_admission;
+pub use execution_admission::ExecutionAdmissionError;
 mod job_index;
 mod job_input;
 mod job_status;
@@ -154,4 +157,7 @@ pub(crate) use registry::{
 pub use requests::{EnqueueLspError, EnqueueRunnerSkillError};
 pub use state::{JobRecoveryPhase, JobRecoveryReason};
 pub use state::{RunnerSemanticView, ShellJobVisibility};
-pub use telemetry::{NoopRunnerRegistryTelemetry, RunnerRegistryTelemetry, ValidatedMcpToolResult};
+pub use telemetry::{
+    NoopRunnerRegistryTelemetry, RunnerRegistryTelemetry, RunnerRequestCancellationReason,
+    ValidatedMcpToolResult,
+};

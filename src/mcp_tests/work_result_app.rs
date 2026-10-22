@@ -40,7 +40,7 @@ fn work_result_pdf_bytes_are_private_and_do_not_enter_structured_or_text_content
 async fn work_result_descriptor_keeps_renderers_public_and_bridge_tools_app_only() {
     assert_eq!(
         MCP_WORK_RESULT_UI_RESOURCE_URI,
-        "ui://webcodex/work-result/v31"
+        "ui://webcodex/work-result/v35"
     );
     let runtime = test_runtime();
 
@@ -547,94 +547,83 @@ async fn work_result_resource_is_canonical_and_keeps_result_card_unlisted() {
 }
 
 #[tokio::test]
-async fn work_result_state_call_requires_app_protocol_capability() {
-    let runtime = test_runtime();
-    let args = json!({
-        "name": "get_work_result_state",
-        "arguments": {
-            "project": "agent:missing:project",
-            "session_id": format!("wc_sess_{}", "1".repeat(32))
-        }
-    });
-    let app = handle_with_app_policy(
-        &runtime,
-        rpc(
-            "tools/call",
-            Some(json!(5120)),
-            mcp_2026_ui_params(args.clone()),
+async fn work_result_app_tools_require_app_protocol_capability() {
+    for (name, request_id, arguments) in [
+        (
+            "get_work_result_state",
+            5120,
+            json!({
+                "project": "agent:missing:project",
+                "session_id": format!("wc_sess_{}", "1".repeat(32))
+            }),
         ),
-        None,
-        true,
-    )
-    .await;
-    let McpOutcome::Ok(app) = app else {
-        panic!("App-only state call should reach runtime under App capability");
-    };
-    assert_eq!(app["result"]["structuredContent"]["success"], false);
-    let fallback: Value = serde_json::from_str(
-        app["result"]["content"][0]["text"]
-            .as_str()
-            .expect("Work Result state content fallback"),
-    )
-    .unwrap();
-    assert_eq!(fallback, app["result"]["structuredContent"]);
-
-    for params in [mcp_2026_params(args.clone()), mcp_2026_ui_params(args)] {
-        let outcome = handle_with_app_policy(
+        (
+            "send_work_result_message",
+            5123,
+            json!({
+                "project": "agent:missing:project",
+                "session_id": format!("wc_sess_{}", "1".repeat(32)),
+                "message": "hello from the card",
+                "delivery_key": "work-result-card-test"
+            }),
+        ),
+        (
+            "read_work_result_activity_detail",
+            5219,
+            json!({
+                "project": "agent:missing:project",
+                "server_trace_id": "trace-window-detail"
+            }),
+        ),
+        (
+            "read_changed_file_diff",
+            5220,
+            json!({
+                "project": "agent:missing:project",
+                "session_id": format!("wc_sess_{}", "1".repeat(32)),
+                "snapshot_id": format!("wc_changes_snapshot_{}", "2".repeat(32)),
+                "path": "src/lib.rs"
+            }),
+        ),
+    ] {
+        let runtime = test_runtime();
+        let args = json!({"name": name, "arguments": arguments});
+        let app = handle_with_app_policy(
             &runtime,
-            rpc("tools/call", Some(json!(5121)), params),
+            rpc(
+                "tools/call",
+                Some(json!(request_id)),
+                mcp_2026_ui_params(args.clone()),
+            ),
             None,
-            false,
+            true,
         )
         .await;
-        assert!(matches!(outcome, McpOutcome::BadRequest(_)));
-    }
-}
-
-#[tokio::test]
-async fn work_result_send_message_requires_app_protocol_capability() {
-    let runtime = test_runtime();
-    let args = json!({
-        "name": "send_work_result_message",
-        "arguments": {
-            "project": "agent:missing:project",
-            "session_id": format!("wc_sess_{}", "1".repeat(32)),
-            "message": "hello from the card",
-            "delivery_key": "work-result-card-test"
-        }
-    });
-    let app = handle_with_app_policy(
-        &runtime,
-        rpc(
-            "tools/call",
-            Some(json!(5123)),
-            mcp_2026_ui_params(args.clone()),
-        ),
-        None,
-        true,
-    )
-    .await;
-    let McpOutcome::Ok(app) = app else {
-        panic!("App-only collaboration call should reach runtime under App capability");
-    };
-    assert_eq!(app["result"]["structuredContent"]["success"], false);
-    let fallback: Value = serde_json::from_str(
-        app["result"]["content"][0]["text"]
-            .as_str()
-            .expect("Work Result message content fallback"),
-    )
-    .unwrap();
-    assert_eq!(fallback, app["result"]["structuredContent"]);
-
-    for params in [mcp_2026_params(args.clone()), mcp_2026_ui_params(args)] {
-        let outcome = handle_with_app_policy(
-            &runtime,
-            rpc("tools/call", Some(json!(5124)), params),
-            None,
-            false,
+        let McpOutcome::Ok(app) = app else {
+            panic!("{name} should reach runtime under App capability");
+        };
+        assert_eq!(
+            app["result"]["structuredContent"]["success"], false,
+            "{name}"
+        );
+        let fallback: Value = serde_json::from_str(
+            app["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} content fallback")),
         )
-        .await;
-        assert!(matches!(outcome, McpOutcome::BadRequest(_)));
+        .unwrap();
+        assert_eq!(fallback, app["result"]["structuredContent"], "{name}");
+
+        for params in [mcp_2026_params(args.clone()), mcp_2026_ui_params(args)] {
+            let outcome = handle_with_app_policy(
+                &runtime,
+                rpc("tools/call", Some(json!(request_id + 1)), params),
+                None,
+                false,
+            )
+            .await;
+            assert!(matches!(outcome, McpOutcome::BadRequest(_)), "{name}");
+        }
     }
 }
 
@@ -750,6 +739,17 @@ fn work_result_html_is_bounded_live_progress_ui() {
         .split_once("/* END GENERATED WORK RESULT PDF */")
         .expect("generated PDF bundle end");
     let authored_html = format!("{before_pdf}{after_pdf}");
+    // Only the generated shared appearance module may persist local UI
+    // preferences. Authored result/authority/data code remains storage-free.
+    let (before_selection, selection_tail) = MCP_WORK_RESULT_APP_HTML
+        .split_once("/* BEGIN GENERATED SELECTION MOTION */")
+        .expect("generated selection bundle start");
+    let (selection_bundle, after_selection) = selection_tail
+        .split_once("/* END GENERATED SELECTION MOTION */")
+        .expect("generated selection bundle end");
+    assert!(selection_bundle.contains("webcodex.ui.selection.v1"));
+    assert!(selection_bundle.contains("webcodex.ui.accent.v1"));
+    let storage_free_html = format!("{before_selection}{after_selection}");
     for forbidden in [
         "Linked work conversation",
         "No linked work conversation",
@@ -769,7 +769,9 @@ fn work_result_html_is_bounded_live_progress_ui() {
         "baseline_tree",
         "final_tree",
     ] {
-        let checked_html = if forbidden == "fetch(" {
+        let checked_html = if forbidden == "localStorage" {
+            storage_free_html.as_str()
+        } else if forbidden == "fetch(" {
             authored_html.as_str()
         } else {
             MCP_WORK_RESULT_APP_HTML
@@ -778,98 +780,6 @@ fn work_result_html_is_bounded_live_progress_ui() {
             !checked_html.contains(forbidden),
             "Work Result App contains forbidden marker {forbidden}"
         );
-    }
-}
-
-#[tokio::test]
-async fn work_result_activity_detail_call_requires_app_protocol_capability() {
-    let runtime = test_runtime();
-    let args = json!({
-        "name": "read_work_result_activity_detail",
-        "arguments": {
-            "project": "agent:missing:project",
-            "server_trace_id": "trace-window-detail"
-        }
-    });
-    let app = handle_with_app_policy(
-        &runtime,
-        rpc(
-            "tools/call",
-            Some(json!(5219)),
-            mcp_2026_ui_params(args.clone()),
-        ),
-        None,
-        true,
-    )
-    .await;
-    let McpOutcome::Ok(app) = app else {
-        panic!("App-only activity detail should reach runtime under App capability");
-    };
-    assert_eq!(app["result"]["structuredContent"]["success"], false);
-    let fallback: Value = serde_json::from_str(
-        app["result"]["content"][0]["text"]
-            .as_str()
-            .expect("Work Result activity detail content fallback"),
-    )
-    .unwrap();
-    assert_eq!(fallback, app["result"]["structuredContent"]);
-
-    for params in [mcp_2026_params(args.clone()), mcp_2026_ui_params(args)] {
-        let outcome = handle_with_app_policy(
-            &runtime,
-            rpc("tools/call", Some(json!(5220)), params),
-            None,
-            false,
-        )
-        .await;
-        assert!(matches!(outcome, McpOutcome::BadRequest(_)));
-    }
-}
-
-#[tokio::test]
-async fn changes_file_diff_call_requires_app_protocol_capability() {
-    let runtime = test_runtime();
-    let args = json!({
-        "name": "read_changed_file_diff",
-        "arguments": {
-            "project": "agent:missing:project",
-            "session_id": format!("wc_sess_{}", "1".repeat(32)),
-            "snapshot_id": format!("wc_changes_snapshot_{}", "2".repeat(32)),
-            "path": "src/lib.rs"
-        }
-    });
-    let app = handle_with_app_policy(
-        &runtime,
-        rpc(
-            "tools/call",
-            Some(json!(5220)),
-            mcp_2026_ui_params(args.clone()),
-        ),
-        None,
-        true,
-    )
-    .await;
-    let McpOutcome::Ok(app) = app else {
-        panic!("App-only diff call should reach runtime under App capability");
-    };
-    assert_eq!(app["result"]["structuredContent"]["success"], false);
-    let fallback: Value = serde_json::from_str(
-        app["result"]["content"][0]["text"]
-            .as_str()
-            .expect("Work Result diff content fallback"),
-    )
-    .unwrap();
-    assert_eq!(fallback, app["result"]["structuredContent"]);
-
-    for params in [mcp_2026_params(args.clone()), mcp_2026_ui_params(args)] {
-        let outcome = handle_with_app_policy(
-            &runtime,
-            rpc("tools/call", Some(json!(5221)), params),
-            None,
-            false,
-        )
-        .await;
-        assert!(matches!(outcome, McpOutcome::BadRequest(_)));
     }
 }
 

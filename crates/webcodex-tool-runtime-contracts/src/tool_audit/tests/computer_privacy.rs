@@ -383,7 +383,8 @@ fn skill_runtime_audit_results_are_metadata_only() {
             "project": "agent:test:demo",
             "skill_id": "wc_skill_ASNFZ4mrze8BI0VniavN7w",
             "definition_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "path": "SKILL.md",
+            "skill_path": "SKILL.md",
+            "project_path": ".agents/skills/actual-folder/SKILL.md",
             "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "text": "PRIVATE_SKILL_BODY",
             "start_line": 1,
@@ -396,7 +397,11 @@ fn skill_runtime_audit_results_are_metadata_only() {
     let read_serialized = serde_json::to_string(&read).unwrap();
     assert!(!read_serialized.contains("PRIVATE_SKILL_BODY"));
     assert!(read.get("text").is_none());
-    assert_eq!(read["path"], "SKILL.md");
+    assert_eq!(read["skill_path"], "SKILL.md");
+    assert_eq!(
+        read["project_path"],
+        ".agents/skills/actual-folder/SKILL.md"
+    );
     assert_eq!(read["returned_lines"], 2);
 }
 
@@ -505,13 +510,13 @@ fn communication_audit_omits_profile_and_message_bodies() {
     const PRIVATE_BODY: &str = "PRIVATE CONVERSATION BODY";
     const PRIVATE_KEY: &str = "PRIVATE_IDEMPOTENCY_KEY";
 
-    let create = ToolCall::CreateAgentIdentity {
+    let create = ToolCall::CreateAgentIdentity(webcodex_tool_contracts::CreateAgentIdentityInput {
         handle: PRIVATE_HANDLE.to_string(),
         display_name: PRIVATE_DISPLAY.to_string(),
         description: Some(PRIVATE_DESCRIPTION.to_string()),
         specialty_labels: vec![PRIVATE_LABEL.to_string()],
         idempotency_key: PRIVATE_KEY.to_string(),
-    }
+    })
     .session_log_arguments();
     let create_text = create.to_string();
     for private in [
@@ -530,19 +535,20 @@ fn communication_audit_omits_profile_and_message_bodies() {
     assert_eq!(create["specialty_label_count"], 1);
     assert_eq!(create["idempotency_key_present"], true);
 
-    let post = ToolCall::PostConversationMessage {
-        conversation_id: "wc_conv_iavN7wEjRWeJq83v".to_string(),
-        body: PRIVATE_BODY.to_string(),
-        author_agent_id: None,
-        endpoint_id: None,
-        expected_controller_generation: None,
-        recipient_agent_ids: Some(vec!["wc_dagent_iavN7wEjRWeJq83v".to_string()]),
-        reply_to: None,
-        idempotency_key: Some(PRIVATE_KEY.to_string()),
-        wake_reply_id: None,
-        reply_operation_index: None,
-    }
-    .session_log_arguments();
+    let post =
+        ToolCall::PostConversationMessage(webcodex_tool_contracts::PostConversationMessageInput {
+            conversation_id: "wc_conv_iavN7wEjRWeJq83v".to_string(),
+            body: PRIVATE_BODY.to_string(),
+            author_agent_id: None,
+            endpoint_id: None,
+            expected_controller_generation: None,
+            recipient_agent_ids: Some(vec!["wc_dagent_iavN7wEjRWeJq83v".to_string()]),
+            reply_to: None,
+            idempotency_key: Some(PRIVATE_KEY.to_string()),
+            wake_reply_id: None,
+            reply_operation_index: None,
+        })
+        .session_log_arguments();
     let post_text = post.to_string();
     assert!(!post_text.contains(PRIVATE_BODY));
     assert!(!post_text.contains(PRIVATE_KEY));
@@ -1420,6 +1426,7 @@ fn computer_find_elements_audit_omits_label_and_semantic_result_content() {
     let parsed_summary = ToolCall::ComputerObserve(ComputerObserveToolCall::FindElements {
         client_id: "mini".to_string(),
         surface_id: "surface_safe".to_string(),
+        root_element_id: None,
         role: Some(private_role.to_string()),
         subrole: Some(private_subrole.to_string()),
         label: Some(secret.to_string()),

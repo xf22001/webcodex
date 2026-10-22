@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { Select } from "@mantine/core";
+import { useFlowingSelection } from "../../ui/useFlowingSelection.js";
+import { useRef, useState } from "react";
 import type { RuntimeV2Client } from "../api/client.js";
 import { TraceCallDetails } from "./TraceCallDetails.js";
 import { CopyIdentity } from "./ui/CopyIdentity.js";
@@ -33,6 +35,8 @@ export function WindowActivityFeed({
 }: Props) {
   const t = (value: string) => translate(value, language);
   const [order, setOrder] = useState<"newest" | "oldest">("newest");
+  const orderRef = useRef<HTMLFieldSetElement | null>(null);
+  useFlowingSelection(orderRef, order, { variant: "filled", itemSelector: "label", selectedSelector: "label:has(input:checked)" });
   const orderedSessions = windowSessionCatalog(detail);
   const sessionOrder = new Map(orderedSessions.map((session, index) => [session.workflow_session_id, index]));
   const sessionMeta = new Map(orderedSessions.map((session) => [session.workflow_session_id, session]));
@@ -91,26 +95,20 @@ export function WindowActivityFeed({
             <span>{t("Session")}</span>
             <div className="window-session-focus-select" data-session-tone={selectedTone} data-active={Boolean(activeSessionId)}>
               <span className="window-session-color-dot" />
-              <select
-                aria-label={t("Session filter")}
-                value={activeSessionId}
-                onChange={(event) => onSelectSession?.(event.currentTarget.value)}
-              >
-                <option value="">{t("All calls")}</option>
-                {activeSessionId && !filterSessions.some(session => session.workflow_session_id === activeSessionId) && (
-                  <option value={activeSessionId}>{t("Session")} · {shortId(activeSessionId, 14, 6)}</option>
-                )}
-                {filterSessions.map((session, index) => (
-                  <option key={session.workflow_session_id} value={session.workflow_session_id}>
-                    {(session.title || t("Work Session") + " " + (index + 1)) + " · " + shortId(session.workflow_session_id, 14, 6)}
-                  </option>
-                ))}
-              </select>
+              <Select aria-label={t("Session filter")} value={activeSessionId} allowDeselect={false} size="xs"
+                onChange={value => onSelectSession?.(value ?? "")}
+                data={[
+                  { value: "", label: t("All calls") },
+                  ...(activeSessionId && !filterSessions.some(session => session.workflow_session_id === activeSessionId)
+                    ? [{ value: activeSessionId, label: `${t("Session")} · ${shortId(activeSessionId, 14, 6)}` }] : []),
+                  ...filterSessions.map((session, index) => ({ value: session.workflow_session_id,
+                    label: (session.title || t("Work Session") + " " + (index + 1)) + " · " + shortId(session.workflow_session_id, 14, 6) })),
+                ]} />
             </div>
             <small>{visibleCalls.length}/{calls.length}</small>
           </div>
         )}
-        <fieldset className="window-activity-order">
+        <fieldset ref={orderRef} className="window-activity-order">
           <legend>{t("Activity order")}</legend>
           {(["newest", "oldest"] as const).map(value => (
             <label key={value}>

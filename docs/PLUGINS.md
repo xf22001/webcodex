@@ -189,10 +189,26 @@ disposable `check` candidate; this local projection is not part of the Plugin
 gateway response.
 
 `call` has one dispatch identity: the opaque `binding` returned by that exact
-`describe`. It does not accept `runner`, `plugin`, or `tool` as call-time
+`describe`. It does not accept `runner`, `plugin`, `tool`, or `project` as call-time
 routing fields. Each describe creates an independent binding for the exact
 Runner instance, provider instance, tool name, and schema observation seen at
 that moment. The handle does not encode or expose those internal identities.
+
+For a `projectBound` tool, put the intended authorized `project` on `describe`.
+If it is missing, the error reports `plugin_project_required` with a recovery
+instruction to describe the same Runner/provider/tool with that explicit Project;
+no provider tool call has started and no binding is issued. WebCodex-generated
+gateway failures also project their existing recovery into the bounded MCP error
+text for Hosts that expose only text; structured error fields remain authoritative.
+Recovery comes first so a long error message cannot crowd it out of the existing
+1,024-byte text limit. Provider-authored tool results remain unchanged. A malformed Project
+selector and a Project supplied on `call` have different argument errors.
+For the same intended Project, reuse a retained schema/binding and send only
+`binding` and schema-matching `arguments`. For another Project, obtain a new
+binding by describing that target; simply dropping a conflicting call-time
+Project can leave the old target selected. Session or recorder metadata never
+supplies the business Project. Repairing arguments or re-describing does not
+authorize replay of an earlier uncertain effect; reconcile its outcome first.
 
 `reload` is the cross-platform authoritative reload path on Windows, macOS, and
 Linux. The Runner rereads its own `runner.toml`; the Server does not upload an
@@ -495,6 +511,15 @@ submission; and [`plugins/agent-browser`](../plugins/agent-browser/README.md) us
 operator-installed local Agent Browser to inherit native profiles/configuration or
 attach to an explicitly authorized running Chrome while keeping opaque page/snapshot
 identities, tab ownership, and uncertain-effect handling inside the Plugin boundary.
+
+The optional standard-library-only Python
+[`Project Knowledge Plugin`](../plugins/project-knowledge/README.md) indexes bounded
+Git-tracked text/code under one configured repository root into a private SQLite
+FTS5 cache outside the Project. Its `index`, `status`, `search`, and `read` tools
+use the same native protocol and `plugin_tool` binding path; search verifies
+current source hashes and reports index coverage. It requires Python 3.10+, FTS5,
+Git, and descriptor-relative no-follow file access, and never writes core Memory
+or guidance files or calls an embedding/model service.
 
 ## Community Native Plugins (third-party)
 

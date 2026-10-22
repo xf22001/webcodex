@@ -156,7 +156,7 @@ pub(crate) fn detected_job_summary_with_activity(
                 "summary": "Waiting for Cargo build lock",
             }))
         } else if cargo_command
-            && matches!(kind, "test" | "check" | "build" | "format")
+            && matches!(kind, "test" | "check" | "lint" | "build" | "format")
             && lower
                 .lines()
                 .any(|line| line.trim_start().starts_with("compiling "))
@@ -167,7 +167,7 @@ pub(crate) fn detected_job_summary_with_activity(
                 "summary": "Cargo compilation in progress",
             }))
         } else if cargo_command
-            && matches!(kind, "test" | "check" | "build" | "format")
+            && matches!(kind, "test" | "check" | "lint" | "build" | "format")
             && lower
                 .lines()
                 .any(|line| line.trim_start().starts_with("checking "))
@@ -427,7 +427,7 @@ pub(crate) fn structured_validation_evidence(
     truncated: bool,
 ) -> StructuredValidationEvidence {
     let combined = format!("{stdout}\n{stderr}");
-    let profile = (matches!(kind, "check" | "test")
+    let profile = (matches!(kind, "check" | "lint" | "test")
         || (kind == "format" && tool == "python:ruff:format"))
         .then(|| super::validation_profile::validation_evidence_profile_for_tool(tool))
         .flatten()
@@ -445,6 +445,10 @@ pub(crate) fn structured_validation_evidence(
         errors_count: None,
     };
     match profile.map(|adapter| adapter.tool_identity()) {
+        Some("node:vitest:test" | "node:jest:test") => {
+            evidence.tests_detected = Some(false);
+            evidence.test_count_evidence_reason = Some("no_complete_summary");
+        }
         Some("python:pytest:test" | "node:tap:test") => {
             let summary = evidence
                 .diagnostics
@@ -501,7 +505,7 @@ pub(crate) fn structured_validation_evidence(
         }
         // Preserve the existing check counter projection for known Cargo/Go
         // adapters; unknown check identities must not inherit Rustc parsing.
-        Some("cargo_check" | "go_vet") if !truncated => {
+        Some("cargo_check" | "cargo_clippy" | "go_vet") if !truncated => {
             evidence.warnings_count =
                 Some(super::cargo::count_rustc_diagnostics(&combined, "warning:") as u64);
             evidence.errors_count =
@@ -600,7 +604,7 @@ pub(crate) fn validation_job_projection_with_policy(
                 value["tests_failed"] = Value::Null;
                 value["zero_tests_run"] = Value::Null;
             }
-            "check" => {
+            "check" | "lint" if kind == "check" || tool == "cargo_clippy" => {
                 value["warnings_count"] = Value::Null;
                 value["errors_count"] = Value::Null;
             }
@@ -611,9 +615,11 @@ pub(crate) fn validation_job_projection_with_policy(
     }
     let process_passed = lifecycle == Some(RunnerJobLifecycle::Completed) && exit_code == Some(0);
     let mut evidence = structured_validation_evidence(tool, kind, stdout, stderr, truncated);
-    if tool == "cargo_test" && kind == "test" {
+    if matches!(tool, "cargo_test" | "node:vitest:test" | "node:jest:test") && kind == "test" {
         if let Some(authoritative) = authoritative_test_count.filter(|evidence| evidence.is_valid())
         {
+            evidence.tests_passed = authoritative.tests_passed.or(evidence.tests_passed);
+            evidence.tests_failed = authoritative.tests_failed.or(evidence.tests_failed);
             evidence.tests_detected = Some(authoritative.tests_detected);
             evidence.tests_run_count = authoritative.tests_run_count;
             evidence.zero_tests_run = authoritative.tests_run_count.map(|count| count == 0);
@@ -672,7 +678,10 @@ pub(crate) fn validation_job_projection_with_policy(
         && !report_contradictory
         && !ruff_contradictory
         && !profile_mismatch
-        && !(tool == "node:tap:test" && evidence.tests_run_count.is_none());
+        && !(matches!(
+            tool,
+            "node:tap:test" | "node:vitest:test" | "node:jest:test"
+        ) && evidence.tests_run_count.is_none());
     let mut value = json!({
         "tool": tool,
         "kind": kind,
@@ -691,7 +700,7 @@ pub(crate) fn validation_job_projection_with_policy(
             value["tests_failed"] = json!(evidence.tests_failed);
             value["zero_tests_run"] = json!(evidence.zero_tests_run);
         }
-        "check" => {
+        "check" | "lint" if kind == "check" || tool == "cargo_clippy" => {
             value["warnings_count"] = json!(evidence.warnings_count);
             value["errors_count"] = json!(evidence.errors_count);
         }
@@ -734,7 +743,14 @@ fn apply_cargo_test_execution_policy(
     require_tests: Option<bool>,
     no_run: Option<bool>,
 ) {
-    if !matches!(tool, "cargo_test" | "python:pytest:test" | "node:tap:test") {
+    if !matches!(
+        tool,
+        "cargo_test"
+            | "python:pytest:test"
+            | "node:tap:test"
+            | "node:vitest:test"
+            | "node:jest:test"
+    ) {
         return;
     }
     if let Some(require_tests) = require_tests {
@@ -884,6 +900,12 @@ pub(crate) fn agent_job_summary_value(job: &ShellJobInfo) -> Value {
             job.recovery_reason_code.as_deref(),
         ),
     });
+    if let Some(artifacts) = &job.build_artifacts {
+        summary["build_artifacts"] = json!(artifacts);
+    }
+    if let Some(kind) = super::project_build::artifact_observation_failure_kind(job) {
+        summary["failure_kind"] = json!(kind);
+    }
     if job.kind == "project_format" {
         summary["state_changed"] = json!(job.format_mutation.unwrap_or_default().state_changed());
         summary["failure_kind"] =
@@ -1914,6 +1936,12 @@ impl ToolRuntime {
                     "detected_summary": detected_summary,
                     "validation": validation,
                 });
+                if let Some(artifacts) = &job.build_artifacts {
+                    output["build_artifacts"] = json!(artifacts);
+                }
+                if let Some(kind) = super::project_build::artifact_observation_failure_kind(&job) {
+                    output["failure_kind"] = json!(kind);
+                }
                 if job.kind == "project_format" {
                     output["state_changed"] =
                         json!(job.format_mutation.unwrap_or_default().state_changed());
@@ -2308,7 +2336,7 @@ mod recovery_projection_tests {
         validation_job_projection, validation_job_projection_with_policy,
     };
     use crate::runner_protocol::{ShellJobInfo, ShellJobTestCountEvidence};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use webcodex_core::validation_evidence::CargoTestCountEvidenceStatus;
 
     #[test]
@@ -2729,6 +2757,8 @@ mod recovery_projection_tests {
     #[test]
     fn authoritative_cargo_test_count_survives_truncated_logs_and_still_fails_closed() {
         let complete = ShellJobTestCountEvidence {
+            tests_passed: None,
+            tests_failed: None,
             tests_detected: true,
             tests_run_count: Some(120),
             status: CargoTestCountEvidenceStatus::CompleteSummary,
@@ -2756,6 +2786,8 @@ mod recovery_projection_tests {
         );
 
         let below_minimum = ShellJobTestCountEvidence {
+            tests_passed: None,
+            tests_failed: None,
             tests_detected: true,
             tests_run_count: Some(5),
             status: CargoTestCountEvidenceStatus::CompleteSummary,
@@ -2781,6 +2813,8 @@ mod recovery_projection_tests {
         );
 
         let incomplete = ShellJobTestCountEvidence {
+            tests_passed: None,
+            tests_failed: None,
             tests_detected: true,
             tests_run_count: None,
             status: CargoTestCountEvidenceStatus::IncompleteStream,
@@ -2857,6 +2891,85 @@ mod recovery_projection_tests {
         assert!(truncated["warnings_count"].is_null());
         assert!(truncated["errors_count"].is_null());
         assert_eq!(truncated["diagnostics"]["truncated"], true);
+    }
+
+    #[test]
+    fn clippy_projection_delivers_counts_without_changing_check_or_node_defaults() {
+        for (tool, kind) in [("cargo_clippy", "lint"), ("cargo_check", "check")] {
+            for (status, exit, stderr, warnings, errors) in [
+                ("completed", Some(0), "warning: unused import\n", 1, 0),
+                ("failed", Some(101), "error: impossible comparison\n", 0, 1),
+            ] {
+                for truncated in [false, true] {
+                    let value = validation_job_projection(
+                        Some(tool),
+                        Some(kind),
+                        status,
+                        exit,
+                        "",
+                        stderr,
+                        truncated,
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        value.get("warnings_count"),
+                        Some(&if truncated {
+                            Value::Null
+                        } else {
+                            json!(warnings)
+                        }),
+                        "{value}"
+                    );
+                    assert_eq!(
+                        value.get("errors_count"),
+                        Some(&if truncated {
+                            Value::Null
+                        } else {
+                            json!(errors)
+                        }),
+                        "{value}"
+                    );
+                    assert_eq!(value["passed"], exit == Some(0));
+                }
+            }
+            for status in ["timed_out", "cancelled", "lost"] {
+                let value = validation_job_projection(
+                    Some(tool),
+                    Some(kind),
+                    status,
+                    None,
+                    "",
+                    "warning: partial\n",
+                    false,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(value.get("warnings_count"), Some(&Value::Null), "{value}");
+                assert_eq!(value.get("errors_count"), Some(&Value::Null), "{value}");
+                assert_eq!(value["passed"], Value::Null);
+            }
+        }
+        for kind in ["check", "lint"] {
+            let value = validation_job_projection(
+                Some("node:script:check"),
+                Some(kind),
+                "completed",
+                Some(0),
+                "",
+                "warning: opaque script output\n",
+                false,
+                None,
+            )
+            .unwrap();
+            if kind == "check" {
+                assert_eq!(value.get("warnings_count"), Some(&Value::Null));
+                assert_eq!(value.get("errors_count"), Some(&Value::Null));
+            } else {
+                assert!(value.get("warnings_count").is_none());
+                assert!(value.get("errors_count").is_none());
+            }
+        }
     }
 
     #[test]
@@ -2939,6 +3052,7 @@ mod recovery_projection_tests {
             validation_progress: None,
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             validation: None,
             recovery_state: None,
@@ -2992,6 +3106,7 @@ mod recovery_projection_tests {
             validation_progress: None,
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             validation: None,
             recovery_state: Some("lost_after_reconcile".to_string()),

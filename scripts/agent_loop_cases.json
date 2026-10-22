@@ -117,7 +117,7 @@
       "id": "long_validation_handoff",
       "title": "Long validation and same-execution Job handoff",
       "target": "webcodex_repository",
-      "prompt": "Do not modify files. Start cargo test --lib with sync_wait_secs=1 and a sufficient total timeout. If it hands off, preserve that exact Job identity; while it runs, independently inspect the timing terminology in docs/architecture/tool-composition-research.md, then observe the same Job to terminal completion. Do not redispatch cargo test. If the validation finishes synchronously before handoff, report that this run does not satisfy the handoff case instead of fabricating one.",
+      "prompt": "Do not modify files. Start cargo test --lib with a sufficient total timeout using the published validation options; let the Server control synchronous handoff timing. If it hands off, preserve that exact Job identity; while it runs, independently inspect the timing terminology in docs/architecture/tool-composition-research.md, then observe the same Job to terminal completion. Do not redispatch cargo test. If the validation finishes synchronously before handoff, report that this run does not satisfy the handoff case instead of fabricating one.",
       "correctness": {
         "workspace_must_remain_clean": true,
         "same_execution_must_be_preserved": true,
@@ -127,7 +127,6 @@
       "validation": {
         "required": true,
         "command": "cargo test --lib",
-        "sync_wait_secs": 1,
         "expected_terminal_result": "success"
       },
       "code_mode_surface": "validation"
@@ -521,6 +520,52 @@
       "experiment": "tool_selection"
     },
     {
+      "id": "selection_compound_source_context",
+      "title": "Choose tools for bounded source context",
+      "prompt": "Locate the implementation that turns project text search matches into bounded source-context reads. Explain from the current source whether overlapping matches necessarily repeat source content, how read limits and byte-budget fallback qualify coalescing, and what happens when there are no matches. Cite the implementation and relevant regression tests. Use whichever admitted tools provide sufficient evidence; stop when the returned context is sufficient. Do not modify files.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "match-derived context reads have a bounded global read limit shared across independent queries",
+          "overlapping ranges can coalesce and successfully materialized source content is returned once; byte-budget fallback may retain original members",
+          "planned read_request_count and actual coalesced_read_count are distinct; one physical read is not guaranteed for every query",
+          "no matches returns no source reads and read_request_count zero",
+          "answer cites current implementation and relevant regression tests at the tested revision"
+        ],
+        "fixture_oracle": {
+          "files": {
+            "src/tool_runtime/search_and_read.rs": {
+              "required_text": [
+                "let items = fair_match_read_items",
+                "if items.is_empty() {",
+                "\"reads\": []",
+                "\"read_request_count\": 0",
+                "read_files_coalesced_resolved",
+                "\"coalesced_read_count\": coalesced_reads",
+                ".clamp(1, MAX_READS)",
+                "Keep original members for canonical byte-ceiling fallback"
+              ]
+            },
+            "src/tool_runtime/tests/search_and_read.rs": {
+              "required_text": [
+                "async fn search_and_read_returns_one_source_block_for_overlapping_matches",
+                "compound output must not re-expand overlapping member ranges",
+                "async fn search_and_read_no_matches_does_not_dispatch_a_read",
+                "assert_eq!(result.output[\"read_request_count\"], 0);",
+                "async fn search_and_read_byte_ceiling_fallback_keeps_original_member_continuation"
+              ]
+            }
+          }
+        }
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent answer review against the exact tested implementation and regression tests, including budget/fallback qualifications and zero-match behavior; unchanged workspace. The source oracle checks fixture eligibility only, not answer correctness. No prescribed tool sequence or redundant follow-up read when returned context is sufficient."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
+    },
+    {
       "id": "selection_failed_test_recovery",
       "title": "Choose tools to diagnose and repair a failing test",
       "prompt": "The isolated Rust project under tests/fixtures/agent-selection has a failing greeting test. Observe its failure before changing files, fix the implementation while preserving the test and unrelated function, then verify tests pass. Report the failure, fix and final validation. Change only that fixture implementation.",
@@ -576,6 +621,120 @@
       },
       "target": "webcodex_repository",
       "experiment": "tool_selection"
+    },
+    {
+      "id": "knowledge_identifier",
+      "title": "Free identifier lookup",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "Find the actual receipt identifier policy, distinguishing similarly named files. Report receipt-prefix and receipt-width from its current implementation. Choose whichever admitted tools you find useful. Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
+    },
+    {
+      "id": "knowledge_procedure",
+      "title": "Free project procedure lookup",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "Determine the current receipt audit procedure for this project. Report audit-order, audit-marker and audit-batch, distinguishing historical or similarly named material. Choose whichever admitted tools you find useful. Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
+    },
+    {
+      "id": "knowledge_paraphrase",
+      "title": "Chinese project knowledge lookup",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "请使用本项目提供的知识资源，查明收据台账保留多久、由哪个工作组负责，注意区分近似名称的旧材料。报告 ledger-window 和 ledger-owner，并引用当前来源。自行发现所需能力，不要求特定工具或调用顺序。 Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
+    },
+    {
+      "id": "knowledge_source_update",
+      "title": "Project knowledge source update",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "Use the project knowledge resources to establish the current ledger-window and ledger-owner. After reading the source, pause and report that you are ready for the operator source-change checkpoint; do not give the final answer yet. When the operator confirms the change, verify the previous source reference, refresh knowledge if needed, and report only the current facts with current citations. Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": false,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
+    },
+    {
+      "id": "knowledge_skill_read",
+      "title": "Project Skill body and reference",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "Use the project receipt audit Skill to determine audit-order, audit-marker and audit-batch. Discover the relevant Skill and read enough of its body and references to support the answer; distinguish near-name historical material. No particular tool or call order is prescribed. Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
+    },
+    {
+      "id": "knowledge_skill_update",
+      "title": "Project Skill definition update",
+      "target": "knowledge_skill_disposable_fixture",
+      "experiment": "tool_selection",
+      "prompt": "Use the project receipt audit Skill to establish audit-order, audit-marker and audit-batch. Once its definition and necessary references have been read, pause for the operator checkpoint. After the operator confirms the definition changed, check the previously selected revision, recover current content, and report only the current facts and citations. Do not edit the project or execute Skill scripts. End with one JSON object containing facts (the requested key=value strings, preserving source spelling) and sources (objects with path, start_line and end_line, one-based inclusive). Cite the lines that establish each fact.",
+      "correctness": {
+        "workspace_must_remain_clean": false,
+        "required_observations": [
+          "source content and citations match the independently prepared fixture",
+          "task facts and actual resource adoption are assessed separately",
+          "coordinator-owned source changes only; all other bytes and Git identity preserved"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent factual/range oracle plus exact fixture, Session/Project and bounded actual capture checks; driver declarations alone cannot qualify. Updates require an independently observed first read before the coordinator changes one source."
+      }
     }
   ]
 }

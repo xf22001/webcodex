@@ -16,9 +16,8 @@ use super::structured_execution::{
 };
 use super::tool_result::ToolResult;
 use super::validation_profile::{
-    requires_multi_package_cargo_check, runtime_profile, validation_evidence_profile_for_recipe,
-    CargoReadOnlyValidationOperation, ReadOnlyValidationOperation, ValidationEvidenceProfile,
-    ValidationFailureEvidence,
+    requires_multi_package_cargo_check, runtime_profile, CargoReadOnlyValidationOperation,
+    ReadOnlyValidationOperation, ValidationEvidenceProfile, ValidationFailureEvidence,
 };
 #[cfg(test)]
 use super::validation_profile::{validation_adapter_for_tool, ValidationCommandOptions};
@@ -444,6 +443,9 @@ impl ToolRuntime {
         adapter_hint: Option<webcodex_core::project_validation::ProjectValidationAdapter>,
         scope: Option<webcodex_core::project_validation::ProjectValidationScope>,
         dependency_policy: Option<webcodex_core::project_validation::ProjectDependencyPolicy>,
+        dependency_resolution_policy: Option<
+            webcodex_core::project_validation::ProjectDependencyResolutionPolicy,
+        >,
         test: Option<webcodex_core::project_validation::ProjectValidationTestOptions>,
         timeout_secs: Option<u64>,
         structured_handoff_max_secs: Option<u64>,
@@ -485,6 +487,7 @@ impl ToolRuntime {
             adapter: adapter_hint.unwrap_or_default(),
             scope,
             dependency_policy,
+            dependency_resolution_policy,
             test,
         };
         if let Err(e) = request.validate() {
@@ -518,7 +521,7 @@ impl ToolRuntime {
         let plan = match serde_json::from_str::<ProjectValidationPlanningResult>(response.stdout.as_deref().unwrap_or("")) {
             Ok(ProjectValidationPlanningResult::Ready { plan }) => plan,
             Ok(ProjectValidationPlanningResult::Unavailable { code, detected_backend }) => return ToolResult::err_with_output(
-                "Project validation unavailable; use a supported Rust/Go action, configured Python pytest/Ruff, or a Node >=22.3 native check script on a supported Runner.",
+                "Project validation unavailable; use a supported Rust/Go action, configured Python pytest/Ruff, or a supported native Node check/TAP/Vitest/Jest script on a supported Runner.",
                 json!({"execution_source":"project_validate", "execution_state":"not_started", "command_started":false, "command_completed":false, "failure_kind":code, "detected_backend":detected_backend})),
             Err(_) => return ToolResult::err("invalid Runner validation plan; upgrade Server and Runner together"),
         };
@@ -536,17 +539,26 @@ impl ToolRuntime {
         }
         let semantic_action = match action {
             ProjectValidationAction::FormatCheck => webcodex_validation::SemanticCheck::Format,
-            ProjectValidationAction::Check => webcodex_validation::SemanticCheck::Check,
+            ProjectValidationAction::Lint if plan.provenance.backend == "rust" => {
+                webcodex_validation::SemanticCheck::Lint
+            }
+            ProjectValidationAction::Check | ProjectValidationAction::Lint => {
+                webcodex_validation::SemanticCheck::Check
+            }
             ProjectValidationAction::Test => webcodex_validation::SemanticCheck::Test,
         };
-        let Some(adapter) =
-            validation_evidence_profile_for_recipe(&plan.provenance.backend, semantic_action)
-        else {
+        let Some(adapter) = webcodex_validation::validation_evidence_profile_for_project_step(
+            &plan.provenance.backend,
+            semantic_action,
+            &plan.step,
+        ) else {
             return ToolResult::err(
                 "validation adapter unavailable; upgrade Server and Runner together",
             );
         };
-        if adapter.tool_identity() != plan.adapter || adapter.validation_kind() != action.kind() {
+        if adapter.tool_identity() != plan.adapter
+            || adapter.validation_kind() != action.kind_for_backend(&plan.provenance.backend)
+        {
             return ToolResult::err("invalid Runner project validation evidence profile");
         }
         let source_fence = self.validation_sources.capture(&resolved.resolved_id);

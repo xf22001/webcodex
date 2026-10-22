@@ -7,6 +7,28 @@ names and Workflow Sessions belong to that runtime. For local development of the
 WebCodex repository with another host's tools, follow [CONTRIBUTING.md](../CONTRIBUTING.md)
 and [AGENTS.md](../AGENTS.md). This guide does not require installing WebCodex to contribute.
 
+## Plan and continue
+
+For substantial development, first inspect relevant rules/code and define observable
+completion conditions. Show a short plan organized by outcomes, then continue
+with authorized implementation; do not stop merely to ask whether to proceed.
+Ask only when a material requirement or authority is missing. Tiny work needs no
+plan, and a visible plan does not require a durable Goal. Existing Goal selection
+preferences remain unchanged.
+
+Choose the next action from actual tool results. Revise the remaining approach
+when evidence disproves a hypothesis or the user changes requirements; retain
+useful decisions/progress in the established Session. Never pre-complete tests or
+repeat the same failure without new diagnosis. Keep one Job for each execution.
+A truncated read uses its returned continuation, a stale edit needs a fresh read,
+and an uncertain effect needs reconciliation rather than replay.
+
+A Project selector rejection is input validation, not proof of an offline Runner
+or a missing Session. For an already registered Project use its canonical id or
+issued `project_ref`. If unknown, use authorized `list_projects` discovery; do not
+guess a Runner from a filesystem path. `client_id + path` remains an explicit
+bootstrap form, with the same authorization as before.
+
 ## Normal loop
 
 The ordinary WebCodex coding loop is intentionally small:
@@ -27,6 +49,20 @@ Its bounded workspace snapshot reuses the same startup Git observation for branc
 For substantial coding, present the exact Workflow Session once with `present_work_result(project, session_id)` after it becomes materially stateful (for example after the first meaningful source mutation or when long-running validation begins). The mounted MCP App performs bounded live Workspace / Validation / Review reads itself, so do not repeatedly present it or spend model turns polling solely to keep it current. Tiny and read-only work does not need a progress card. A non-blocking `finish_coding_task` seals eligible final changes at closeout; the already-mounted card discovers that immutable snapshot on a later App refresh. If no card was mounted and closeout returns the explicit presentation suggestion, present it once then.
 By default it also returns a small bounded `extensions` catalog for selection: Skill metadata comes from the canonical project/configured/managed Skill union, and Plugin metadata is restricted to ready providers whose configured working directory matches the Project root. This metadata grants no authority and does not load Skill bodies or create Plugin bindings; use `read_skill_file` for Skill text, `run_skill_resource` only for trusted Runner-configured live `scripts/` resources guarded by `expected_definition_revision` or Runner-installed managed resources additionally fenced by `expected_package_revision`, or `plugin_tool describe -> call` after selecting a relevant entry. Configured resource bytes remain live until execution rather than being package-revision-pinned. Set `include_extension_catalog=false` only when the current model context already retains that discovery metadata.
 
+Skill reads (`load_skill` and `read_skill_file`) return `skill_path`, the normalized package-relative path used by `read_skill_file.path`. Project Skills also return authoritative `project_path`: use it with returned source line ranges for Project citations, even when the package folder differs from the metadata name. Runner-configured and managed Skills omit `project_path`; cite their Skill identity, `skill_path`, resource `sha256`, revisions and source lines without inventing a Project path. Native Skill roots are not exposed.
+
+For substantial cross-turn work, a durable Goal can record the objective and completion conditions without requiring user-managed steps. `update_goal` edits an active Goal with an exact `expected_revision` and `idempotency_key`: omitted `completion_conditions` preserves the list, while `[]` clears it. Replacement conditions use the same bounds as creation (at most eight, each nonempty after trimming and at most 512 UTF-8 bytes). Editing conditions preserves existing steps, checkpoints and progress; it does not evaluate acceptance, resume execution or reopen a completed/cancelled Goal. Re-observe a revision conflict; reuse the same key and exact request after an uncertain result.
+
+## Workbench app
+
+The **Projects & Resources** Workbench adds Files, Work and Goals views to the existing Project and Session resource browser. Files are read-only previews and references; choosing **Add selected references** updates the Host model context when the Host advertises a supported modality. It does not edit Project files. Goals belong to the current communication account and remain available across Projects.
+
+The Workbench instance label defaults to `WebCodex`. Set `WEBCODEX_INSTANCE_NAME` on the Server to choose a shared instance name. Each authenticated account can also save a personal display-name override in Workbench settings; clearing it returns to the configured instance name. If the Workbench commands do not appear after upgrading, refresh the Host's tool list or reconnect the Server so it can discover the current App tools. Native Host rendering has separate capability requirements; a local fixture test does not certify a live Host.
+
+Submitting work requires an explicitly selected Project, an owned Agent, and one exact currently available route: a verified continuation in this chat, or a provider exposed by that Project's Runner. The Workbench creates the canonical AgentTask and Attempt and dispatches through that existing route. It does not accept a free-form command or create a new execution backend. If submission returns an uncertain result, retry the same draft with the same key and unchanged fields; inspect the returned Task or reconcile it before starting a different submission. Optional Goal association uses the selected caller-owned Goal.
+
+Session todos appear only after selecting both a Project and one authorized Workflow Session. The Workbench does not infer a Session from recent activity. Historical 32-hex Goal identifiers came from pre-stable development; supported stable versions use compact `wc_goal_` identifiers. Do not rewrite database IDs by hand. If an older development database produces an invalid Goal ID or storage error, preserve a backup and report the WebCodex version and sanitized error to the maintainer for version-specific migration guidance; do not delete or reset the database as a first step. See the [Workbench implementation notes](implementation/workbench-resource-references.md).
+
 ## Start or continue a task
 
 Use `work_on_project` for both a new coding task and an explicit continuation. WebCodex keeps bounded Workflow Session evidence so validation, review, and handoff can refer to the same unit of work, but that Session is not an authentication credential and does not widen project access.
@@ -39,6 +75,22 @@ concrete, reviewable completion, map cross-layer changes end to end, keep the
 design minimal, validate proportionally, and report evidence honestly. Use only
 tools and protocol fields supported by the current exposed schemas.
 
+For nontrivial coding, locate the owning layer, trace relevant callers and data
+flow, and look for reusable implementations before editing. Read design guidance
+for the affected boundaries and keep exploration proportional to the task.
+Existing patterns are evidence to assess; new abstractions or parallel paths
+need a concrete task reason. Share authoritative business facts before
+presentation. Solve the root cause with the smallest coherent change, including
+necessary local refactoring and removal of superseded paths within scope.
+Before delivery, review ownership, duplication and cross-layer consistency as
+well as behavior; passing tests alone do not establish architectural fit.
+
+Compiler, schema and exhaustiveness failures can reveal missing cross-layer
+changes. For lengthy tasks, report verified milestones as they become available;
+after creating an authorized PR or other external deliverable, communicate its
+actual link and validation status promptly rather than relying entirely on a
+final reply. Guidance cannot prevent a provider quota interruption.
+
 `independent_review` is the only optional named role because it changes behavior.
 Use it only when the task explicitly asks for an independent review pass:
 
@@ -50,6 +102,12 @@ report concrete findings with file/line evidence and impact, and do not edit.
 To request corrections as well, explicitly add “fix concrete findings and run
 focused regression validation.” Naming a review role alone does not authorize edits,
 and no role ever grants authority.
+
+Independent review also examines duplicated facts or execution flows, misplaced
+responsibilities, presentation round-trips and incomplete migrations introduced
+or worsened by the change. Findings need concrete code and correctness, drift or
+maintenance impact; distinguish required fixes from optional cleanup. Style
+preference alone is not a finding, and unrelated redesign stays outside scope.
 
 Guidance is delivered in tool results; it is not the client's system prompt and
 does not grant execution authority. Host instructions, the user's task,
@@ -199,6 +257,10 @@ Use shell/process escape hatches only when the structured validation surface can
 Review the actual workspace/diff after editing and validation. Passing tests do not replace diff review, and a clean diff does not replace focused validation when behavior changed.
 
 `finish_coding_task` returns a bounded evidence summary for closeout. Treat it as advisory evidence, not as a decision that the work is correct or complete. The model still makes the final engineering judgment and reports the result to the user.
+
+Closeout (including `summary_only`), `read_session_handoff`, and a Session-linked Work Result expose an optional `acceptance` summary derived from the same observations. Its `state` is `ready_for_review`, `needs_evidence`, `failed`, or `not_applicable`; none means that natural-language requirements have been accepted. `reason_codes` identify missing/stale/unproven evidence, and `evidence_refs` name the existing workspace, validation, review or output evidence. Follow the existing next actions and read the exact Session evidence when details are needed. A changed handoff snapshot must be re-read before dependent work.
+
+Execution completion and successful historical checks do not prove current source correctness. Source fences currently report `unproven` or `stale`, so even a successful check still needs source/applicability review. Retained artifact metadata is a historical observation, not current file freshness or content correctness. Read-only work may legitimately require no tests: decide applicability explicitly, without running tests merely to change the badge. A card with no task Session reports `not_applicable`; it never infers a task from Project activity.
 
 ## Long-running work
 

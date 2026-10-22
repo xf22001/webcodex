@@ -5,6 +5,8 @@ use crate::runner_protocol::{
 use response::{mcp_runtime_tool_result_fallback, McpToolResultPresentation};
 #[path = "structured_failure/client_contract.rs"]
 mod client_contract;
+#[path = "structured_failure/diagnostics.rs"]
+mod diagnostics;
 use webcodex_core::mcp_gateway::{
     McpGatewayContent, McpGatewayProvider, McpGatewayRequest, McpGatewayResponse,
     McpGatewayResponsePayload, McpGatewayTool, McpGatewayToolResult,
@@ -285,6 +287,13 @@ async fn gateway_and_app_canonical_failures_use_request_presentation() {
 }
 
 async fn register_failure_runner(runtime: &ToolRuntime) {
+    register_failure_runner_with_resource_links(runtime, false).await;
+}
+
+async fn register_failure_runner_with_resource_links(
+    runtime: &ToolRuntime,
+    allow_resource_links: bool,
+) {
     runtime
         .runner_registry
         .register(crate::test_support::current_runner_registration(
@@ -315,8 +324,11 @@ async fn register_failure_runner(runtime: &ToolRuntime) {
                     file_write: true,
                     shell: true,
                     structured_process_argv: true,
+                    structured_script_payload: true,
+                    structured_script_python: true,
                     apply_text_edit_local_guard_without_sha: true,
                     apply_text_edit_occurrence: true,
+                    mcp_gateway_resource_links: allow_resource_links,
                     ..Default::default()
                 },
             },
@@ -474,7 +486,10 @@ async fn http_openai_mcp_passthrough_preserves_provider_error() {
             } else {
                 assert!(matches!(
                     request.mcp_gateway,
-                    Some(McpGatewayRequest::ToolsCall { .. })
+                    Some(McpGatewayRequest::ToolsCall {
+                        allow_resource_links: false,
+                        ..
+                    })
                 ));
                 McpGatewayResponsePayload::ToolResult {
                     result: provider_result.clone(),
@@ -526,13 +541,13 @@ async fn http_openai_mcp_passthrough_preserves_provider_error() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn http_mcp_passthrough_preserves_mixed_image_content_order() {
+async fn http_mcp_passthrough_preserves_mixed_image_and_resource_link_content() {
     let _env = crate::auth::AuthEnvGuard::new();
     _env.enable_direct_shared_key();
     _env.disable_open_anonymous();
     let (_tmp, db) = test_db();
     let runtime = Arc::new(test_runtime());
-    register_failure_runner(&runtime).await;
+    register_failure_runner_with_resource_links(&runtime, true).await;
     let service = Service::new(build_test_router(
         test_config(Some("secret")),
         db,
@@ -547,6 +562,19 @@ async fn http_mcp_passthrough_preserves_mixed_image_content_order() {
                 data: "iVBORw0KGgo=".into(),
                 mime_type: "image/png".into(),
             },
+            serde_json::from_value(json!({
+                "type": "resource_link",
+                "uri": "blockbench://project/model.bbmodel",
+                "name": "model.bbmodel",
+                "title": "Model",
+                "description": "Current project",
+                "mimeType": "application/json",
+                "size": 1024,
+                "annotations": {"audience": ["user"], "priority": 0.5},
+                "icons": [{"src": "https://example.com/icon.png", "mimeType": "image/png"}],
+                "_meta": {"providerExtension": true}
+            }))
+            .unwrap(),
             McpGatewayContent::Text {
                 text: "after".into(),
             },
@@ -581,7 +609,10 @@ async fn http_mcp_passthrough_preserves_mixed_image_content_order() {
             } else {
                 assert!(matches!(
                     request.mcp_gateway,
-                    Some(McpGatewayRequest::ToolsCall { .. })
+                    Some(McpGatewayRequest::ToolsCall {
+                        allow_resource_links: true,
+                        ..
+                    })
                 ));
                 McpGatewayResponsePayload::ToolResult {
                     result: provider_result.clone(),
@@ -629,7 +660,8 @@ async fn http_mcp_passthrough_preserves_mixed_image_content_order() {
             assert_eq!(body["result"]["content"][1]["type"], "image");
             assert_eq!(body["result"]["content"][1]["data"], "iVBORw0KGgo=");
             assert_eq!(body["result"]["content"][1]["mimeType"], "image/png");
-            assert_eq!(body["result"]["content"][2]["text"], "after");
+            assert_eq!(body["result"]["content"][2]["type"], "resource_link");
+            assert_eq!(body["result"]["content"][3]["text"], "after");
             assert_eq!(
                 body["result"]["structuredContent"],
                 json!({"kind": "mixed"})
@@ -724,6 +756,12 @@ async fn http_edit_project_files_and_process_failures_preserve_canonical_output(
                 assert_eq!(output["stderr_tail"], "process diagnostics");
                 assert!(output.get("accepted_exit_codes").is_none());
                 assert!(output.get("result_expectation").is_none());
+                let text = body["result"]["content"][0]["text"].as_str().unwrap();
+                assert_eq!(text.contains("observed output"), client != "openai-mcp");
+                assert_eq!(text.contains("process diagnostics"), client != "openai-mcp");
+                // Only the text channel and isError differ between clients.
+                body["result"]["content"][0]["text"] =
+                    body["result"]["structuredContent"]["error"].clone();
             }
             body["result"]["isError"] = json!(true);
             if let Some(expected) = &baseline {
@@ -788,6 +826,11 @@ async fn http_mcp_execution_compaction_keeps_sparse_serialization() {
         assert_eq!(status, StatusCode::OK, "{body}");
         let result = &body["result"]["structuredContent"];
         assert_eq!(result["success"], true, "{body}");
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "WebCodex tool completed successfully."
+        );
         assert!(result["output"].get("execution_state").is_none());
         assert!(result["output"].get("command_completed").is_none());
         assert_eq!(result["output"]["stdout_tail"], "output witness");

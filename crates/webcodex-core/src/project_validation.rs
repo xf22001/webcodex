@@ -12,13 +12,23 @@ pub use crate::project_operation::{
 pub enum ProjectValidationAction {
     FormatCheck,
     Check,
+    /// Run Runner-owned Rust Clippy or a Node `lint` script.
+    Lint,
     Test,
 }
 impl ProjectValidationAction {
+    pub fn kind_for_backend(self, backend: &str) -> &'static str {
+        if self == Self::Lint && backend == "rust" {
+            "lint"
+        } else {
+            self.kind()
+        }
+    }
     pub fn kind(self) -> &'static str {
         match self {
             Self::FormatCheck => "format",
             Self::Check => "check",
+            Self::Lint => "check",
             Self::Test => "test",
         }
     }
@@ -59,6 +69,13 @@ pub struct ProjectValidationTestOptions {
     pub min_tests: Option<u64>,
 }
 
+/// Offline only affects Cargo dependency resolution/fetching; build scripts and
+/// executed tests may still access the network. It is not an OS sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDependencyResolutionPolicy {
+    Offline,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectValidationRequest {
@@ -71,6 +88,8 @@ pub struct ProjectValidationRequest {
     pub scope: Option<ProjectValidationScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_policy: Option<ProjectDependencyPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_resolution_policy: Option<ProjectDependencyResolutionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<ProjectValidationTestOptions>,
 }
@@ -114,6 +133,20 @@ impl ProjectValidationRequest {
                     "invalid project validation package scope".to_string()
                 }
             })?;
+        }
+        if self.dependency_resolution_policy.is_some() {
+            if self.action == ProjectValidationAction::Lint {
+                return Err("dependency_resolution_policy_unsupported: lint offline policy requires maintainer approval".into());
+            }
+            if !matches!(
+                self.action,
+                ProjectValidationAction::Check | ProjectValidationAction::Test
+            ) || !matches!(
+                self.adapter,
+                ProjectValidationAdapter::Auto | ProjectValidationAdapter::Rust
+            ) {
+                return Err("dependency_resolution_policy requires Rust check or test".into());
+            }
         }
         if self.dependency_policy.is_some() && self.action == ProjectValidationAction::FormatCheck {
             return Err("dependency_policy requires project_validate action=check or test".into());
@@ -169,6 +202,9 @@ impl ProjectValidationProvenance {
         self.request.validate().is_ok()
             && validate_relative(&self.recipe_root).is_ok()
             && matches!(self.backend.as_str(), "rust" | "go" | "python" | "node")
+            // Lint has a closed backend set, including retained provenance.
+            && (self.request.action != ProjectValidationAction::Lint || matches!(self.backend.as_str(), "node" | "rust"))
+            && (self.request.dependency_resolution_policy.is_none() || self.backend == "rust")
             && [
                 &self.root_digest,
                 &self.manifest_digest,

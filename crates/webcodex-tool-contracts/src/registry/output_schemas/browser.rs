@@ -22,6 +22,7 @@ fn target_schema() -> Value {
                     "browser_launch": {"type": "boolean"},
                     "browser_managed_profile": {"type": "boolean"},
                     "browser_surface_handoff": {"type": "boolean"},
+                    "browser_user_handoff": {"type": "boolean"},
                     "browser_extension_bridge": {"type": "boolean"}
                 },
                 "required": [
@@ -43,8 +44,16 @@ fn browser_schema() -> Value {
         "properties": {
             "browser_id": {"type": "string", "minLength": 1, "maxLength": 128},
             "page_count": {"type": "integer", "minimum": 0, "maximum": 16},
+            "needs_snapshot": {"type":"boolean"},
             "ownership": {"type": "string", "enum": ["owned_ephemeral", "owned_managed_persistent", "attached_external"]},
-            "profile": {"type": "string", "maxLength": 48}
+            "profile": {"type": "string", "maxLength": 48},
+            "user_handoff": {"type":"object", "additionalProperties":false, "properties": {
+                "session_id":{"type":"string","maxLength":128},
+                "message_id":{"type":"string","maxLength":128},
+                "handoff_fence":{"type":"string","maxLength":128},
+                "surface_id":{"type":"string","maxLength":128},
+                "expires_in_ms":{"type":"integer","minimum":0,"maximum":600000}
+            }, "required":["session_id","message_id","handoff_fence","surface_id","expires_in_ms"]}
         },
         "required": ["browser_id", "page_count"]
     })
@@ -259,8 +268,8 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ("surface_id", json!({"type":"string", "maxLength":128})),
                 ("application", json!({"type":"string", "maxLength":512})),
                 ("title", json!({"type":"string", "maxLength":512})),
-                ("width", json!({"type":"integer", "minimum":0})),
-                ("height", json!({"type":"integer", "minimum":0})),
+                ("width", json!({"type":"integer", "minimum":1})),
+                ("height", json!({"type":"integer", "minimum":1})),
                 ("focused", json!({"type":["boolean","null"]})),
                 ("active", json!({"type":["boolean","null"]})),
                 (
@@ -372,14 +381,6 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                     json!({"type": "string", "enum": ["image/png"]}),
                 ),
                 (
-                    "width",
-                    json!({"type": "integer", "minimum": 1, "maximum": 4096}),
-                ),
-                (
-                    "height",
-                    json!({"type": "integer", "minimum": 1, "maximum": 4096}),
-                ),
-                (
                     "file_bytes",
                     json!({"type": "integer", "minimum": 1, "maximum": 1048576}),
                 ),
@@ -390,6 +391,22 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
             ]);
             let mut schema = wrapped_output_schema(fields);
             schema["properties"]["output"]["additionalProperties"] = json!(false);
+            // One width/height remains: integer minimum 1, no maximum. That is
+            // the surface floor list_windows emits. Screenshot pixels stay
+            // 1..=4096 when mime_type is present. MCP renames content_base64
+            // and leaves mime_type in place.
+            schema["properties"]["output"]["allOf"] = json!([{
+                "if": {
+                    "properties": {"mime_type": {"const": "image/png"}},
+                    "required": ["mime_type"]
+                },
+                "then": {
+                    "properties": {
+                        "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+                        "height": {"type": "integer", "minimum": 1, "maximum": 4096}
+                    }
+                }
+            }]);
             Some(schema)
         }
         "control_browser" => {
@@ -402,6 +419,11 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ("stopped_at_index", json!({"type": "integer", "minimum": 0, "maximum": 31, "description": "Zero-based stopped operation. A post-effect document change stops at the completed operation's index."})),
                 ("remaining_count", json!({"type": "integer", "minimum": 0, "maximum": 32, "description": "Definitely unstarted operations, including a rejected operation but excluding an uncertain operation. Never implies permission to retry."})),
                 ("needs_snapshot", json!({"type": "boolean"})),
+                ("session_id", json!({"type":"string", "maxLength":128})),
+                ("message_id", json!({"type":"string", "maxLength":128})),
+                ("handoff_fence", json!({"type":"string", "maxLength":128})),
+                ("surface_id", json!({"type":"string", "maxLength":128})),
+                ("expires_in_ms", json!({"type":"integer", "minimum":0, "maximum":600000})),
                 ("stopped_execution_state", json!({"type": "string", "enum": ["not_started", "completed", "outcome_unknown"]})),
                 (
                     "browser_id",

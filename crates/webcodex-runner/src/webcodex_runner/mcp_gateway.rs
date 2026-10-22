@@ -23,11 +23,15 @@ use webcodex_core::mcp_gateway::{
     McpGatewayProvider, McpGatewayProviderState, McpGatewayRequest, McpGatewayResponse,
     McpGatewayResponsePayload, McpGatewayTool, McpGatewayToolResult, MCP_GATEWAY_MAX_MESSAGE_BYTES,
     MCP_GATEWAY_MAX_PROVIDER_MESSAGE_BYTES, MCP_GATEWAY_MAX_RESULT_BYTES,
+    MCP_GATEWAY_MAX_TOOL_COUNT,
 };
 use webcodex_process::ManagedChild;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_GATEWAY_MAX_IGNORED_NOTIFICATIONS: usize = 32;
+// Limit bursts, not lifetime totals: an idle provider may ping indefinitely.
+const MCP_GATEWAY_UNSOLICITED_WINDOW: Duration = Duration::from_secs(5);
+const MCP_GATEWAY_MAX_PROVIDER_REQUEST_ID_BYTES: usize = 256;
 const PROVIDER_NEVER_STARTED: u8 = 0;
 const PROVIDER_HEALTHY: u8 = 1;
 const PROVIDER_CONNECTION_RETIRED: u8 = 2;
@@ -61,7 +65,7 @@ struct ProviderEntry {
 
 struct ProviderConnection {
     child: ManagedChild,
-    stdin: ChildStdin,
+    stdin: Arc<Mutex<ChildStdin>>,
     incoming: mpsc::Receiver<ReaderEvent>,
     next_id: u64,
 }
@@ -76,6 +80,8 @@ enum ReaderFault {
     Malformed,
     TooLarge,
     Io,
+    Stdin,
+    NotificationFlood,
 }
 
 struct ProviderFailure {
@@ -313,6 +319,7 @@ impl McpGatewayManager {
                 name,
                 arguments,
                 expected_schema,
+                allow_resource_links,
             } => {
                 let Some((provider, timeout, max_description_bytes)) =
                     self.exact_provider(&provider_id, &provider_instance_id)
@@ -340,7 +347,7 @@ impl McpGatewayManager {
                             return Err(ProviderFailure::not_started("provider_timeout"));
                         }
                         self.commit_provider_dispatch(&provider)?;
-                        connection.tools_call(&name, arguments, remaining)
+                        connection.tools_call(&name, arguments, remaining, allow_resource_links)
                     },
                 ) {
                     Ok(result) => {
@@ -714,9 +721,11 @@ impl ProviderConnection {
             .take()
             .ok_or_else(|| ProviderFailure::before_send("provider_stdio_unavailable"))?;
         let (sender, incoming) = mpsc::sync_channel(8);
+        let stdin = Arc::new(Mutex::new(stdin));
+        let reader_stdin = Arc::clone(&stdin);
         std::thread::Builder::new()
             .name(format!("wc-mcp-{}", config.id))
-            .spawn(move || provider_stdout_reader(stdout, sender))
+            .spawn(move || provider_stdout_reader(stdout, sender, reader_stdin))
             .map_err(|_| ProviderFailure::before_send("provider_reader_unavailable"))?;
         std::thread::Builder::new()
             .name(format!("wc-mcp-stderr-{}", config.id))
@@ -756,12 +765,11 @@ impl ProviderConnection {
         max_description_bytes: usize,
     ) -> Result<Vec<McpGatewayTool>, ProviderFailure> {
         let result = self.request("tools/list", json!({}), timeout)?;
-        validate_json_value(
-            &result,
-            MCP_GATEWAY_MAX_MESSAGE_BYTES,
-            "provider tools response",
-        )
-        .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
+        let encoded = serde_json::to_vec(&result)
+            .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
+        if encoded.len() > MCP_GATEWAY_MAX_MESSAGE_BYTES {
+            return Err(ProviderFailure::completed("invalid_provider_tools"));
+        }
         let object = result
             .as_object()
             .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
@@ -777,8 +785,28 @@ impl ProviderConnection {
             .get("tools")
             .and_then(Value::as_array)
             .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+        if raw_tools.len() > MCP_GATEWAY_MAX_TOOL_COUNT {
+            return Err(ProviderFailure::completed("invalid_provider_tools"));
+        }
+        // The catalog has an aggregate byte/count bound; each tool gets its own
+        // JSON node budget. Validate other response fields independently too.
+        let mut envelope = object.clone();
+        envelope.insert("tools".to_string(), json!([]));
+        validate_json_value(
+            &Value::Object(envelope),
+            MCP_GATEWAY_MAX_MESSAGE_BYTES,
+            "provider tools response",
+        )
+        .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
         let mut tools = Vec::with_capacity(raw_tools.len());
         for raw in raw_tools {
+            // Keep the tools/list wrapper so the existing depth bound is unchanged.
+            validate_json_value(
+                &json!({"tools": [raw]}),
+                MCP_GATEWAY_MAX_MESSAGE_BYTES,
+                "provider tool",
+            )
+            .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
             let object = raw
                 .as_object()
                 .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
@@ -832,6 +860,7 @@ impl ProviderConnection {
         name: &str,
         arguments: Value,
         timeout: Duration,
+        allow_resource_links: bool,
     ) -> Result<McpGatewayToolResult, ProviderFailure> {
         // Outer MCP caller metadata deliberately stops at the WebCodex trust
         // boundary. Provider tools/call receives only gateway-owned fields.
@@ -877,6 +906,16 @@ impl ProviderConnection {
                         data: data.to_string(),
                         mime_type: mime_type.to_string(),
                     });
+                }
+                "resource_link" => {
+                    if !allow_resource_links {
+                        // An old Server cannot decode this result variant. Since
+                        // tools/call completed, send a deterministic completed error.
+                        return Err(ProviderFailure::completed("unsupported_provider_content"));
+                    }
+                    let link = serde_json::from_value(Value::Object(item.clone()))
+                        .map_err(|_| ProviderFailure::completed("invalid_provider_result"))?;
+                    content.push(link);
                 }
                 _ => {
                     return Err(ProviderFailure::completed("unsupported_provider_content"));
@@ -947,8 +986,14 @@ impl ProviderConnection {
                 Ok(ReaderEvent::Message(Err(ReaderFault::TooLarge))) => {
                     return Err(ProviderFailure::before_send("provider_message_too_large"));
                 }
+                Ok(ReaderEvent::Message(Err(ReaderFault::NotificationFlood))) => {
+                    return Err(ProviderFailure::before_send("provider_notification_flood"));
+                }
                 Ok(ReaderEvent::Message(Err(ReaderFault::Io))) => {
                     return Err(ProviderFailure::before_send("provider_stdout_failed"));
+                }
+                Ok(ReaderEvent::Message(Err(ReaderFault::Stdin))) => {
+                    return Err(ProviderFailure::before_send("provider_stdin_failed"));
                 }
             }
         }
@@ -973,8 +1018,9 @@ impl ProviderConnection {
         }
         encoded.push(b'\n');
         self.stdin
+            .lock()
+            .map_err(|_| ProviderFailure::after_send("provider_stdin_failed"))?
             .write_all(&encoded)
-            .and_then(|_| self.stdin.flush())
             .map_err(|_| ProviderFailure::after_send("provider_stdin_failed"))?;
 
         let deadline = Instant::now() + timeout;
@@ -992,8 +1038,14 @@ impl ProviderConnection {
                 Ok(ReaderEvent::Message(Err(ReaderFault::TooLarge))) => {
                     return Err(ProviderFailure::after_send("provider_message_too_large"));
                 }
+                Ok(ReaderEvent::Message(Err(ReaderFault::NotificationFlood))) => {
+                    return Err(ProviderFailure::after_send("provider_notification_flood"));
+                }
                 Ok(ReaderEvent::Message(Err(ReaderFault::Io))) => {
                     return Err(ProviderFailure::after_send("provider_stdout_failed"));
+                }
+                Ok(ReaderEvent::Message(Err(ReaderFault::Stdin))) => {
+                    return Err(ProviderFailure::after_send("provider_stdin_failed"));
                 }
                 Ok(ReaderEvent::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(ProviderFailure::after_send("provider_eof"));
@@ -1031,8 +1083,9 @@ impl ProviderConnection {
         }
         encoded.push(b'\n');
         self.stdin
+            .lock()
+            .map_err(|_| ProviderFailure::before_send("provider_stdin_failed"))?
             .write_all(&encoded)
-            .and_then(|_| self.stdin.flush())
             .map_err(|_| ProviderFailure::before_send("provider_stdin_failed"))
     }
 
@@ -1067,23 +1120,119 @@ impl Drop for ProviderConnection {
     }
 }
 
+#[derive(Default)]
+struct UnsolicitedWindow {
+    start: Option<Instant>,
+    count: usize,
+}
+
+impl UnsolicitedWindow {
+    fn exceeded(&mut self, now: Instant) -> bool {
+        if self
+            .start
+            .is_none_or(|start| now.duration_since(start) >= MCP_GATEWAY_UNSOLICITED_WINDOW)
+        {
+            self.start = Some(now);
+            self.count = 0;
+        }
+        self.count += 1;
+        self.count > MCP_GATEWAY_MAX_IGNORED_NOTIFICATIONS
+    }
+
+    fn reset(&mut self) {
+        self.start = None;
+        self.count = 0;
+    }
+}
+
 fn provider_stdout_reader(
     stdout: std::process::ChildStdout,
     sender: mpsc::SyncSender<ReaderEvent>,
+    stdin: Arc<Mutex<ChildStdin>>,
 ) {
     let mut reader = BufReader::new(stdout);
+    let mut unsolicited_window = UnsolicitedWindow::default();
     loop {
-        let message = match read_bounded_line(&mut reader) {
-            Ok(Some(message)) => ReaderEvent::Message(
-                serde_json::from_slice(&message).map_err(|_| ReaderFault::Malformed),
-            ),
+        let event = match read_bounded_line(&mut reader) {
+            Ok(Some(line)) => match serde_json::from_slice::<Value>(&line) {
+                Ok(message) => {
+                    if is_provider_notification(&message) {
+                        if unsolicited_window.exceeded(Instant::now()) {
+                            ReaderEvent::Message(Err(ReaderFault::NotificationFlood))
+                        } else {
+                            continue;
+                        }
+                    } else if let Some(request_id) = provider_request_id(&message) {
+                        if unsolicited_window.exceeded(Instant::now()) {
+                            return send_reader_fault(&sender, ReaderFault::NotificationFlood);
+                        }
+                        let reply = if message.get("method").and_then(Value::as_str) == Some("ping")
+                        {
+                            json!({"jsonrpc": "2.0", "id": request_id, "result": {}})
+                        } else {
+                            json!({"jsonrpc": "2.0", "id": request_id,
+                                "error": {"code": -32601, "message": "Method not found"}})
+                        };
+                        let result = serde_json::to_vec(&reply)
+                            .map_err(|_| ReaderFault::Stdin)
+                            .and_then(|mut data| {
+                                data.push(b'\n');
+                                stdin
+                                    .lock()
+                                    .map_err(|_| ReaderFault::Stdin)?
+                                    .write_all(&data)
+                                    .map_err(|_| ReaderFault::Stdin)
+                            });
+                        match result {
+                            Ok(()) => continue,
+                            Err(fault) => ReaderEvent::Message(Err(fault)),
+                        }
+                    } else {
+                        unsolicited_window.reset();
+                        ReaderEvent::Message(Ok(message))
+                    }
+                }
+                Err(_) => ReaderEvent::Message(Err(ReaderFault::Malformed)),
+            },
             Ok(None) => ReaderEvent::Eof,
             Err(fault) => ReaderEvent::Message(Err(fault)),
         };
-        let terminal = !matches!(&message, ReaderEvent::Message(Ok(_)));
-        if sender.send(message).is_err() || terminal {
+        let terminal = !matches!(&event, ReaderEvent::Message(Ok(_)));
+        if sender.send(event).is_err() || terminal {
             return;
         }
+    }
+}
+
+fn send_reader_fault(sender: &mpsc::SyncSender<ReaderEvent>, fault: ReaderFault) {
+    let _ = sender.send(ReaderEvent::Message(Err(fault)));
+}
+
+fn provider_request_id(message: &Value) -> Option<Value> {
+    let object = message.as_object()?;
+    if object.get("jsonrpc")?.as_str()? != "2.0"
+        || object.contains_key("result")
+        || object.contains_key("error")
+    {
+        return None;
+    }
+    let method = object.get("method")?.as_str()?;
+    if method.is_empty() || method.len() > 256 || method.chars().any(char::is_control) {
+        return None;
+    }
+    if object
+        .get("params")
+        .is_some_and(|params| !params.is_object())
+    {
+        return None;
+    }
+    let id = object.get("id")?;
+    match id {
+        Value::String(value) if value.len() <= MCP_GATEWAY_MAX_PROVIDER_REQUEST_ID_BYTES => {
+            Some(id.clone())
+        }
+        Value::Number(value) if value.is_i64() || value.is_u64() => Some(id.clone()),
+        _ => None,
     }
 }
 

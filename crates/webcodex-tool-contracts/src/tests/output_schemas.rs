@@ -1,5 +1,104 @@
 use super::*;
 
+#[test]
+fn typed_job_activity_schema_preserves_closed_nullable_wire_shape() {
+    use webcodex_core::runner_protocol::ShellJobActivity;
+    let output = output_schema_for_tool("list_jobs");
+    let schema =
+        &output["properties"]["output"]["properties"]["jobs"]["items"]["properties"]["activity"];
+    let object = &schema["anyOf"][0];
+    assert_eq!(object["additionalProperties"], false);
+    assert_eq!(object["properties"].as_object().unwrap().len(), 3);
+    assert_eq!(object["required"].as_array().unwrap().len(), 3);
+    for (field, expected) in [
+        ("state", json!(["working", "waiting"])),
+        (
+            "phase",
+            json!([
+                "process_running",
+                "validation_format",
+                "validation_check",
+                "validation_test",
+                "cargo_waiting_for_build_lock",
+                "cargo_compiling",
+                "cargo_checking"
+            ]),
+        ),
+        (
+            "source",
+            json!(["runner_execution", "validation_plan", "cargo_output"]),
+        ),
+    ] {
+        assert_eq!(object["properties"][field]["enum"], expected, "{field}");
+    }
+    // Structural schema remains distinct from the runtime's canonical
+    // state/phase/source combination validator.
+    for state in ["working", "waiting"] {
+        for phase in [
+            "process_running",
+            "validation_format",
+            "validation_check",
+            "validation_test",
+            "cargo_waiting_for_build_lock",
+            "cargo_compiling",
+            "cargo_checking",
+        ] {
+            for source in ["runner_execution", "validation_plan", "cargo_output"] {
+                let value = json!({"state": state, "phase": phase, "source": source});
+                let typed: ShellJobActivity = serde_json::from_value(value.clone()).unwrap();
+                assert_eq!(serde_json::to_value(typed).unwrap(), value);
+                test_support::validate_schema_instance(&value, schema).unwrap();
+            }
+        }
+    }
+    test_support::validate_schema_instance(&Value::Null, schema).unwrap();
+    let valid = json!({"state":"working","phase":"process_running","source":"runner_execution"});
+    for field in ["state", "phase", "source"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(test_support::validate_schema_instance(&missing, schema).is_err());
+        let mut unknown = valid.clone();
+        unknown[field] = json!("unknown");
+        assert!(test_support::validate_schema_instance(&unknown, schema).is_err());
+    }
+    let mut extra = valid;
+    extra["private_runner_instance"] = json!("must-not-leak");
+    assert!(test_support::validate_schema_instance(&extra, schema).is_err());
+}
+
+#[test]
+fn typed_job_command_and_input_states_preserve_distinct_vocabularies() {
+    use webcodex_core::{job_input::InputWriteState, runner_protocol::ShellCommandExecutionState};
+    let jobs = output_schema_for_tool("list_jobs");
+    let command = &jobs["properties"]["output"]["properties"]["jobs"]["items"]["properties"]
+        ["command_execution_state"];
+    assert_eq!(
+        command["anyOf"][0]["enum"],
+        json!(["not_started", "outcome_unknown", "timed_out", "completed"])
+    );
+    for value in ["not_started", "outcome_unknown", "timed_out", "completed"] {
+        let typed: ShellCommandExecutionState = serde_json::from_value(json!(value)).unwrap();
+        test_support::validate_schema_instance(&serde_json::to_value(typed).unwrap(), command)
+            .unwrap();
+    }
+    test_support::validate_schema_instance(&Value::Null, command).unwrap();
+    assert!(test_support::validate_schema_instance(&json!("pending"), command).is_err());
+    let write = output_schema_for_tool("write_job_input");
+    let input = &write["properties"]["output"]["properties"]["state"];
+    assert_eq!(
+        input["enum"],
+        json!(["pending", "written", "closed", "outcome_unknown"])
+    );
+    for value in ["pending", "written", "closed", "outcome_unknown"] {
+        let typed: InputWriteState = serde_json::from_value(json!(value)).unwrap();
+        test_support::validate_schema_instance(&serde_json::to_value(typed).unwrap(), input)
+            .unwrap();
+    }
+    for invalid in [Value::Null, json!("completed"), json!("unknown"), json!(0)] {
+        assert!(test_support::validate_schema_instance(&invalid, input).is_err());
+    }
+}
+
 fn structured_execution_output(
     execution_source: &str,
     execution_state: &str,
@@ -353,6 +452,22 @@ fn observation_schemas_do_not_repeat_static_continuation_semantics() {
         .iter()
         .find(|variant| variant["properties"].get("suggested_call").is_some())
         .expect("observe_jobs full batch output");
+    // Both the full batch and model-facing sparse batch have closed wait
+    // objects, so newly emitted wait context must be described by both.
+    let wait_variants = variants
+        .iter()
+        .filter(|variant| variant["properties"].get("wait").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(wait_variants.len(), 2);
+    for variant in wait_variants {
+        let wait_properties = &variant["properties"]["wait"]["properties"];
+        for field in ["update_kind"] {
+            assert!(
+                wait_properties.get(field).is_some(),
+                "observe_jobs wait schema must advertise {field} in every projection"
+            );
+        }
+    }
     let item_output = &full["properties"]["items"]["items"]["properties"]["output"]["anyOf"][0];
     assert!(
         item_output["properties"]
@@ -715,6 +830,46 @@ fn job_terminal_continuation_output_schemas_are_sparse_and_private_app_payload_i
     assert_eq!(automatic_message["maxLength"], 1024);
     let serialized = serde_json::to_string(&prepare).unwrap();
     assert!(!serialized.contains("binding_id"));
+}
+
+#[test]
+fn agent_task_coding_state_schemas_share_run_vocabulary_but_remain_nullable() {
+    let run = output_schema_for_tool("observe_coding_agent");
+    let run_fields = &run["properties"]["output"]["properties"];
+    for tool in [
+        "start_agent_task_coding_run",
+        "reconcile_agent_task_coding_run",
+    ] {
+        let schema = output_schema_for_tool(tool);
+        let fields = &schema["properties"]["output"]["properties"];
+        for (field, run_field) in [
+            ("run_state", "state"),
+            ("execution_state", "execution_state"),
+        ] {
+            let expected = json!({"anyOf": [run_fields[run_field], {"type": "null"}]});
+            assert_eq!(fields[field], expected, "{tool}.{field}");
+            crate::test_support::validate_schema_instance(&Value::Null, &fields[field]).unwrap();
+            for wire in run_fields[run_field]["enum"].as_array().unwrap() {
+                crate::test_support::validate_schema_instance(wire, &fields[field]).unwrap();
+            }
+            for invalid in [json!("unknown"), json!(0), json!({})] {
+                assert!(
+                    crate::test_support::validate_schema_instance(&invalid, &fields[field])
+                        .is_err(),
+                    "{tool}.{field} accepted {invalid}"
+                );
+            }
+        }
+        // Task binding has a non-null terminal object with nullable evidence;
+        // the direct CodingAgent API instead makes the whole object nullable.
+        let terminal = &fields["terminal"];
+        assert_eq!(terminal["type"], "object");
+        assert_eq!(terminal["additionalProperties"], false);
+        assert_eq!(
+            terminal["properties"]["completed_at"]["anyOf"],
+            json!([{"type": "integer"}, {"type": "null"}])
+        );
+    }
 }
 
 #[test]
@@ -1162,6 +1317,10 @@ fn observe_jobs_failure_item_schema_closes_recovery_metadata() {
         "error": null
     });
     validate(&result).unwrap();
+
+    let mut invalid_update_kind = result.clone();
+    invalid_update_kind["output"]["wait"]["update_kind"] = json!("not_an_update_kind");
+    assert!(validate(&invalid_update_kind).is_err());
 
     let mut duplicate_kind = result.clone();
     duplicate_kind["output"]["items"][0]["recovery_kind"] = json!("reobserve");
@@ -2613,6 +2772,8 @@ fn skill_load_declares_exact_loading_and_ambiguity_output_contract() {
         "catalog_revision",
         "descriptor",
         "skill_id",
+        "skill_path",
+        "project_path",
         "name",
         "text",
         "definition_revision",
@@ -2625,6 +2786,12 @@ fn skill_load_declares_exact_loading_and_ambiguity_output_contract() {
     ] {
         assert!(fields.contains(field), "load_skill missing {field}");
     }
+    assert!(!fields.contains("path"));
+    let skill_specs = crate::registry::skill_runtime_tool_specs();
+    let read_fields = output_schema_field_names(spec_named(&skill_specs, "read_skill_file"));
+    assert!(read_fields.contains("skill_path"));
+    assert!(read_fields.contains("project_path"));
+    assert!(!read_fields.contains("path"));
     assert_ne!(fields, default_output_schema_field_names());
 }
 
@@ -3521,6 +3688,7 @@ fn project_validate_schema_admits_canonical_planning_and_replan_failures() {
         "validation_scope_unavailable",
         "validation_action_unsupported",
         "dependency_policy_unsupported",
+        "dependency_resolution_policy_unsupported",
         "test_filter_unsupported",
         "validation_check_unavailable",
     ] {
@@ -3715,6 +3883,115 @@ fn browser_observation_schema_accepts_canonical_runner_output_and_rejects_privat
     let mut leaked_endpoint = effect;
     leaked_endpoint["debug_endpoint"] = json!("ws://127.0.0.1/devtools");
     assert!(act_ok(leaked_endpoint).is_err());
+}
+
+#[test]
+fn observe_browser_surface_geometry_is_not_capped_by_screenshot_dimensions() {
+    let observe = crate::output_schema_for_tool("observe_browser");
+    let admit = |output: Value| {
+        test_support::validate_schema_instance(
+            &json!({"success": true, "output": output, "error": null}),
+            &observe,
+        )
+    };
+    let screenshot = |width: u64, height: u64| {
+        json!({
+            "execution_state": "completed",
+            "state_changed": false,
+            "browser_id": "browser_abcdefghijklmnop",
+            "page_id": "page_abcdefghijklmnop",
+            "content_base64": "iVBORw0KGgo=",
+            "mime_type": "image/png",
+            "width": width,
+            "height": height,
+            "file_bytes": 8,
+            "sha256": "a".repeat(64)
+        })
+    };
+
+    admit(screenshot(4096, 1440)).expect("screenshot at the encoded-image bound must stay valid");
+    let oversized_screenshot = admit(screenshot(4097, 1440));
+    assert!(
+        oversized_screenshot.as_ref().is_err_and(|error| {
+            error.contains("$.output.width") && error.contains("above maximum")
+        }),
+        "screenshot width 4097 must stay outside the encoded-image contract, got {oversized_screenshot:?}"
+    );
+    let zero_screenshot = admit(screenshot(0, 1440));
+    assert!(
+        zero_screenshot
+            .as_ref()
+            .is_err_and(|error| error.contains("$.output.width") && error.contains("below minimum")),
+        "screenshot width 0 must stay outside the encoded-image contract, got {zero_screenshot:?}"
+    );
+
+    let surface = json!({
+        "execution_state": "completed",
+        "state_changed": false,
+        "surface_id": "surface_abcdefghijklmnop",
+        "application": "Browser",
+        "title": "Wide window",
+        "width": 5120,
+        "height": 1440,
+        "focused": null,
+        "active": true
+    });
+    admit(surface.clone())
+        .expect("observe_browser surface width is native window geometry and must accept 5120");
+    let mut tall_surface = surface.clone();
+    tall_surface["width"] = json!(1440);
+    tall_surface["height"] = json!(4320);
+    admit(tall_surface).expect("surface height above 4096 is window geometry, not a screenshot");
+    let mut surface_floor = surface.clone();
+    surface_floor["width"] = json!(0);
+    let zero_surface = admit(surface_floor);
+    assert!(
+        zero_surface
+            .as_ref()
+            .is_err_and(|error| error.contains("$.output.width") && error.contains("below minimum")),
+        "surface width 0 is not emitted and stays below the published floor, got {zero_surface:?}"
+    );
+    let mut leaked = surface.clone();
+    leaked["process_id"] = json!(4242);
+    assert!(
+        admit(leaked).is_err(),
+        "surface observation must stay closed"
+    );
+
+    // Mirrors adapt_native_image_output_schema_for_mcp: it renames content_base64
+    // and does not rewrite allOf. The screenshot cap has to follow mime_type.
+    let mut mcp_schema = observe;
+    {
+        let properties = mcp_schema
+            .pointer_mut("/properties/output/properties")
+            .and_then(Value::as_object_mut)
+            .expect("observe_browser output properties");
+        properties.remove("content_base64");
+        properties.insert(
+            "content_delivery".to_string(),
+            json!({"type": "string", "const": "mcp_image"}),
+        );
+    }
+    let admit_mcp = |output: Value| {
+        test_support::validate_schema_instance(
+            &json!({"success": true, "output": output, "error": null}),
+            &mcp_schema,
+        )
+    };
+    admit_mcp(surface).expect("MCP surface geometry must keep the uncapped window size");
+    let mut mcp_screenshot = screenshot(4097, 1440);
+    mcp_screenshot
+        .as_object_mut()
+        .expect("screenshot object")
+        .remove("content_base64");
+    mcp_screenshot["content_delivery"] = json!("mcp_image");
+    let oversized_mcp = admit_mcp(mcp_screenshot);
+    assert!(
+        oversized_mcp.as_ref().is_err_and(|error| {
+            error.contains("$.output.width") && error.contains("above maximum")
+        }),
+        "MCP screenshot width 4097 must stay capped after the image-field rename, got {oversized_mcp:?}"
+    );
 }
 
 #[test]

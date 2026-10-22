@@ -552,12 +552,36 @@ runner_capabilities! {
         #[serde(default)]
         pub project_validation_v1: bool = false;
     }
+    /// Runner-owned Cargo Clippy lint, including scope and locked policy.
+    ProjectValidationRustClippy => RUNNER_CAPABILITY_PROJECT_VALIDATION_RUST_CLIPPY("project_validation_rust_clippy_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_validation_rust_clippy_v1: bool = false;
+    }
     /// Runner-owned project build planning plus typed StartBuild admission.
     /// Missing on older Runners is false and must fail closed.
     ProjectBuild => RUNNER_CAPABILITY_PROJECT_BUILD("project_build_v1"),
     v2_baseline = false {
         #[serde(default, skip_serializing_if = "is_false")]
         pub project_build_v1: bool = false;
+    }
+    /// Manifest-declared Node build with bounded canonical manager argv.
+    ProjectBuildNode => RUNNER_CAPABILITY_PROJECT_BUILD_NODE("project_build_node_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_build_node_v1: bool = false;
+    }
+    /// Owned per-Job Vitest/Jest JSON reports and durable test counts.
+    ProjectValidationNodeJson => RUNNER_CAPABILITY_PROJECT_VALIDATION_NODE_JSON("project_validation_node_json_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_validation_node_json_v1: bool = false;
+    }
+    /// Python packaging through an existing interpreter and installed build frontend.
+    ProjectBuildPython => RUNNER_CAPABILITY_PROJECT_BUILD_PYTHON("project_build_python_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_build_python_v1: bool = false;
     }
     /// Complete bounded project formatting lifecycle. Planning support alone
     /// must never advertise this capability; older Runners default to false.
@@ -566,12 +590,26 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub project_format_v1: bool = false;
     }
+    /// Additive Go stdin/stdout formatting profile. Older formatting Runners
+    /// cannot decode this request/profile and must not receive it.
+    ProjectFormatGo => RUNNER_CAPABILITY_PROJECT_FORMAT_GO("project_format_go_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_format_go_v1: bool = false;
+    }
     /// Additive portable dependency policy for project build/validation gateways.
     /// Missing on older Runners is false; policy-bearing plans must fail closed.
     ProjectDependencyPolicy => RUNNER_CAPABILITY_PROJECT_DEPENDENCY_POLICY("project_dependency_policy_v1"),
     v2_baseline = false {
         #[serde(default, skip_serializing_if = "is_false")]
         pub project_dependency_policy_v1: bool = false;
+    }
+    /// Explicit Cargo offline dependency resolution for project validation.
+    /// Older Runner versions reject requests requiring this additive contract.
+    ProjectDependencyResolutionOffline => RUNNER_CAPABILITY_PROJECT_DEPENDENCY_RESOLUTION_OFFLINE("project_dependency_resolution_offline_v1"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_dependency_resolution_offline_v1: bool = false;
     }
     /// Go project lifecycle gateways execute in Runner-owned single-module mode.
     /// The Runner forces GO111MODULE=on and GOWORK=off after shell/profile environment
@@ -900,6 +938,12 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub browser_surface_handoff: bool = false;
     }
+    BrowserUserHandoff => RUNNER_CAPABILITY_BROWSER_USER_HANDOFF("browser_user_handoff"),
+    v2_baseline = false {
+        /// Exact managed visible Browser human handoff with automatic input fencing.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub browser_user_handoff: bool = false;
+    }
     ComputerObserve => RUNNER_CAPABILITY_COMPUTER_OBSERVE("computer_observe"),
     v2_baseline = false {
         /// Native read-only desktop/window observation. Missing on older Runners
@@ -1057,6 +1101,15 @@ runner_capabilities! {
         /// Runner-owned and is observed through the exact `plugin_tool` gateway.
         #[serde(default, skip_serializing_if = "is_false")]
         pub native_tool_plugins: bool = false;
+    }
+    /// Additive capability for resource_link in closed MCP gateway ToolResult
+    /// responses. Provider inventory alone cannot imply that an old Server
+    /// can decode this newly added wire enum variant.
+    McpGatewayResourceLinks => RUNNER_CAPABILITY_MCP_GATEWAY_RESOURCE_LINKS("mcp_gateway_resource_links"),
+    v2_baseline = false {
+        /// Missing on older Runners is false: do not send them the opt-in field.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub mcp_gateway_resource_links: bool = false;
     }
     /// Runner-local durable managed SSH resource registry. Missing on older Runners
     /// is false and is never inferred from one-shot or persistent SSH execution.
@@ -2327,7 +2380,7 @@ pub struct RunnerResultRequest {
 /// This is transport metadata, not a general execution framework: the Runner
 /// sets it from its actual process-spawn/collection path, while non-command
 /// request results omit it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellCommandExecutionState {
     NotStarted,
@@ -2855,8 +2908,13 @@ mod envelope_tests {
                 structured_go_test_json: true,
                 project_validation_v1: false,
                 project_build_v1: false,
+                project_build_node_v1: false,
+                project_validation_node_json_v1: false,
+                project_build_python_v1: false,
                 project_format_v1: false,
+                project_format_go_v1: false,
                 project_dependency_policy_v1: false,
+                project_dependency_resolution_offline_v1: false,
                 project_go_single_module_v1: false,
                 project_validation_package_scope_v1: false,
                 project_all_packages_v1: false,
@@ -2865,6 +2923,7 @@ mod envelope_tests {
                 project_validation_python_ruff_v1: false,
                 project_validation_node_script_check_v1: false,
                 project_validation_node_tap_v1: false,
+                project_validation_rust_clippy_v1: false,
                 structured_go_test_tool: true,
                 structured_go_test_packages: true,
                 structured_process_argv: true,
@@ -2894,6 +2953,7 @@ mod envelope_tests {
                 browser_extension_bridge: false,
                 browser_managed_profile: false,
                 browser_surface_handoff: false,
+                browser_user_handoff: false,
                 computer_observe: false,
                 computer_application_discovery: false,
                 computer_application_launch: false,
@@ -2912,6 +2972,7 @@ mod envelope_tests {
                 job_state_reconciliation: false,
                 coding_agent_runs: false,
                 native_tool_plugins: false,
+                mcp_gateway_resource_links: false,
                 managed_ssh_resources: false,
                 runner_config_control: false,
                 instruction_runtime: false,
@@ -3029,6 +3090,19 @@ mod envelope_tests {
         )
         .unwrap();
         assert!(present.artifact_export_streaming_metadata);
+    }
+
+    #[test]
+    fn mcp_resource_links_are_an_additive_wire_capability() {
+        let legacy: RunnerCapabilities = serde_json::from_str(r#"{"shell":true}"#).unwrap();
+        assert!(!legacy.mcp_gateway_resource_links);
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("mcp_gateway_resource_links")
+            .is_none());
+        let enabled: RunnerCapabilities =
+            serde_json::from_str(r#"{"mcp_gateway_resource_links":true}"#).unwrap();
+        assert!(enabled.supports(RunnerCapabilityId::McpGatewayResourceLinks));
     }
 
     #[test]
@@ -3306,6 +3380,7 @@ mod envelope_tests {
                 validation_progress: None,
                 test_count_evidence: None,
                 format_mutation: None,
+                build_artifacts: None,
                 activity: None,
             }],
         }
@@ -3992,6 +4067,7 @@ mod envelope_tests {
                 validation_progress: None,
                 test_count_evidence: None,
                 format_mutation: None,
+                build_artifacts: None,
                 activity: None,
                 finished: false,
             },
@@ -4321,6 +4397,7 @@ mod envelope_tests {
             validation_progress: None,
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             finished: false,
         };
@@ -4735,6 +4812,8 @@ mod filter_canonical_tests {
             vec!["check"],
             vec!["check", "--all-targets"],
             vec!["check", "--locked"],
+            vec!["check", "--offline"],
+            vec!["check", "--locked", "--offline"],
             vec!["check", "--locked", "-p", "my-crate"],
             vec!["check", "--all-features"],
             vec!["check", "--no-default-features"],
@@ -4774,6 +4853,7 @@ mod filter_canonical_tests {
             vec!["check", "-p", "same-crate", "-p", "same-crate"],
             vec!["check", "--manifest-path", "/tmp/Cargo.toml"],
             vec!["check", "--locked", "--locked"],
+            vec!["check", "--offline", "--offline"],
             vec!["check", "--locked=true"],
             vec!["check", "--", "--all-targets"],
         ];
@@ -4810,6 +4890,8 @@ mod filter_canonical_tests {
             vec!["test", "focused"],
             vec!["test", "--all-targets"],
             vec!["test", "--locked"],
+            vec!["test", "--offline"],
+            vec!["test", "--locked", "--offline"],
             vec!["test", "focused", "--locked"],
             vec!["test", "--lib"],
             vec!["test", "--lib", "--all-targets", "--no-run"],
@@ -4839,6 +4921,7 @@ mod filter_canonical_tests {
             vec!["test", "--features", "col\tumn"],
             vec!["test", "--manifest-path", "/tmp/Cargo.toml"],
             vec!["test", "--locked", "--locked"],
+            vec!["test", "--offline", "--offline"],
             vec!["test", "--locked=true"],
             vec!["test", "--", "--all-targets"],
         ];

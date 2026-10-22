@@ -73,24 +73,15 @@ async fn register_goal_activity_project(
     runtime
         .runner_registry
         .register(crate::runner_protocol::RunnerRegisterRequest {
-            computer_session_availability: None,
-            process_started_at: None,
-            build: None,
             job_concurrency_limit: Some(4),
-            job_inventory: None,
-            coding_agent_providers: None,
-            coding_agent_inventory: None,
-            client_id: client_id.to_string(),
-            runner_instance_id: instance_id.clone(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
             display_name: Some(format!("{owner} Goal activity runner")),
             owner: Some(owner.to_string()),
             hostname: Some(format!("{owner}-goal-activity-host")),
-            host_context: None,
-            capabilities: crate::test_support::current_runner_capabilities(
+            ..crate::test_support::runner_registration(
+                client_id,
+                &instance_id,
                 crate::runner_protocol::RunnerCapabilities::default(),
-            ),
-            policy: None,
+            )
         })
         .await
         .unwrap();
@@ -223,6 +214,7 @@ fn goal_tools_are_control_only_and_never_declare_execution_authority() {
         "present_goal_plan",
         "list_goals",
         "update_goal",
+        "revise_goal_plan",
         "associate_goal_agent_task",
         "associate_goal_workflow_session",
     ] {
@@ -257,7 +249,12 @@ fn goal_tools_are_control_only_and_never_declare_execution_authority() {
         );
     }
 
-    for name in ["create_goal", "update_goal", "associate_goal_agent_task"] {
+    for name in [
+        "create_goal",
+        "update_goal",
+        "revise_goal_plan",
+        "associate_goal_agent_task",
+    ] {
         let definition = lookup_tool_definition(name).unwrap();
         assert_eq!(definition.metadata.effect, ToolEffect::Mutate);
         assert_eq!(definition.metadata.risk, ToolRisk::WorkflowManage);
@@ -351,6 +348,53 @@ fn goal_schemas_are_bounded_private_and_existing_coding_tools_do_not_accept_goal
         .unwrap()
         .iter()
         .any(|field| field == "controller_agent_id"));
+
+    let revise = spec("revise_goal_plan");
+    assert_eq!(revise.input_schema["properties"]["steps"]["maxItems"], 32);
+    assert_eq!(
+        revise.input_schema["properties"]["reason"]["maxLength"],
+        2048
+    );
+    assert_eq!(
+        revise.input_schema["properties"]["expected_revision"]["minimum"],
+        1
+    );
+    assert_eq!(revise.input_schema["additionalProperties"], false);
+    for field in [
+        "goal_id",
+        "expected_revision",
+        "steps",
+        "reason",
+        "idempotency_key",
+    ] {
+        assert!(revise.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|required| required == field));
+    }
+    for forbidden in [
+        "completion_conditions",
+        "objective",
+        "current_step_id",
+        "controller_agent_id",
+        "session_id",
+        "project",
+        "window",
+        "endpoint_id",
+    ] {
+        assert!(revise.input_schema["properties"].get(forbidden).is_none());
+    }
+    let history = &revise.output_schema["properties"]["output"]["properties"]["goal"]["properties"]
+        ["plan_history"];
+    assert_eq!(history["properties"]["revisions"]["maxItems"], 8);
+    for field in ["total_count", "returned_count", "truncated", "revisions"] {
+        assert!(history["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|required| required == field));
+    }
 
     let prepare = spec("prepare_goal_workflow");
     assert_eq!(
@@ -814,11 +858,13 @@ async fn prepare_goal_workflow_reauthorizes_session_project_controller_and_stays
 
     let controller = runtime.create_agent_identity(
         Some(&owner),
-        "prepare-goal-controller".to_string(),
-        "Prepare Goal Controller".to_string(),
-        None,
-        Vec::new(),
-        "prepare-goal-controller-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "prepare-goal-controller".to_string(),
+            display_name: "Prepare Goal Controller".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "prepare-goal-controller-create".to_string(),
+        },
     );
     assert!(controller.success, "{:?}", controller.output);
     let controller_id = controller.output["agent"]["agent_id"]
@@ -919,11 +965,13 @@ async fn prepare_goal_workflow_reauthorizes_session_project_controller_and_stays
 
     let foreign_controller = runtime.create_agent_identity(
         Some(&foreign),
-        "prepare-foreign-controller".to_string(),
-        "Prepare Foreign Controller".to_string(),
-        None,
-        Vec::new(),
-        "prepare-foreign-controller-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "prepare-foreign-controller".to_string(),
+            display_name: "Prepare Foreign Controller".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "prepare-foreign-controller-create".to_string(),
+        },
     );
     assert!(
         foreign_controller.success,
@@ -1056,11 +1104,13 @@ fn goal_runtime_controller_is_explicit_authorized_and_readable() {
     let alice = auth_context(Some("alice-goal-controller"), false);
     let controller = runtime.create_agent_identity(
         Some(&bob),
-        "bob-goal-controller".to_string(),
-        "Bob Goal Controller".to_string(),
-        None,
-        Vec::new(),
-        "bob-goal-controller-agent".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "bob-goal-controller".to_string(),
+            display_name: "Bob Goal Controller".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "bob-goal-controller-agent".to_string(),
+        },
     );
     assert!(controller.success, "{:?}", controller.output);
     let controller_id = controller.output["agent"]["agent_id"]
@@ -1069,11 +1119,13 @@ fn goal_runtime_controller_is_explicit_authorized_and_readable() {
         .to_string();
     let replacement = runtime.create_agent_identity(
         Some(&bob),
-        "bob-goal-controller-2".to_string(),
-        "Bob Goal Controller 2".to_string(),
-        None,
-        Vec::new(),
-        "bob-goal-controller-agent-2".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "bob-goal-controller-2".to_string(),
+            display_name: "Bob Goal Controller 2".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "bob-goal-controller-agent-2".to_string(),
+        },
     );
     assert!(replacement.success, "{:?}", replacement.output);
     let replacement_id = replacement.output["agent"]["agent_id"]
@@ -1082,11 +1134,13 @@ fn goal_runtime_controller_is_explicit_authorized_and_readable() {
         .to_string();
     let foreign = runtime.create_agent_identity(
         Some(&alice),
-        "alice-goal-controller".to_string(),
-        "Alice Goal Controller".to_string(),
-        None,
-        Vec::new(),
-        "alice-goal-controller-agent".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "alice-goal-controller".to_string(),
+            display_name: "Alice Goal Controller".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "alice-goal-controller-agent".to_string(),
+        },
     );
     assert!(foreign.success, "{:?}", foreign.output);
     let foreign_id = foreign.output["agent"]["agent_id"]
@@ -1128,6 +1182,7 @@ fn goal_runtime_controller_is_explicit_authorized_and_readable() {
         1,
         None,
         None,
+        None,
         Some(replacement_id.clone()),
         None,
         None,
@@ -1148,11 +1203,13 @@ async fn goal_plan_projection_is_exact_pure_revisioned_terminal_and_existence_hi
     let alice = auth_context(Some("alice-plan"), false);
     let controller = runtime.create_agent_identity(
         Some(&bob),
-        "bob-plan-controller".to_string(),
-        "Bob Plan Controller".to_string(),
-        None,
-        Vec::new(),
-        "bob-plan-controller-agent".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "bob-plan-controller".to_string(),
+            display_name: "Bob Plan Controller".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "bob-plan-controller-agent".to_string(),
+        },
     );
     assert!(controller.success, "{:?}", controller.output);
     let controller_id = controller.output["agent"]["agent_id"]
@@ -1671,11 +1728,13 @@ fn goal_agent_task_link_reauthorizes_task_and_task_completion_never_completes_go
 
     let bob_agent = runtime.create_agent_identity(
         Some(&bob),
-        "bob-goal-worker".to_string(),
-        "Bob Goal Worker".to_string(),
-        None,
-        Vec::new(),
-        "bob-goal-worker-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "bob-goal-worker".to_string(),
+            display_name: "Bob Goal Worker".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "bob-goal-worker-create".to_string(),
+        },
     );
     assert!(bob_agent.success);
     let bob_agent_id = bob_agent.output["agent"]["agent_id"]
@@ -1721,11 +1780,13 @@ fn goal_agent_task_link_reauthorizes_task_and_task_completion_never_completes_go
 
     let alice_agent = runtime.create_agent_identity(
         Some(&alice),
-        "alice-goal-worker".to_string(),
-        "Alice Goal Worker".to_string(),
-        None,
-        Vec::new(),
-        "alice-goal-worker-create".to_string(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "alice-goal-worker".to_string(),
+            display_name: "Alice Goal Worker".to_string(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "alice-goal-worker-create".to_string(),
+        },
     );
     assert!(alice_agent.success);
     let alice_agent_id = alice_agent.output["agent"]["agent_id"]
@@ -1809,10 +1870,12 @@ fn goal_agent_task_link_reauthorizes_task_and_task_completion_never_completes_go
 
     let endpoint = runtime.attach_agent_endpoint(
         Some(&bob),
-        bob_agent_id.clone(),
-        "ChatGPT".to_string(),
-        Some("goal-attention-runtime".to_string()),
-        "goal-attention-runtime-endpoint".to_string(),
+        webcodex_tool_contracts::RotateAgentContinuationEndpointInput {
+            agent_id: bob_agent_id.clone(),
+            host: "ChatGPT".to_string(),
+            client_attachment_id: Some("goal-attention-runtime".to_string()),
+            idempotency_key: "goal-attention-runtime-endpoint".to_string(),
+        },
     );
     assert!(endpoint.success, "{:?}", endpoint.output);
     let endpoint_id = endpoint.output["endpoint"]["endpoint_id"]
@@ -1975,4 +2038,41 @@ async fn workflow_session_link_is_identity_only_and_finish_coding_task_does_not_
     assert_eq!(goal.output["goal"]["summary"]["lifecycle"], "active");
     assert_eq!(goal.output["goal"]["summary"]["revision"], 2);
     assert!(goal.output["goal"]["summary"]["terminal_at_unix_ms"].is_null());
+}
+
+#[tokio::test]
+async fn update_goal_completion_conditions_dispatch_preserves_owner_and_revision() {
+    let (_temp, _db, runtime) = runtime_with_goal_db();
+    let owner = goal_activity_auth("conditions-owner");
+    let foreign = goal_activity_auth("conditions-other");
+    let id = create_goal(&runtime, Some(&owner), "conditions-dispatch-create");
+    let args = json!({"goal_id":id,"expected_revision":1,"completion_conditions":["  Explicit acceptance  "],"idempotency_key":"conditions-dispatch-edit"});
+    let edited = runtime
+        .dispatch_with_auth(
+            ToolCall::from_tool_name("update_goal", args.clone()).unwrap(),
+            Some(&owner),
+        )
+        .await;
+    assert!(edited.success, "{:?}", edited.output);
+    assert_eq!(
+        edited.output["goal"]["plan"]["completion_conditions"],
+        json!(["Explicit acceptance"])
+    );
+    assert_eq!(edited.output["goal"]["summary"]["revision"], 2);
+    let replay = runtime
+        .dispatch_with_auth(
+            ToolCall::from_tool_name("update_goal", args.clone()).unwrap(),
+            Some(&owner),
+        )
+        .await;
+    assert!(replay.success, "{:?}", replay.output);
+    assert_eq!(replay.output["replayed"], true);
+    let rejected = runtime
+        .dispatch_with_auth(
+            ToolCall::from_tool_name("update_goal", args).unwrap(),
+            Some(&foreign),
+        )
+        .await;
+    assert!(!rejected.success);
+    assert_eq!(rejected.output["error_kind"], "goal_not_found");
 }

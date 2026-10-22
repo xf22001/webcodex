@@ -1,8 +1,9 @@
+import { MantineProvider } from "@mantine/core";
 import { act, fireEvent, render as testingRender, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { expect, it, vi } from "vitest";
 import type { RuntimeV2Client } from "../src/runtime-v2/api/client.js";
-import { absoluteTime } from "../src/runtime-v2/model/format.js";
+import { absoluteTime, shortId } from "../src/runtime-v2/model/format.js";
 import type { ProjectRow } from "../src/runtime-v2/model/types.js";
 import { ProjectsView } from "../src/runtime-v2/views/ProjectsView.js";
 import { WindowWorkbench } from "../src/runtime-v2/components/WindowWorkbench.js";
@@ -10,7 +11,7 @@ import { WorkView } from "../src/runtime-v2/views/WorkView.js";
 import { UiProvider } from "../src/ui/UiProvider.js";
 import { runtimeOverview, windowDetail } from "./fixtures.js";
 
-const render = (ui: ReactElement) => testingRender(<UiProvider>{ui}</UiProvider>);
+const render = (ui: ReactElement) => testingRender(<UiProvider><MantineProvider env="test">{ui}</MantineProvider></UiProvider>);
 
 function ok(data: unknown) {
   return { ok: true, status: 200, data };
@@ -140,7 +141,10 @@ it("shows active Window work without any Workflow Session and keeps observe call
   expect(activeRow.textContent).toContain("webcodex-activity-fix");
   expect(activeRow.textContent).toContain("1 active");
   expect(activeRow.textContent).toContain("special");
-  expect(activeRow.textContent).toContain("/root/.webcodex-managed-worktrees/webcodex-activity-fix");
+  expect(activeRow.textContent).not.toContain("/root/.webcodex-managed-worktrees/webcodex-activity-fix");
+  expect(activeRow.querySelector(".window-work-row-context")?.getAttribute("title")).toContain("/root/.webcodex-managed-worktrees/webcodex-activity-fix");
+  expect(activeRow.querySelector(".window-work-row-context")?.getAttribute("title")).toContain(activeKey);
+  expect(activeRow.querySelectorAll(".window-work-row-main > small")).toHaveLength(2);
   expect(activeRow.textContent).not.toContain(activeKey.slice(0, 8));
   expect(within(activeRow).getByText("webcodex-activity-fix")).toBeTruthy();
   const projectPicker = screen.getByRole("button", { name: "Projects: All projects" });
@@ -151,16 +155,26 @@ it("shows active Window work without any Workflow Session and keeps observe call
   fireEvent.click(projectPicker);
   expect(await screen.findByRole("heading", { name: "webcodex-activity-fix" })).toBeTruthy();
   const header = screen.getByRole("heading", { name: "webcodex-activity-fix" }).closest("header");
+  const details = header!.querySelector("details")!;
+  expect(details.querySelector("summary")?.textContent).toBe("Window details");
+  expect(details.open).toBe(false);
+  fireEvent.click(details.querySelector("summary")!);
   expect(header?.textContent).toContain("WebCodex");
   expect(header?.textContent).toContain("apply_text_edits");
-  expect(header?.textContent).toContain("Machine");
+  expect(header?.textContent).toContain("Runner ID");
   expect(header?.textContent).toContain("special");
   expect(header?.textContent).toContain("Directory");
   expect(header?.textContent).toContain("/root/.webcodex-managed-worktrees/webcodex-activity-fix");
-  expect(header?.textContent).toContain("Project address");
+  expect(header?.textContent).toContain("Project ID");
   expect(header?.textContent).toContain(worktree.id);
   expect(header?.textContent).toContain(activeKey);
-  for (const label of ["Window", "Machine", "Directory", "Project address"]) {
+  for (const [label, value] of [["Window ID", activeKey], ["Runner ID", "special"], ["Directory", worktree.path], ["Project ID", worktree.id]]) {
+    const term = within(header!).getByText(label, { selector: "dt" });
+    expect(term.nextElementSibling?.tagName).toBe("DD");
+    expect(term.nextElementSibling?.querySelector("code")?.textContent).toBe(value);
+  }
+
+  for (const label of ["Window ID", "Runner ID", "Directory", "Project ID"]) {
     expect(within(header!).getByRole("button", { name: "Copy " + label })).toBeTruthy();
   }
 
@@ -323,8 +337,8 @@ it("uses exact Session tags to focus contiguous Window call segments", async () 
   expect(screen.queryByRole("tab", { name: /Work Sessions/ })).toBeNull();
   expect(screen.getByRole("tab", { name: "Collaboration" })).toBeTruthy();
 
-  const selector = await screen.findByRole("combobox", { name: "Session filter" }) as HTMLSelectElement;
-  expect(selector.value).toBe("");
+  const selector = await screen.findByRole("combobox", { name: "Session filter" }) as HTMLInputElement;
+  expect(selector.value).toBe("All calls");
   expect(screen.getAllByTestId("window-workflow-step")).toHaveLength(5);
 
   const tags = await screen.findAllByTestId("window-session-tag");
@@ -334,22 +348,24 @@ it("uses exact Session tags to focus contiguous Window call segments", async () 
   expect(tags[2].getAttribute("data-session-tone")).toBe("0");
 
   fireEvent.click(tags[1]);
-  expect(selector.value).toBe(sessionB);
+  expect(selector.value).toBe(`Work Session 2 · ${shortId(sessionB, 14, 6)}`);
   let focusedCalls = screen.getAllByTestId("window-workflow-step");
   expect(focusedCalls).toHaveLength(2);
   expect(focusedCalls.map((call) => call.querySelector("header strong")?.textContent)).toEqual(["get_runtime_status", "apply_text_edits"]);
 
-  fireEvent.change(selector, { target: { value: "" } });
+  fireEvent.click(selector);
+  fireEvent.click(await screen.findByRole("option", { name: "All calls" }));
   expect(screen.getAllByTestId("window-workflow-step")).toHaveLength(5);
 
   const allCalls = screen.getAllByTestId("window-workflow-step");
   fireEvent.click(allCalls[0]);
-  expect(selector.value).toBe(sessionA);
+  expect(selector.value).toBe(`Implement Window tabs · ${shortId(sessionA, 14, 6)}`);
   focusedCalls = screen.getAllByTestId("window-workflow-step");
   expect(focusedCalls).toHaveLength(3);
   expect(focusedCalls.map((call) => call.querySelector("header strong")?.textContent)).toEqual(["read_files", "run_shell", "read_files"]);
 
-  fireEvent.change(selector, { target: { value: sessionB } });
+  fireEvent.click(selector);
+  fireEvent.click(await screen.findByRole("option", { name: /Work Session 2/ }));
   focusedCalls = screen.getAllByTestId("window-workflow-step");
   expect(focusedCalls).toHaveLength(2);
   expect((client.post as unknown as ReturnType<typeof vi.fn>).mock.calls.some(([path]) =>
@@ -526,7 +542,7 @@ it("renders Window identity from inventory before recent activity and hydrates f
   const header = screen.getByRole("heading", { name: "webcodex-activity-fix" }).closest("header");
   expect(header?.textContent).toContain("special");
   expect(header?.textContent).toContain("/root/.webcodex-managed-worktrees/webcodex-activity-fix");
-  expect(header?.textContent).toContain("First active");
+  expect(header?.textContent).toContain("First observed");
   expect(screen.getByText("Loading recent activity…")).toBeTruthy();
   await waitFor(() => expect(windowPayloads).toHaveLength(1));
   expect(windowPayloads[0]).toMatchObject({
@@ -646,7 +662,7 @@ it("keeps collaboration history and draft on the same Window across Runner chang
     }] });
     throw new Error("unexpected path " + path);
   });
-  render(<WindowWorkbench client={client} projects={[source, next]} language="en" surface="windows" onSurfaceChange={vi.fn()} onUnauthorized={vi.fn()} />);
+  render(<WindowWorkbench client={client} projects={[source, next]} language="en" onUnauthorized={vi.fn()} />);
   await screen.findByRole("heading", { name: "WebCodex" });
   // Inventory can render the heading before the initial Window selection settles.
   // Wait for its activity to render before activating the collaboration pane.

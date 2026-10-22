@@ -5,12 +5,7 @@ fn search_project_text_command_excludes_sensitive_dirs_and_bounds_output() {
         pattern: "fn main".to_string(),
         path: Some("src".to_string()),
         limit: Some(25),
-        context_before: None,
-        context_after: None,
-        include_globs: None,
-        exclude_globs: None,
-        result_mode: None,
-        timeout_secs: None,
+        ..Default::default()
     })
     .unwrap();
     let cmd = search_project_text_command(&options);
@@ -767,14 +762,7 @@ fn parse_search_project_text_output_accepts_leading_canonical_marker_and_reports
 fn raw_search_request() -> SearchRequest {
     SearchRequest {
         pattern: "needle".to_string(),
-        path: None,
-        limit: None,
-        context_before: None,
-        context_after: None,
-        include_globs: None,
-        exclude_globs: None,
-        result_mode: None,
-        timeout_secs: None,
+        ..Default::default()
     }
 }
 
@@ -2009,19 +1997,15 @@ async fn search_agent_command_timeout_returns_search_timeout() {
     runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: "search-cmd-timeout".to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id: req.request_id,
             exit_code: Some(-1),
             stdout: Some(
                 "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\n"
                     .to_string(),
             ),
             stderr: Some("command timed out after 1 seconds".to_string()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
+            ..runner_result_request("search-cmd-timeout".to_string(), "inst".to_string(), req.request_id)
         })
         .await
         .unwrap();
@@ -2061,19 +2045,15 @@ async fn search_agent_execution_failure_is_structured_and_does_not_leak_diagnost
     runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: "search-agent-failure".to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id: req.request_id,
             exit_code: Some(9),
             stdout: Some(
                 "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\n"
                     .to_string(),
             ),
             stderr: Some(private_diagnostic.to_string()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(5),
             error: Some(private_diagnostic.to_string()),
+            ..runner_result_request("search-agent-failure".to_string(), "inst".to_string(), req.request_id)
         })
         .await
         .unwrap();
@@ -2122,16 +2102,12 @@ async fn search_agent_timeout_without_trusted_marker_cannot_return_partial_succe
     runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: "search-timeout-no-marker".to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id: req.request_id,
             exit_code: Some(-1),
             stdout: Some("src/a.rs:1:needle\n".to_string()),
             stderr: Some("command timed out after 1 seconds".to_string()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
+            ..runner_result_request("search-timeout-no-marker".to_string(), "inst".to_string(), req.request_id)
         })
         .await
         .unwrap();
@@ -2180,9 +2156,6 @@ async fn search_agent_timeout_with_complete_records_returns_partial_success() {
     runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: "search-ptimeout".to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id: req.request_id,
             exit_code: Some(-1),
             stdout: Some(
                 "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\n\
@@ -2190,10 +2163,9 @@ async fn search_agent_timeout_with_complete_records_returns_partial_success() {
                     .to_string(),
             ),
             stderr: Some("command timed out after 1 seconds".to_string()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
+            ..runner_result_request("search-ptimeout".to_string(), "inst".to_string(), req.request_id)
         })
         .await
         .unwrap();
@@ -2261,16 +2233,11 @@ async fn search_agent_outer_timeout_returns_search_timeout_and_cancels() {
     let complete = runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: "search-outer-timeout".to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id,
             exit_code: Some(0),
             stdout: Some(String::new()),
             stderr: Some(String::new()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(1),
-            error: None,
+            ..runner_result_request("search-outer-timeout".to_string(), "inst".to_string(), request_id)
         })
         .await;
     assert!(

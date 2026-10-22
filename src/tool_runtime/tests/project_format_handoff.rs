@@ -130,22 +130,8 @@ fn call() -> ToolCall {
     }
 }
 
-async fn wait_for_runner_request(runtime: &ToolRuntime) -> crate::runner_protocol::RunnerRequest {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(request) = probe_patch_agent_request(runtime, CLIENT).await {
-            return request;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Runner request was not enqueued within 10 seconds"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
 async fn reply_plan(runtime: &ToolRuntime) -> (crate::runner_protocol::RunnerRequest, String) {
-    let request = wait_for_runner_request(runtime).await;
+    let request = wait_for_patch_agent_request(runtime, CLIENT).await;
     assert_eq!(request.kind, "plan_project_format");
     let semantic: ProjectFormatRequest =
         serde_json::from_str(request.content.as_deref().unwrap()).unwrap();
@@ -169,18 +155,13 @@ async fn reply_plan(runtime: &ToolRuntime) -> (crate::runner_protocol::RunnerReq
         .runner_registry
         .complete(RunnerResultPayload {
             result: RunnerResultRequest {
-                client_id: CLIENT.into(),
-                runner_instance_id: "inst".into(),
-                request_id: request.request_id,
                 exit_code: Some(0),
                 stdout: Some(
                     serde_json::to_string(&ProjectFormatPlanningResult::Ready { plan }).unwrap(),
                 ),
                 stderr: Some(String::new()),
-                stdout_truncated: false,
-                stderr_truncated: false,
                 duration_ms: Some(5),
-                error: None,
+                ..runner_result_request(CLIENT.into(), "inst".into(), request.request_id)
             },
             command_execution_state: Some(ShellCommandExecutionState::Completed),
             mcp_gateway: None,
@@ -189,7 +170,7 @@ async fn reply_plan(runtime: &ToolRuntime) -> (crate::runner_protocol::RunnerReq
         })
         .await
         .unwrap();
-    let start = wait_for_runner_request(runtime).await;
+    let start = wait_for_patch_agent_request(runtime, CLIENT).await;
     assert_eq!(start.kind, "start_format_job");
     let job_id = start.job_id.clone().expect("start_format_job job id");
     (start, job_id)
@@ -209,24 +190,19 @@ async fn finish_format_job(
     runtime
         .runner_registry
         .update_job(RunnerJobUpdateRequest {
-            client_id: CLIENT.into(),
-            runner_instance_id: "inst".into(),
-            update_seq: None,
-            job_id: job_id.into(),
             request_id: Some(request.request_id.clone()),
-            status: status.into(),
-            stdout_chunk: None,
-            stderr_chunk: None,
-            log_snapshot: None,
             exit_code,
             duration_ms: Some(25),
             error: error.map(str::to_string),
             command_execution_state: Some(state),
-            validation_progress: None,
-            test_count_evidence: None,
             format_mutation: mutation,
-            activity: None,
-            finished: true,
+            ..runner_job_update(
+                CLIENT.into(),
+                "inst".into(),
+                job_id.into(),
+                status.into(),
+                true,
+            )
         })
         .await
         .unwrap();
@@ -394,24 +370,14 @@ async fn project_format_active_running_and_stop_requested_observation_does_not_r
         runtime
             .runner_registry
             .update_job(RunnerJobUpdateRequest {
-                client_id: CLIENT.into(),
-                runner_instance_id: "inst".into(),
-                update_seq: None,
-                job_id: job_id.clone(),
                 request_id: Some(request.request_id.clone()),
-                status: status.into(),
-                stdout_chunk: None,
-                stderr_chunk: None,
-                log_snapshot: None,
-                exit_code: None,
-                duration_ms: None,
-                error: None,
-                command_execution_state: None,
-                validation_progress: None,
-                test_count_evidence: None,
-                format_mutation: None,
-                activity: None,
-                finished: false,
+                ..runner_job_update(
+                    CLIENT.into(),
+                    "inst".into(),
+                    job_id.clone(),
+                    status.into(),
+                    false,
+                )
             })
             .await
             .unwrap();
@@ -612,7 +578,7 @@ async fn project_format_runner_replaced_rejects_without_executing() {
         }
     });
 
-    let request = wait_for_runner_request(&runtime).await;
+    let request = wait_for_patch_agent_request(&runtime, CLIENT).await;
     assert_eq!(request.kind, "plan_project_format");
     let semantic: ProjectFormatRequest =
         serde_json::from_str(request.content.as_deref().unwrap()).unwrap();
@@ -649,18 +615,13 @@ async fn project_format_runner_replaced_rejects_without_executing() {
         .runner_registry
         .complete(RunnerResultPayload {
             result: RunnerResultRequest {
-                client_id: CLIENT.into(),
-                runner_instance_id: "inst".into(),
-                request_id: request.request_id,
                 exit_code: Some(0),
                 stdout: Some(
                     serde_json::to_string(&ProjectFormatPlanningResult::Ready { plan }).unwrap(),
                 ),
                 stderr: Some(String::new()),
-                stdout_truncated: false,
-                stderr_truncated: false,
                 duration_ms: Some(5),
-                error: None,
+                ..runner_result_request(CLIENT.into(), "inst".into(), request.request_id)
             },
             command_execution_state: Some(ShellCommandExecutionState::Completed),
             mcp_gateway: None,

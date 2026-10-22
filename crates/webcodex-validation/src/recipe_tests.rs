@@ -1248,3 +1248,188 @@ fn project_ruff_rejects_manifest_symlink_escape() {
     )
     .is_err());
 }
+
+#[test]
+fn node_build_reuses_manager_detection_and_fences_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    for (manager, lock) in [
+        ("npm", "package-lock.json"),
+        ("pnpm", "pnpm-lock.yaml"),
+        ("yarn", "yarn.lock"),
+        ("bun", "bun.lockb"),
+    ] {
+        write(
+            temp.path(),
+            "package.json",
+            &format!(r#"{{"packageManager":"{manager}@1","scripts":{{"build":"node build.js"}}}}"#),
+        );
+        let (selected, first) = super::resolve_node_project_build(temp.path(), None).unwrap();
+        assert_eq!(selected, manager);
+        write(temp.path(), lock, "lock");
+        let (_, second) = super::resolve_node_project_build(temp.path(), None).unwrap();
+        assert_ne!(first, second);
+        write(temp.path(), lock, "changed");
+        assert_ne!(
+            second,
+            super::resolve_node_project_build(temp.path(), None)
+                .unwrap()
+                .1
+        );
+        fs::remove_file(temp.path().join(lock)).unwrap();
+    }
+    write(temp.path(), "package-lock.json", "lock");
+    assert_eq!(
+        super::resolve_node_project_build(temp.path(), None)
+            .unwrap_err()
+            .code,
+        "package_manager_ambiguous"
+    );
+    fs::remove_file(temp.path().join("package-lock.json")).unwrap();
+    for manifest in [
+        r#"{"packageManager":"npm@1","scripts":{}}"#,
+        r#"{"packageManager":"npm@1","scripts":{"build":" "}}"#,
+    ] {
+        write(temp.path(), "package.json", manifest);
+        assert_eq!(
+            super::resolve_node_project_build(temp.path(), None)
+                .unwrap_err()
+                .code,
+            "build_script_unavailable"
+        );
+    }
+    write(temp.path(), "package.json", &" ".repeat(1024 * 1024 + 1));
+    assert!(super::resolve_node_project_build(temp.path(), None).is_err());
+}
+
+#[test]
+fn node_json_native_plans_are_closed_and_compound_scripts_keep_ordinary_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    for (script, framework) in [
+        ("vitest", "vitest"),
+        ("vitest run", "vitest"),
+        ("jest", "jest"),
+    ] {
+        write(
+            temp.path(),
+            "package.json",
+            &format!(r#"{{"scripts":{{"test":"{script}"}}}}"#),
+        );
+        let plan = super::resolve_node_native_project_test(temp.path(), None).unwrap();
+        assert_eq!(plan.steps[0].node_json_framework(), Some(framework));
+        assert!(plan.steps[0].is_canonical());
+        let before = plan.manifest_digest;
+        write(temp.path(), "package-lock.json", "one");
+        assert_ne!(
+            before,
+            super::resolve_node_native_project_test(temp.path(), None)
+                .unwrap()
+                .manifest_digest
+        );
+        fs::remove_file(temp.path().join("package-lock.json")).unwrap();
+    }
+    for script in [
+        "vitest run && node after.js",
+        "jest --watch",
+        "NODE_OPTIONS=x jest",
+        "npx vitest",
+        "node custom.js",
+    ] {
+        write(
+            temp.path(),
+            "package.json",
+            &format!(r#"{{"packageManager":"npm@1","scripts":{{"test":"{script}"}}}}"#),
+        );
+        assert_eq!(
+            super::resolve_node_native_project_test(temp.path(), None)
+                .unwrap_err()
+                .code,
+            "structured_test_report_unavailable"
+        );
+        let ordinary = resolve_validation_recipe(
+            temp.path(),
+            None,
+            Some(RecipeId::Node),
+            &[SemanticCheck::Test],
+            None,
+        )
+        .unwrap();
+        assert_eq!(ordinary.steps[0].program, "npm");
+        assert_eq!(ordinary.steps[0].args, ["run", "--silent", "test"]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn node_owned_inputs_reject_links_special_files_and_oversize_reads() {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "package.json",
+        r#"{"scripts":{"build":"node build.js"}}"#,
+    );
+    let path = temp.path().join("package-lock.json");
+    let target = temp.path().join("target");
+    fs::write(&target, "input").unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    assert!(super::resolve_node_project_build(temp.path(), None).is_err());
+    fs::remove_file(&path).unwrap();
+    let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // A FIFO must be rejected without waiting for a writer.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert!(super::resolve_node_project_build(temp.path(), None).is_err());
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, vec![b' '; 8 * 1024 * 1024 + 1]).unwrap();
+    assert!(super::resolve_node_project_build(temp.path(), None).is_err());
+    fs::write(&path, "input").unwrap();
+    assert!(super::resolve_node_project_build(temp.path(), None).is_ok());
+}
+
+#[test]
+fn explicit_node_lint_never_falls_back_to_check_or_typecheck() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "package.json",
+        r#"{"scripts":{"check":"node check.js","typecheck":"node types.js","lint":"node lint.js"}}"#,
+    );
+    let general = super::resolve_node_native_project_check(temp.path(), None).unwrap();
+    let lint = super::resolve_node_native_project_lint(temp.path(), None).unwrap();
+    assert_eq!(general.steps[0].args, ["--run", "check"]);
+    assert_eq!(lint.steps[0].args, ["--run", "lint"]);
+    assert_ne!(lint.invocation_digest, general.invocation_digest);
+    assert!(lint.steps[0].is_structured_node_check());
+    write(
+        temp.path(),
+        "package.json",
+        r#"{"scripts":{"check":"node check.js","typecheck":"node types.js"}}"#,
+    );
+    assert_eq!(
+        super::resolve_node_native_project_lint(temp.path(), None)
+            .unwrap_err()
+            .code,
+        "validation_check_unavailable"
+    );
+    write(
+        temp.path(),
+        "package.json",
+        r#"{"scripts":{"lint":null,"check":"node check.js"}}"#,
+    );
+    assert_eq!(
+        super::resolve_node_native_project_lint(temp.path(), None)
+            .unwrap_err()
+            .code,
+        "validation_manifest_invalid"
+    );
+    write(
+        temp.path(),
+        "package.json",
+        r#"{"scripts":{"lint":"   ","check":"node check.js"}}"#,
+    );
+    assert_eq!(
+        super::resolve_node_native_project_lint(temp.path(), None)
+            .unwrap_err()
+            .code,
+        "validation_manifest_invalid"
+    );
+}

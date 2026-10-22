@@ -220,6 +220,7 @@ impl ToolRuntime {
             call @ (ToolCall::PrepareGoalWorkflow { .. }
             | ToolCall::CreateGoal { .. }
             | ToolCall::CheckpointGoal { .. }
+            | ToolCall::ReviseGoalPlan { .. }
             | ToolCall::GetGoal { .. }
             | ToolCall::PresentGoalPlan { .. }
             | ToolCall::GoalPlanSync { .. }
@@ -247,10 +248,10 @@ impl ToolRuntime {
                 self.dispatch_agent_work_authorized(call, auth).await
             }
 
-            call @ (ToolCall::CreateAgentIdentity { .. }
-            | ToolCall::ListAgentIdentities { .. }
-            | ToolCall::UpdateAgentIdentity { .. }
-            | ToolCall::RotateAgentContinuationEndpoint { .. }
+            call @ (ToolCall::CreateAgentIdentity(_)
+            | ToolCall::ListAgentIdentities(_)
+            | ToolCall::UpdateAgentIdentity(_)
+            | ToolCall::RotateAgentContinuationEndpoint(_)
             | ToolCall::PresentAgentContinuation { .. }
             | ToolCall::AgentContinuationBind { .. }
             | ToolCall::AgentContinuationRecoverEndpoint { .. }
@@ -259,13 +260,13 @@ impl ToolRuntime {
             | ToolCall::AgentContinuationWakePrepare { .. }
             | ToolCall::AgentContinuationWakeFinish { .. }
             | ToolCall::AgentContinuationUnbind { .. }
-            | ToolCall::DetachAgentEndpoint { .. }
-            | ToolCall::CreateConversation { .. }
-            | ToolCall::ListConversations { .. }
-            | ToolCall::ReadConversation { .. }
-            | ToolCall::PostConversationMessage { .. }
-            | ToolCall::ListAgentInbox { .. }
-            | ToolCall::ConsumeAgentDeliveries { .. }
+            | ToolCall::DetachAgentEndpoint(_)
+            | ToolCall::CreateConversation(_)
+            | ToolCall::ListConversations(_)
+            | ToolCall::ReadConversation(_)
+            | ToolCall::PostConversationMessage(_)
+            | ToolCall::ListAgentInbox(_)
+            | ToolCall::ConsumeAgentDeliveries(_)
             | ToolCall::BootstrapAgentConversation { .. }
             | ToolCall::ConsumeAgentWake { .. }) => {
                 self.dispatch_agents_authorized(call, auth, window).await

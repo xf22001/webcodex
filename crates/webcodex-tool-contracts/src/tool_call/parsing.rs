@@ -1,3 +1,9 @@
+fn coding_project_source_error(tool_name: &str, reason: &str) -> String {
+    format!(
+        "invalid arguments for tool '{tool_name}': {reason}. This is an input-selection error, not evidence that a Runner is offline or a Workflow Session must already exist. For a registered Project use its canonical project id or issued project_ref, without client_id/path. If its selector is unknown, use authorized list_projects discovery first; the path form requires both client_id and an absolute path."
+    )
+}
+
 fn validate_coding_project_source_shape(tool_name: &str, arguments: &Value) -> Result<(), String> {
     let Some(arguments) = arguments.as_object() else {
         return Ok(());
@@ -11,14 +17,15 @@ fn validate_coding_project_source_shape(tool_name: &str, arguments: &Value) -> R
             .and_then(Value::as_str)
             .is_some_and(|value| value.trim().is_empty())
         {
-            return Err(format!(
-                "invalid arguments for tool '{tool_name}': {field} must not be empty"
+            return Err(coding_project_source_error(
+                tool_name,
+                &format!("{field} must not be empty"),
             ));
         }
     }
     if let Some(path) = arguments.get("path").and_then(Value::as_str) {
         if let Err(error) = validate_project_op_path(path) {
-            return Err(format!("invalid arguments for tool '{tool_name}': {error}"));
+            return Err(coding_project_source_error(tool_name, &error));
         }
     }
     if project {
@@ -32,9 +39,9 @@ fn validate_coding_project_source_shape(tool_name: &str, arguments: &Value) -> R
         return if conflicts.is_empty() {
             Ok(())
         } else {
-            Err(format!(
-                "invalid arguments for tool '{tool_name}': conflicting fields project and {}",
-                conflicts.join(", ")
+            Err(coding_project_source_error(
+                tool_name,
+                &format!("conflicting fields project and {}", conflicts.join(", ")),
             ))
         };
     }
@@ -42,14 +49,16 @@ fn validate_coding_project_source_shape(tool_name: &str, arguments: &Value) -> R
         return if client_id {
             Ok(())
         } else {
-            Err(format!(
-                "invalid arguments for tool '{tool_name}': missing client_id required with path"
+            Err(coding_project_source_error(
+                tool_name,
+                "missing client_id required with path",
             ))
         };
     }
     if client_id {
-        return Err(format!(
-            "invalid arguments for tool '{tool_name}': missing path required with client_id"
+        return Err(coding_project_source_error(
+            tool_name,
+            "missing path required with client_id",
         ));
     }
     // A Session is an exact continuation selector, not a worktree source or
@@ -69,9 +78,7 @@ fn validate_coding_project_source_shape(tool_name: &str, arguments: &Value) -> R
     {
         return Ok(());
     }
-    Err(format!(
-        "invalid arguments for tool '{tool_name}': missing project source; expected project or client_id + path, or session_id for exact checkout resume"
-    ))
+    Err(coding_project_source_error(tool_name, "missing project source; expected project or client_id + path, or session_id for exact checkout resume"))
 }
 
 fn validate_project_artifact_arguments(name: &str, arguments: &Value) -> Result<(), String> {
@@ -507,6 +514,7 @@ impl ToolCall {
             Self::PresentGoalPlan { .. } => "present_goal_plan",
             Self::GoalPlanSync { .. } => "sync_goal_plan",
             Self::CheckpointGoal { .. } => "checkpoint_goal",
+            Self::ReviseGoalPlan { .. } => "revise_goal_plan",
             Self::OpenWebcodexWorkbench { .. } => "open_webcodex_workbench",
             Self::SearchWebcodexResources { .. } => "search_webcodex_resources",
             Self::ReadWebcodexResource { .. } => "read_webcodex_resource",
@@ -530,10 +538,10 @@ impl ToolCall {
             Self::ReconcileAgentTaskCodingRun { .. } => "reconcile_agent_task_coding_run",
             Self::HeartbeatAgentTaskAttempt { .. } => "heartbeat_agent_task_attempt",
             Self::CompleteAgentTaskAttempt { .. } => "complete_agent_task_attempt",
-            Self::CreateAgentIdentity { .. } => "create_agent_identity",
-            Self::ListAgentIdentities { .. } => "list_agent_identities",
-            Self::UpdateAgentIdentity { .. } => "update_agent_identity",
-            Self::RotateAgentContinuationEndpoint { .. } => "rotate_agent_continuation_endpoint",
+            Self::CreateAgentIdentity(_) => "create_agent_identity",
+            Self::ListAgentIdentities(_) => "list_agent_identities",
+            Self::UpdateAgentIdentity(_) => "update_agent_identity",
+            Self::RotateAgentContinuationEndpoint(_) => "rotate_agent_continuation_endpoint",
 
             Self::PresentAgentContinuation { .. } => "present_agent_continuation",
             Self::AgentContinuationBind { .. } => "bind_agent_continuation",
@@ -543,13 +551,13 @@ impl ToolCall {
             Self::AgentContinuationWakePrepare { .. } => "prepare_agent_continuation_wake",
             Self::AgentContinuationWakeFinish { .. } => "finish_agent_continuation_wake",
             Self::AgentContinuationUnbind { .. } => "unbind_agent_continuation",
-            Self::DetachAgentEndpoint { .. } => "detach_agent_endpoint",
-            Self::CreateConversation { .. } => "create_conversation",
-            Self::ListConversations { .. } => "list_conversations",
-            Self::ReadConversation { .. } => "read_conversation",
-            Self::PostConversationMessage { .. } => "post_conversation_message",
-            Self::ListAgentInbox { .. } => "list_agent_inbox",
-            Self::ConsumeAgentDeliveries { .. } => "consume_agent_deliveries",
+            Self::DetachAgentEndpoint(_) => "detach_agent_endpoint",
+            Self::CreateConversation(_) => "create_conversation",
+            Self::ListConversations(_) => "list_conversations",
+            Self::ReadConversation(_) => "read_conversation",
+            Self::PostConversationMessage(_) => "post_conversation_message",
+            Self::ListAgentInbox(_) => "list_agent_inbox",
+            Self::ConsumeAgentDeliveries(_) => "consume_agent_deliveries",
             Self::BootstrapAgentConversation { .. } => "bootstrap_agent_conversation",
             Self::ConsumeAgentWake { .. } => "consume_agent_wake",
             Self::MemorySearch { .. } => "search_memory",

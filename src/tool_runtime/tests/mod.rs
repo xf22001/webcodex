@@ -10,6 +10,7 @@ mod apply_text_edits;
 mod artifact_transfer;
 mod assignment_fence;
 mod browser_navigation;
+mod browser_user_handoff;
 mod builtin_coding_workflow;
 #[cfg(feature = "workspace-checkpoints")]
 mod checkpoint;
@@ -23,6 +24,7 @@ mod coding_task;
 mod coding_task_semantic_navigation;
 mod collaboration;
 mod computer_budgets;
+mod computer_lifecycle;
 mod context_projection;
 mod continuation_feedback;
 mod control_sidecars;
@@ -89,6 +91,7 @@ mod validation_identity;
 mod validation_summary;
 mod work_on_project;
 mod work_result;
+mod workbench;
 mod write_project_file;
 
 mod external_observations;

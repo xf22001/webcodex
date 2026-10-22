@@ -3,6 +3,7 @@
 //! Both protocol adapters call `ToolRuntime::dispatch()`.
 //! No HTTP framework types here — pure Rust input/output.
 
+mod acceptance_evidence;
 pub mod activity;
 pub(crate) mod admin_dashboard;
 mod agent_task;
@@ -56,6 +57,7 @@ mod handoff;
 mod handoff_brief;
 mod handoff_tools;
 mod helpers;
+pub(crate) use helpers::{bounded_tail, COMMAND_STDIO_TAIL_CHARS};
 mod hygiene;
 mod hygiene_tools;
 mod instruction_projection;
@@ -145,6 +147,8 @@ pub(crate) use webcodex_tool_runtime_contracts::{tool_audit, tool_result};
 mod pdf_document;
 mod work_result;
 mod work_result_workspace;
+mod workbench_execution;
+mod workbench_state;
 pub(crate) use window_activity::{ActiveWindowRequest, MAX_ACTIVE_REQUESTS_PER_WINDOW};
 
 #[cfg(test)]
@@ -161,10 +165,13 @@ pub(crate) use files::{
 };
 #[cfg(test)]
 pub(crate) use permissions::{AuthorityMode, PermissionEvaluator};
+pub(crate) use projects::{ProjectInventoryPage, ProjectInventoryRow};
 #[cfg(test)]
 pub(crate) use runner_authorization::required_runner_capability;
 pub use runtime::ToolRuntime;
+pub(crate) use runtime_compatibility::build_alignment_name;
 pub use runtime_info::RuntimeInfo;
+pub(crate) use runtime_info::{ListRunnersOptions, RunnerInventoryPage, RunnerInventoryRow};
 #[cfg(test)]
 pub(crate) use session_context::workflow_session_authority_fingerprint;
 #[cfg(test)]

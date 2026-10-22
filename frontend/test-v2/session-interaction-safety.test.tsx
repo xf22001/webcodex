@@ -1,5 +1,8 @@
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { UiProvider } from "../src/ui/UiProvider.js";
+import { act, fireEvent, render as testingRender, renderHook, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { SessionCollaboration } from "../src/runtime-v2/components/SessionCollaboration.js";
 import { SessionComposer } from "../src/runtime-v2/components/SessionComposer.js";
 import { SessionInspector } from "../src/runtime-v2/components/SessionInspector.js";
 import { workItemFromRecent } from "../src/runtime-v2/model/work.js";
@@ -7,6 +10,8 @@ import type { RuntimeV2Client } from "../src/runtime-v2/api/client.js";
 import { useSessionWorkspace, type SessionLocation, type SessionWorkspaceState } from "../src/runtime-v2/state/useSessionWorkspace.js";
 import { loadDraft, saveDraft } from "../src/runtime_storage.js";
 import { recentSession, sessionDetail } from "./fixtures.js";
+
+const render = (ui: ReactElement) => testingRender(ui, { wrapper: UiProvider });
 
 const location: SessionLocation = { projectId: "project", sessionId: "session-a", runner: "runner", projectName: "Project" };
 const secondLocation = { ...location, sessionId: "session-b" };
@@ -29,6 +34,20 @@ function edit(message = "Original edit") {
 }
 
 describe("Session composer submission safety", () => {
+  it("changes the selected message kind immediately while retaining the draft", () => {
+    render(<SessionComposer location={location} session={workspace()} language="en" />);
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: "Retained kind-switch draft" } });
+    const note = screen.getByRole("button", { name: "Note", pressed: true });
+    const guidance = screen.getByRole("button", { name: "Guidance", pressed: false });
+    guidance.focus();
+    fireEvent.click(guidance);
+    expect(screen.getByRole("button", { name: "Guidance", pressed: true })).toBe(guidance);
+    expect(note.getAttribute("aria-pressed")).toBe("false");
+    expect(document.activeElement).toBe(guidance);
+    expect(textbox.value).toBe("Retained kind-switch draft");
+    expect(loadDraft(location.projectId, location.sessionId)).toBe("Retained kind-switch draft");
+  });
   it.each([false, true])("blocks repeated Enter and button submissions synchronously (editing=%s)", async (editing) => {
     const pending = deferred<boolean>();
     const mutation = vi.fn(() => pending.promise);
@@ -201,4 +220,15 @@ describe("Session inspector tabs", () => {
     fireEvent.click(context);
     expect(context.getAttribute("aria-selected")).toBe("true");
   });
+});
+
+
+it.each(["error", "stale"] as const)("explains Session message %s and retries through the existing refresh", (messagesAvailability) => {
+  const session = workspace({ messagesAvailability });
+  render(<SessionCollaboration location={location} session={session} language="en" />);
+  expect(screen.getByRole("status").textContent).toContain(messagesAvailability === "stale"
+    ? "Message refresh failed; previous messages retained." : "Session messages could not be loaded.");
+  expect(screen.queryByText("No retained Session messages.")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(session.refresh).toHaveBeenCalledTimes(1);
 });

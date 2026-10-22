@@ -1,3 +1,4 @@
+import { useFlowingSelection } from "../../ui/useFlowingSelection.js";
 import {
   ArrowUpRight,
   Bot,
@@ -10,7 +11,7 @@ import {
   Unlink,
 } from "lucide-react";
 import { MultiSelect } from "@mantine/core";
-import { FormEvent, useEffect, useState } from "react";
+import { useRef, FormEvent, useEffect, useState } from "react";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
 import { absoluteTime, shortId } from "../model/format.js";
@@ -32,6 +33,11 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
     ? [{ conversation_id: state.selectedConversationId, title: state.conversationDetail?.conversation?.title || t("Conversation") }, ...state.conversations]
     : state.conversations;
   const [section, setSection] = useState<"inbox" | "conversations" | "profile">("inbox");
+  const selectionRef = useRef<HTMLDivElement | null>(null);
+  useFlowingSelection(selectionRef, section, { variant: "underline" });
+  const inventoryPending = state.availability === "idle" || state.availability === "loading";
+  const inventoryUnavailable = inventoryPending || state.availability === "error";
+  const inventoryNotice = inventoryPending ? "Loading Agents…" : "Agents could not be loaded. Refresh to retry.";
   const agentOptions = state.agents.map((agent) => ({ value: agent.agent_id, label: `${agent.display_name} (@${agent.handle})` }));
   const [createHandle, setCreateHandle] = useState("");
   const [createName, setCreateName] = useState("");
@@ -148,7 +154,7 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
               </span>
             </button>
           ))}
-          {!state.agents.length && <div className="empty-inline">{t("No durable Agents are visible.")}</div>}
+          {!state.agents.length && <div className="empty-inline" role="status">{t(inventoryUnavailable ? inventoryNotice : "No durable Agents are visible.")}</div>}
         </div>
 
         <details className="agent-create-disclosure">
@@ -164,7 +170,7 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
       </aside>
 
       <section className="agents-main">
-        <div className="runtime-tabs agent-tabs" role="tablist" aria-label={t("Agent workspace")}>
+        <div ref={selectionRef} className="runtime-tabs agent-tabs" role="tablist" aria-label={t("Agent workspace")}>
           {([ ["inbox", "Inbox"], ["conversations", "All conversations"], ["profile", "Profile"] ] as const).map(([value, label]) =>
             <button key={value} role="tab" aria-selected={section === value} className={section === value ? "active" : ""} onClick={() => setSection(value)}>{t(label)}</button>)}
         </div>
@@ -225,7 +231,7 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
             </>}
           </>
         ) : (
-          <div className="empty-inline">{t("Select or create an Agent to get started.")}</div>
+          <div className="empty-inline">{t(inventoryUnavailable ? inventoryNotice : "Select or create an Agent to get started.")}</div>
         ))}
 
         {section === "conversations" && <section className="agent-section conversations-section">
@@ -250,7 +256,7 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
                   </span>
                 </button>
               ))}
-              {!visibleConversations.length && <div className="empty-inline">{t("No durable Conversations.")}</div>}
+              {!visibleConversations.length && <div className="empty-inline">{t(inventoryUnavailable ? inventoryNotice : "No durable Conversations.")}</div>}
 
               <details>
                 <summary><Plus size={13} /> {t("New Conversation")}</summary>
@@ -322,6 +328,7 @@ export function AgentsPanel({ client, language, onUnauthorized, selectedAgentId,
           </section>
         )}
 
+        {state.availability === "stale" && <p className="agent-status warn" role="status">{t("Durable communication refresh failed; previous data retained.")}</p>}
         {state.status && <p className="agent-status" role="status">{t(state.status)}</p>}
         {state.manageAvailable === false && <p className="agent-status warn">{t("communication:manage is unavailable; diagnostics remain read-only.")}</p>}
       </section>

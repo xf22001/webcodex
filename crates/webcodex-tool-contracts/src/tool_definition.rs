@@ -39,8 +39,8 @@ mod testing;
 
 use super::metadata::{
     metadata as make_tool_metadata, ToolApprovalPolicy, ToolAuthorityPolicy, ToolEffect,
-    ToolIdempotency, ToolMetadata, ToolPathHint, ToolRisk, ToolSemanticContract, RUNTIME_READ,
-    TOOL_PROVIDER_CONTROL,
+    ToolIdempotency, ToolMetadata, ToolPathHint, ToolRisk, ToolSemanticContract, PROJECT_READ,
+    RUNTIME_READ, TOOL_PROVIDER_CONTROL, TOOL_PROVIDER_RUNNER,
 };
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_catalog::TOOL_MANIFEST_INTENTS;
@@ -101,7 +101,7 @@ pub enum RunnerCapabilityRequirement {
     /// General native process + argv execution. This must never be inferred
     /// from shell or structured-validation support.
     StructuredProcess,
-    /// Runner-owned portable Rust/Go project build planning + typed StartBuild.
+    /// Runner-owned portable Rust/Go/Python project build planning + typed StartBuild.
     /// Never inferred from generic process or validation support.
     ProjectBuild,
     ProjectFormat,
@@ -1216,6 +1216,68 @@ const fn def(
     }
 }
 
+// Runner-backed Project reads share this authority/effect contract. Audit
+// redaction, capability, path selection, and Session evidence stay explicit
+// at each declaration; mutation and execution tools continue to use `def`.
+const fn runner_project_read_def(
+    name: &'static str,
+    audit: ToolAuditPolicy,
+    category: &'static str,
+    runner_capability: RunnerCapabilityRequirement,
+    path_hint: ToolPathHint,
+    session_evidence: ToolSessionEvidencePolicy,
+) -> ToolDefinition {
+    def(
+        name,
+        audit,
+        ToolVisibility::ModelVisible,
+        category,
+        Some(runner_capability),
+        TOOL_PROVIDER_RUNNER,
+        ToolSemanticContract {
+            effect: ToolEffect::Observe,
+            risk: ToolRisk::Read,
+            approval: ToolApprovalPolicy::None,
+            idempotency: ToolIdempotency::PureRead,
+        },
+        Some(PROJECT_READ),
+        true,
+        path_hint,
+        false,
+        false,
+        session_evidence,
+    )
+}
+
+// Server-owned Control operations without a Project, path, Runner dispatch, or
+// Session evidence. Authority, effect, idempotency, and destructive intent stay
+// explicit at each declaration.
+const fn control_def(
+    name: &'static str,
+    audit: ToolAuditPolicy,
+    visibility: ToolVisibility,
+    category: &'static str,
+    semantic: ToolSemanticContract,
+    required_scope: Option<&'static str>,
+    destructive: bool,
+) -> ToolDefinition {
+    def(
+        name,
+        audit,
+        visibility,
+        category,
+        None,
+        TOOL_PROVIDER_CONTROL,
+        semantic,
+        required_scope,
+        false,
+        NoPath,
+        destructive,
+        false,
+        ToolSessionEvidencePolicy::NONE,
+    )
+}
+
 const fn model_spec(definition: ToolDefinition, description: &'static str) -> ToolDefinition {
     ToolDefinition {
         model_spec: Some(ToolModelSpecDeclaration {
@@ -1360,13 +1422,11 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
 ];
 
 const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[model_spec(
-    def(
+    control_def(
         "list_tools",
         ToolAuditPolicy::TYPED_CANONICAL,
         ModelVisible,
         TOOL_CATEGORY_RUNTIME,
-        None,
-        TOOL_PROVIDER_CONTROL,
         ToolSemanticContract {
             effect: ToolEffect::Observe,
             risk: Read,
@@ -1375,10 +1435,6 @@ const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[model_spec(
         },
         Some(RUNTIME_READ),
         false,
-        NoPath,
-        false,
-        false,
-        ToolSessionEvidencePolicy::NONE,
     )
     .with_activity(
         ToolActivityPresentation::Support,

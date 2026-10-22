@@ -1,3 +1,4 @@
+use super::support::record_session_tool_event as record_coding_task_tool_event;
 use super::support::*;
 use crate::auth::AuthContext;
 use crate::runner_protocol::RunnerPolicySummary;
@@ -1364,6 +1365,11 @@ async fn finish_coding_task_requires_explicit_session_and_returns_structured_fie
     let validation = &result.output["validation"];
     assert_eq!(validation["available"], false);
     assert_eq!(validation["status"], "not_run");
+    assert_eq!(result.output["acceptance"]["state"], "needs_evidence");
+    assert!(result.output["acceptance"]["reason_codes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("validation_not_run")));
     assert_eq!(validation["reason"], "no_validation_tool_invoked");
     assert_eq!(validation["source"], "session_ledger");
     assert_eq!(validation["events_total"], 0);
@@ -3670,22 +3676,6 @@ fn assert_check_status(verdict: &Value, name: &str, status: &str) {
     assert_eq!(check["status"], status);
 }
 
-fn assert_reason_list_contains(verdict: &Value, key: &str, reason: &str) {
-    let reasons = verdict[key].as_array().expect("reason list");
-    assert!(
-        reasons.iter().any(|value| value.as_str() == Some(reason)),
-        "{key} should contain {reason}: {verdict}"
-    );
-}
-
-fn assert_reason_list_not_contains(verdict: &Value, key: &str, reason: &str) {
-    let reasons = verdict[key].as_array().expect("reason list");
-    assert!(
-        !reasons.iter().any(|value| value.as_str() == Some(reason)),
-        "{key} should not contain {reason}: {verdict}"
-    );
-}
-
 fn assert_startup_verdict_shape(verdict: &Value) {
     assert_status_string(verdict);
     assert!(verdict["blocking"].is_boolean(), "blocking bool: {verdict}");
@@ -3740,40 +3730,6 @@ fn assert_finish_uses_canonical_outcomes(output: &Value) {
     assert!(output.get("finish_verdict").is_none(), "{output}");
 }
 
-fn assert_action_list_contains(actions: &Value, action: &str) {
-    assert!(
-        actions
-            .as_array()
-            .expect("suggested_next_actions array")
-            .iter()
-            .any(|candidate| candidate.as_str() == Some(action)),
-        "suggested_next_actions should contain {action}: {actions}"
-    );
-}
-
-fn assert_action_list_not_contains(actions: &Value, action: &str) {
-    assert!(
-        !actions
-            .as_array()
-            .expect("suggested_next_actions array")
-            .iter()
-            .any(|candidate| candidate.as_str() == Some(action)),
-        "suggested_next_actions should not contain {action}: {actions}"
-    );
-}
-
-fn assert_compact_verdict_safe(value: &Value, context: &str) {
-    let serialized = serde_json::to_string(value).unwrap();
-    for forbidden in [
-        "stdout", "stderr", "tail", "excerpt", "command", "token", "secret", "env",
-    ] {
-        assert!(
-            !serialized.contains(forbidden),
-            "{context} leaked {forbidden}: {serialized}"
-        );
-    }
-}
-
 fn assert_review_evidence_tools_safe(review_evidence: &Value) {
     let tools = review_evidence["tools"]
         .as_array()
@@ -3808,54 +3764,6 @@ fn assert_review_evidence_tools_safe(review_evidence: &Value) {
             );
         }
     }
-}
-
-fn json_contains_key(value: &Value, key: &str) -> bool {
-    match value {
-        Value::Object(map) => {
-            map.contains_key(key) || map.values().any(|value| json_contains_key(value, key))
-        }
-        Value::Array(values) => values.iter().any(|value| json_contains_key(value, key)),
-        _ => false,
-    }
-}
-
-fn assert_no_raw_validation_output_fields(value: &Value, context: &str) {
-    for key in [
-        "stdout",
-        "stderr",
-        "stdout_tail",
-        "stderr_tail",
-        "stdout_tail_excerpt",
-        "stderr_tail_excerpt",
-        "validation_output_summary",
-    ] {
-        assert!(
-            !json_contains_key(value, key),
-            "{context} must not include {key}: {value}"
-        );
-    }
-}
-
-fn record_coding_task_tool_event(
-    runtime: &ToolRuntime,
-    session_id: &str,
-    tool_name: &str,
-    arguments: Value,
-    success: bool,
-    output: Value,
-) {
-    let start = runtime.sessions.record_tool_call_started(
-        Some(session_id),
-        SessionTransport::Api,
-        tool_name,
-        &arguments,
-        crate::tool_runtime::sessions::session_tool_contract(tool_name),
-    );
-    let error = (!success).then_some("tool failed");
-    runtime
-        .sessions
-        .record_tool_call_finished(start, success, &output, error, None);
 }
 
 struct FinishSummaryFixture {

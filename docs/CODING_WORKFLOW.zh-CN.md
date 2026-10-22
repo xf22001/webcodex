@@ -7,6 +7,21 @@ Workflow Session 属于该 runtime。使用其他 Host 的工具在本地开发 
 请遵循 [CONTRIBUTING.md](../CONTRIBUTING.zh-CN.md) 和 [AGENTS.md](../AGENTS.md)，
 无需为了贡献代码而先安装 WebCodex。
 
+## 计划后继续执行
+
+对于复杂开发任务，先调查相关规则与代码，明确可观察的完成条件，展示按结果组织的简短计划，
+随后继续已授权的实现；不要仅为了询问“是否开始”而停下。只有缺少实质需求或权限时才提问。
+小任务无需计划；可见计划不要求创建持久 Goal，现有 Goal 选择偏好保持不变。
+
+下一步由实际工具结果决定。证据推翻假设或用户修改要求时，调整剩余方案，并在已建立的
+Session 中保留有用的决策与进度。不要预先完成测试，不要没有新诊断就重复相同失败。
+每次执行保留同一个 Job；读取截断沿返回的 continuation 继续，陈旧编辑先重新读取，
+效果不确定时先核对而不是重放。
+
+Project selector 被拒绝属于输入校验，不证明 Runner 离线，也不证明必须已有 Session。
+已注册项目使用 canonical id 或已签发的 `project_ref`；未知时先授权调用 `list_projects`，
+不要从文件路径猜测 Runner。`client_id + path` 仍是显式 bootstrap 方式，权限边界不变。
+
 ## 普通循环
 
 日常 WebCodex coding loop 应该保持很小：
@@ -36,6 +51,20 @@ Bootstrap 或 discovery 返回 `project_ref` 后，普通 Project-scoped tool ca
 
 默认情况下，它还会返回一个很小且有界的 `extensions` selection catalog：Skill metadata 来自 canonical 的 project / Runner-configured `skills.roots` / Runner-managed Skill Store 三类来源；Plugin metadata 只包含 configured working directory 与当前 Project root 匹配、且已 ready/committed 的 provider。该 metadata 不授予任何 authority，也不会自动读取 Skill body 或创建 Plugin binding；模型选择后使用 `read_skill_file` 读取 Skill 文本，`run_skill_resource` 只执行可信 Runner-configured live `scripts/` resource（由 `expected_definition_revision` fence definition）或 Runner-installed managed resource（另由 `expected_package_revision` fence package），Plugin 则走 `plugin_tool describe -> call`。Configured resource bytes 会一直保持 live 到实际执行时，并不会预先被 package revision 固定。只有当前模型上下文仍明确保留这些 discovery metadata 时，才应设置 `include_extension_catalog=false`。
 
+Skill 读取（`load_skill` 和 `read_skill_file`）返回规范化的包内路径 `skill_path`，供 `read_skill_file.path` 使用。Project Skill 另返回权威的项目相对路径 `project_path`：项目引用应使用它和返回的来源行号，即使包目录与 metadata name 不同。Runner-configured 和 managed Skill 不返回 `project_path`；引用其 Skill identity、`skill_path`、resource `sha256`、revision 和来源行号，不要编造项目路径。不会暴露 Skill 的本机根目录。
+
+跨轮次的重要工作可以用 durable Goal 记录目标和完成标准，无需用户管理步骤。`update_goal` 使用精确的 `expected_revision` 和 `idempotency_key` 编辑 active Goal：省略 `completion_conditions` 会保留原列表，传入 `[]` 则清空。替换条件沿用创建时的限制（最多八项，每项去除首尾空白后非空，且不超过 512 UTF-8 字节）。编辑完成标准保留已有步骤、checkpoint 和进度；不会自动判断验收、恢复执行或重新打开 completed/cancelled Goal。revision 冲突时重新读取；结果不确定时复用同一个 key 和完全相同的请求。
+
+## Workbench 应用
+
+**Projects & Resources** Workbench 在现有 Project 与 Session 资源浏览器中增加 Files、Work 和 Goals 视图。文件预览和引用为只读；点击 **Add selected references** 后，如果 Host 声明了受支持的 modality，Workbench 会更新 Host model context。它不会编辑 Project 文件。Goal 属于当前 communication account，可跨 Project 使用。
+
+Workbench 实例名称默认是 `WebCodex`。在 Server 设置 `WEBCODEX_INSTANCE_NAME` 可更改所有用户看到的实例名称。每个已认证账户也可在 Workbench 设置中保存自己的显示名称覆盖值；清除后会恢复为配置的实例名称。升级后若看不到 Workbench 命令，请刷新 Host 的 tool list 或重新连接 Server，让 Host 发现当前 App 工具。原生 Host 渲染还有独立的 capability 要求；本地 fixture 测试不能证明真实 Host 已验证。
+
+提交工作时必须明确选择 Project、属于当前用户的 Agent，以及一个当前确实可用的精确 route：当前 chat 中已验证的 continuation，或所选 Project 的 Runner 提供的 provider。Workbench 会创建 canonical AgentTask 和 Attempt，并通过这个已有 route 分发，不接受自由格式命令，也不会创建新的 execution backend。若提交结果不确定，使用同一草稿、同一个 key 和完全相同的字段重试；若要发起不同提交，应先检查返回的 Task 或 reconcile 现有 Task。可以选择把 Task 关联到当前用户拥有的 Goal。
+
+Session todo 只有在明确选择 Project 和一个有权限访问的 Workflow Session 后才会显示。Workbench 不会根据最近活动推断 Session。历史 32-hex Goal ID 来自 stable 发布前的开发版本；受支持的 stable 版本使用 compact `wc_goal_` ID。不要手工改写数据库 ID。如果旧开发数据库导致 Goal ID 无效或出现存储错误，请保留数据库备份，并向维护者提供 WebCodex 版本和已清理敏感信息的错误，以获取对应版本的迁移指导；不要首先删除或重置数据库。参见 [Workbench implementation notes](implementation/workbench-resource-references.md)。
+
 ### 切回明确的工作上下文
 
 已明确选择 Active Session 时，可以直接调用 `work_on_project(session_id="~s12", instruction="继续评审")`，省略 `project`、`client_id` 和 `path`。默认的 `checkout` 模式会授权这个精确 Session，取得它绑定的 Project，重新检查当前项目访问权限，再恢复同一个 Session。后续普通 Project 工具使用返回的 `project_ref`。显式传入 Project 仍然有效，但必须匹配；`_wc.record` 仍仅为独立的记录来源，不会替代业务目标。
@@ -45,6 +74,22 @@ Fresh work 仍须明确 `project` 或 `client_id + path`。`mode="worktree"` 始
 在原 Window 丢失 Session selector 时，请求 `_wc.context=["workflow.resume"]` 并显式选择候选。已授权候选保留 canonical identity，并提供 `session_ref`；当前 root fingerprint 和 reference store 可用时还提供 `project_ref`。这只是发现，不会自动恢复；丢失任务上下文时应先读取精确 handoff。跨 Window 必要时仍用 `list_sessions(project)` 发现候选。
 
 ## 工具策略 guidance
+
+普通实现无需指定角色。对于非简单代码变更，先定位职责所属层，追踪相关调用方和数据流，
+查找可复用实现，并阅读涉及边界的设计指导；调查范围应与任务规模相称。现有模式是需要
+判断的证据，新增抽象或平行实现必须有具体任务理由。共享展示之前的权威业务事实，
+用结构完整的最小改动解决根因，包括任务范围内必要的局部重构和被替代路径清理。
+交付前同时检查行为、职责归属、重复实现和跨层一致性；测试通过本身不能证明架构合适。
+
+编译器、Schema 和穷尽性检查的失败也可能暴露跨层修改遗漏。长任务应及时报告已验证的阶段
+成果；创建获授权的 PR 或其他外部交付物后，应尽早报告实际链接及验证状态，不要把所有
+结果都推迟到最终回复。提示指导本身无法避免模型服务额度耗尽导致的中断。
+
+`independent_review` 仅在明确要求独立评审时使用。除权限、安全和运行时契约外，还应检查
+此次改动引入或扩大的重复事实或执行流程、职责错位、展示数据反向解析和不完整迁移。
+发现应有具体代码及正确性、漂移风险或维护成本证据，区分必须修复的问题和可选清理；
+个人风格偏好本身不构成问题，无关重设计不在任务范围内。只读评审不授权修改代码，
+只有任务明确包含修正时才修复并执行针对性验证；角色本身不授予权限。
 
 需要切换账号或窗口时，用 `post_session_message` 保存已确认的决策和当前进度。不知道旧 Session 身份时，通过 `list_sessions(project)` 发现并显式选择候选，读取交接后再恢复。完整恢复及已配置模型评审流程见[任务接续](SESSION_CONTINUITY.zh-CN.md)。
 
@@ -172,6 +217,10 @@ Formatting 属于收尾，不是每次编辑后的 validation。普通循环是�
 编辑和 validation 之后，必须检查真实 workspace/diff。Tests 通过不能替代 diff review；反过来，diff 看起来合理也不能替代行为变化所需的 focused validation。
 
 `finish_coding_task` 返回有界 closeout evidence。把它当成 advisory summary，不要把它当成“任务已经正确完成”的 authority。最终工程判断仍由模型完成并向用户报告。
+
+Closeout（含 `summary_only`）、`read_session_handoff` 和绑定 Session 的 Work Result 会提供从同一组观察推导的可选 `acceptance` 摘要。`state` 为 `ready_for_review`、`needs_evidence`、`failed` 或 `not_applicable`，均不表示自然语言需求已验收。`reason_codes` 说明缺失、过期或尚未证明的证据；`evidence_refs` 指向已有 workspace、validation、review 或 outputs 类证据。沿用现有下一步动作，需要细节时读取精确 Session 的证据。交接快照发生变化时，先重新读取再继续依赖该快照的工作。
+
+执行结束及历史检查通过不能证明当前源码正确。现有源码 fence 返回 `unproven` 或 `stale`，所以检查成功后仍需复核源码状态与检查适用性。保留的产物元数据是历史观察，不证明当前文件新鲜度或内容正确。只读任务可以合理地无需测试：明确判断适用性，不要只为改变状态标记而运行测试。没有任务 Session 的卡片返回 `not_applicable`，不会从 Project 活动推断任务。
 
 ## 长时间运行的工作
 

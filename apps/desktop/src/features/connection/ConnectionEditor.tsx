@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from "react";
-import { Alert, Button, Checkbox, NativeSelect, PasswordInput, TextInput } from "@mantine/core";
+import { Alert, Button, Checkbox, Select, PasswordInput, TextInput } from "@mantine/core";
 import { desktopApi } from "../../lib/desktop-api";
 import type { DesktopState } from "../../models/topology";
 import type { TunnelConnection, TunnelHostMode, TunnelProfileRequest, TunnelProvider } from "../../models/connections-tools";
@@ -67,8 +67,8 @@ export function ConnectionEditor({ profile, persistentLocal, onState, onClose, o
   };
   const selectedOwner = hostMode === "embedded" ? c("runWithServer") : c("separateTunnelService");
   return <WorkspaceDialog title={profile ? `${p("edit")} ${profile.name}` : c("addConnection")} onClose={onClose} busy={busy}>
-    <form className="profile-editor" onSubmit={event => void submit(event)} aria-busy={busy}>
-      <NativeSelect label={c("provider")} aria-label={c("provider")} value={providerKind} onChange={event => { setProviderKind(event.currentTarget.value as TunnelProvider["kind"]); setApiKey(""); setCloudflareToken(""); }} disabled={busy || profile !== null} data={[{value:"openai",label:"OpenAI Tunnel"},{value:"cloudflare_named",label:c("cloudflareNamed")},{value:"cloudflare_quick",label:c("cloudflareQuick")}]} />
+    <form className="profile-editor connection-profile-editor" onSubmit={event => void submit(event)} aria-busy={busy}>
+      <Select label={c("provider")} aria-label={c("provider")} value={providerKind} allowDeselect={false} onChange={value => { if (!value) return; setProviderKind(value as TunnelProvider["kind"]); setApiKey(""); setCloudflareToken(""); }} disabled={busy || profile !== null} data={[{value:"openai",label:"OpenAI Tunnel"},{value:"cloudflare_named",label:c("cloudflareNamed")},{value:"cloudflare_quick",label:c("cloudflareQuick")}]} />
       <p className="field-help">{cloudflare ? c("cloudflareHelp") : p("tunnelCredentialHelp")}</p>
       {cloudflare && !persistentLocal && <Alert role="status"><p>{c("cloudflareEnvironment")}</p>{onSetup && <Button variant="default" onClick={() => { onClose(); onSetup(); }}>{c("openRuntimeSetup")}</Button>}</Alert>}
       {canChooseHost && <fieldset className="connection-owner-choice">
@@ -85,7 +85,7 @@ export function ConnectionEditor({ profile, persistentLocal, onState, onClose, o
       {persistentLocal && profile && <div className="connection-owner-summary" role="note"><strong>{c("connectionLifecycle")}</strong><span>{selectedOwner}</span><small>{c("lifecycleLockedHelp")}</small></div>}
       <TextInput className="field-group" id="connection-profile-name" label={c("name")} aria-label={c("name")} name="name" value={name} onChange={event => setName(event.currentTarget.value)} required maxLength={160} disabled={busy} autoFocus />
       {(!cloudflare || named) && <TextInput className="field-group" id="connection-profile-tunnel-id" label="Tunnel ID" aria-label="Tunnel ID" name="tunnel_id" value={tunnelId} onChange={event => setTunnelId(event.currentTarget.value)} required maxLength={256} pattern="(?:[A-Za-z0-9_]|-)+" spellCheck={false} autoCapitalize="none" disabled={busy || identityLocked} description={identityLocked ? c("tunnelIdentityLocked") : undefined} />}
-      {!cloudflare && <PasswordInput className="field-group" id="connection-profile-api-key" label="API Key" aria-label="API Key" name="api_key" value={apiKey} onChange={event => setApiKey(event.currentTarget.value)} required={!profile?.credential_present} maxLength={8192} autoComplete="new-password" spellCheck={false} disabled={busy} description={profile?.credential_present ? p("savedKey") : undefined} />}
+      {!cloudflare && <PasswordInput className="field-group" id="connection-profile-api-key" label="API key" aria-label="API key" name="api_key" value={apiKey} onChange={event => setApiKey(event.currentTarget.value)} required={!profile?.credential_present} maxLength={8192} autoComplete="new-password" spellCheck={false} disabled={busy} description={profile?.credential_present ? p("savedKey") : undefined} />}
       {named && <><TextInput label={c("publicOrigin")} aria-label={c("publicOrigin")} type="url" maxLength={2048} required value={publicOrigin} onChange={event => setPublicOrigin(event.currentTarget.value)} placeholder="https://mcp.example.com" disabled={busy} /><PasswordInput label={c("cloudflareToken")} aria-label={c("cloudflareToken")} value={cloudflareToken} onChange={event => setCloudflareToken(event.currentTarget.value)} required={!profile?.credential_present} maxLength={8192} autoComplete="new-password" disabled={busy} description={profile?.credential_present ? p("savedKey") : undefined} /></>}
       {providerKind === "cloudflare_quick" && <p className="workspace-notice">{c("quickReauthorize")}</p>}
       {(cloudflare || !persistentLocal || hostMode === "embedded") && <Checkbox className="profile-checkbox" id="connection-profile-autostart" label={hostMode === "embedded" ? c("serverAutostart") : c("autostart")} checked={autostart} onChange={event => setAutostart(event.currentTarget.checked)} disabled={busy} />}

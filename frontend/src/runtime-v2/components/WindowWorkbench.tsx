@@ -1,3 +1,4 @@
+import { useFlowingSelection } from "../../ui/useFlowingSelection.js";
 import {
   Box,
   CircleDot,
@@ -26,7 +27,6 @@ import { absoluteTime, clockTime, relativeTime, shortId } from "../model/format.
 import type { ProjectRow, WindowSummary } from "../model/types.js";
 
 import { useWindowWorkspace } from "../state/useWindowWorkspace.js";
-import { WorkSurfaceSwitch, type WorkSurface } from "./GoalWorkbench.js";
 import { WindowCollaboration } from "./WindowCollaboration.js";
 import { WindowActivityFeed } from "./WindowActivityFeed.js";
 import { TraceSearch } from "./TraceSearch.js";
@@ -36,8 +36,6 @@ type Props = {
   client: RuntimeV2Client;
   language: RuntimeLanguage;
   projects: ProjectRow[];
-  surface: WorkSurface;
-  onSurfaceChange: (surface: WorkSurface) => void;
   onUnauthorized: () => void;
   onOpenSessionRecord?: (project: string, sessionId: string) => void;
   requestedWindowKey?: string;
@@ -112,8 +110,6 @@ export function WindowWorkbench({
   client,
   language,
   projects,
-  surface,
-  onSurfaceChange,
   onUnauthorized,
   onOpenSessionRecord,
   requestedWindowKey,
@@ -129,6 +125,8 @@ export function WindowWorkbench({
   const selectedRowRef = useRef<HTMLButtonElement | null>(null);
   const [search, setSearch] = useState("");
   const [centerTab, setCenterTab] = useState<"window" | "collaboration">("window");
+  const selectionRef = useRef<HTMLDivElement | null>(null);
+  useFlowingSelection(selectionRef, centerTab, { variant: "underline" });
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const historicalFamilies = useMemo(() => buildProjectFamilies(projects, projectIndex, windows.historicalWindows), [projects, projectIndex, windows.historicalWindows]);
   const familyById = useMemo(() => new Map(historicalFamilies.map(family => [family.id, family])), [historicalFamilies]);
@@ -212,9 +210,8 @@ export function WindowWorkbench({
   const currentWorkspaceName = currentProject?.lineage
     ? projectVariantLabel(currentProject)
     : currentProjectName;
-  const currentMachine = currentProject?.client_id;
+  const currentRunnerId = currentProject?.client_id;
   const currentDirectory = displayProjectPath(currentProject?.path);
-  const currentProjectAddress = currentProjectId;
   const hasSelectedWindow = Boolean(selectedSummary || detail);
   const visibleActiveCount = detail?.active_count ?? selectedSummary?.active_count ?? 0;
   const visibleActivityCount = (detail?.activity_returned || 0) + visibleActiveCount;
@@ -264,13 +261,9 @@ export function WindowWorkbench({
         <span className={"work-state-dot " + (window.active_count ? "running" : "recent")} />
         <span className="window-work-row-main">
           <strong>{workspaceLabel}</strong>
-          <small title={window.client_window_key}>{t("Window")} · {shortId(window.client_window_key, 6, 4)}</small>
-          <small>{project?.lineage ? projectLabel + " · " : ""}{activity}</small>
-          <small title={displayProjectPath(project?.path || source?.path)}>
-            {[
-              project?.client_id || t("Runner unavailable"),
-              displayProjectPath(project?.path || source?.path),
-            ].filter(Boolean).join(" · ")}
+          <small className="window-work-row-activity" title={activity}>{project?.lineage ? projectLabel + " · " : ""}{activity}</small>
+          <small className="window-work-row-context" title={[window.client_window_key, displayProjectPath(project?.path || source?.path)].filter(Boolean).join(" · ")}>
+            {project?.client_id || t("Runner unavailable")} · {shortId(window.client_window_key, 6, 4)}
           </small>
         </span>
         <span className="window-work-row-side">
@@ -287,7 +280,6 @@ export function WindowWorkbench({
       <aside className="work-list-panel window-primary-list">
         <div className="work-list-header">
           <div><span className="eyebrow">{t("Live work")}</span><h1>{t("Work")}</h1></div>
-          <WorkSurfaceSwitch surface={surface} onSurfaceChange={onSurfaceChange} language={language} />
         </div>
         <div className="window-work-filters">
           <button type="button" className="text-button" onClick={windows.refresh}>{t("Refresh")}</button>
@@ -369,39 +361,36 @@ export function WindowWorkbench({
                   : t("Idle") + " · " + relativeTime(lastObservedAt)}
               </span>
               <details className="window-header-details">
-                <summary>{t("Window details")} · {shortId(windows.selectedKey, 8, 6)}</summary>
-                <div className="window-header-facts">
-                  <span className="window-header-fact" title={windows.selectedKey} data-testid="current-window-identity">
-                    <Monitor size={14} /><small>{t("Window")}</small>
-                    <CopyIdentity key={windows.selectedKey} value={windows.selectedKey} label={t("Window")} language={language} />
-                  </span>
-                  {currentMachine && (
-                    <span className="window-header-fact" title={currentMachine}>
-                      <Server size={14} />
-                      <small>{t("Machine")}</small>
-                      <CopyIdentity key={currentMachine} value={currentMachine} label={t("Machine")} language={language} />
-                    </span>
+                <summary>{t("Window details")}</summary>
+                <dl className="window-header-facts" aria-label={t("Window details")}>
+                  <div className="window-header-fact" title={windows.selectedKey} data-testid="current-window-identity">
+                    <dt><Monitor size={14} aria-hidden="true" />{t("Window ID")}</dt>
+                    <dd><CopyIdentity key={windows.selectedKey} value={windows.selectedKey} label={t("Window ID")} language={language} /></dd>
+                  </div>
+                  {currentRunnerId && (
+                    <div className="window-header-fact" title={currentRunnerId}>
+                      <dt><Server size={14} aria-hidden="true" />{t("Runner ID")}</dt>
+                      <dd><CopyIdentity key={currentRunnerId} value={currentRunnerId} label={t("Runner ID")} language={language} /></dd>
+                    </div>
                   )}
                   {currentDirectory && (
-                    <span className="window-header-fact" title={currentDirectory}>
-                      <FolderOpen size={14} />
-                      <small>{t("Directory")}</small>
-                      <CopyIdentity key={currentDirectory} value={currentDirectory} label={t("Directory")} language={language} />
-                    </span>
+                    <div className="window-header-fact" title={currentDirectory}>
+                      <dt><FolderOpen size={14} aria-hidden="true" />{t("Directory")}</dt>
+                      <dd><CopyIdentity key={currentDirectory} value={currentDirectory} label={t("Directory")} language={language} /></dd>
+                    </div>
                   )}
-                  {currentProjectAddress && (
-                    <span className="window-header-fact" title={currentProjectAddress}>
-                      <Box size={14} />
-                      <small>{t("Project address")}</small>
-                      <CopyIdentity key={currentProjectAddress} value={currentProjectAddress} label={t("Project address")} language={language} />
-                    </span>
+                  {currentProjectId && (
+                    <div className="window-header-fact" title={currentProjectId}>
+                      <dt><Box size={14} aria-hidden="true" />{t("Project ID")}</dt>
+                      <dd><CopyIdentity key={currentProjectId} value={currentProjectId} label={t("Project ID")} language={language} /></dd>
+                    </div>
                   )}
-                </div>
+                </dl>
                 <div className="window-header-timeline">
                   {firstObservedAt && (
                     <span className="window-header-event" title={absoluteTime(firstObservedAt)}>
                       <Clock3 size={14} />
-                      <small>{t("First active")}</small>
+                      <small>{t("First observed")}</small>
                       <time>{absoluteTime(firstObservedAt)}</time>
                     </span>
                   )}
@@ -417,7 +406,7 @@ export function WindowWorkbench({
               </details>
             </header>
 
-            <div className="session-view-tabs window-center-tabs" role="tablist" aria-label={t("Window views")}>
+            <div ref={selectionRef} className="session-view-tabs window-center-tabs equal-view-tabs" role="tablist" aria-label={t("Window views")}>
               <button
                 id="window-activity-tab"
                 role="tab"

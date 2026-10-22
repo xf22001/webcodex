@@ -3,6 +3,7 @@ import { MotionConfig } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ACCENT_CHANGE_EVENT, ACCENT_STORAGE_KEY, accentTokens, loadAccentPreference, normalizeAccent } from "./accent.js";
 import { accentVariantResolver } from "./mantineAccentTheme.js";
+import { useSelectionPreference } from "./useSelectionPreference.js";
 
 function resolvedTheme(): "light" | "dark" {
   return document.documentElement.dataset.resolvedTheme === "dark" ? "dark" : "light";
@@ -10,6 +11,7 @@ function resolvedTheme(): "light" | "dark" {
 
 /** Keeps Mantine's controls in step with the existing WebCodex appearance preference. */
 export function UiProvider({ children }: { children: ReactNode }) {
+  useSelectionPreference();
   const [colorScheme, setColorScheme] = useState(resolvedTheme);
   const [accent, setAccent] = useState(loadAccentPreference);
 
@@ -36,7 +38,7 @@ export function UiProvider({ children }: { children: ReactNode }) {
     primaryShade: { light: 6, dark: 6 },
     colors: { brand: colorsTuple(accentTokens(accent, colorScheme).accent) },
     variantColorResolver: accentVariantResolver(accent, colorScheme),
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, sans-serif',
+    fontFamily: "var(--ui-font-family)",
     fontSizes: { xs: "12px", sm: "13px", md: "14px", lg: "16px", xl: "20px" },
     spacing: { xs: "4px", sm: "8px", md: "12px", lg: "16px", xl: "24px" },
     radius: { xs: "4px", sm: "8px", md: "12px", lg: "16px", xl: "20px" },

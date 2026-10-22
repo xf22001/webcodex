@@ -133,7 +133,7 @@ async function inspectProjectPicker(selector, label, capture = false) {
   await menu.getByRole('button', { name: /beta/i }).click();
   assert.match(await trigger.innerText(), /beta/i);
   await trigger.click();
-  await page.getByRole('dialog', { name: /Projects|Project/ }).getByRole('button', { name: 'All Projects' }).click();
+  await page.getByRole('dialog', { name: /Projects|Project/ }).getByRole('button', { name: /^All projects$/i }).click();
   report.checks.push(`${label} project picker bounds, exact selection, and reset`);
 }
 async function inspectRunnerPicker(label, capture = false) {
@@ -220,20 +220,20 @@ try {
       }
     }
     await desktopNav('connection');
-    const connectionTrigger = page.getByRole('button', { name: 'Add Connection' });
+    const connectionTrigger = page.getByRole('button', { name: 'Add connection' });
     await connectionTrigger.click();
     await page.getByRole('dialog').waitFor();
     assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"]'))), true);
     await screenshot(`desktop-connection-dialog-${width}`);
     await page.keyboard.press('Escape');
     await page.getByRole('dialog').waitFor({ state: 'hidden' });
-    await page.waitForFunction(() => document.activeElement instanceof HTMLButtonElement && document.activeElement.textContent?.includes('Add Connection'));
+    await page.waitForFunction(() => document.activeElement instanceof HTMLButtonElement && document.activeElement.textContent?.includes('Add connection'));
     report.checks.push(`Desktop connection dialog Escape ${width}`);
-    await page.getByRole('button', { name: 'Add Connection' }).click();
+    await page.getByRole('button', { name: 'Add connection' }).click();
     await page.getByRole('dialog').getByLabel('Name').fill('Fixture connection');
     await page.getByRole('dialog').getByLabel('Tunnel ID').fill('tunnel_ui_fixture');
-    await page.getByRole('dialog').getByLabel('API Key').fill('fixture-only-api-key');
-    await page.getByRole('dialog').getByRole('button', { name: 'Save & Apply' }).click();
+    await page.getByRole('dialog').getByLabel('API key').fill('fixture-only-api-key');
+    await page.getByRole('dialog').getByRole('button', { name: 'Save and apply' }).click();
     await page.getByRole('dialog').waitFor({ state: 'hidden' });
     const saved = await page.evaluate(() => window.__fixtureCalls.find(call => call.cmd === 'save_tunnel_profile'));
     assert.equal(saved.args.request.tunnel_id, 'tunnel_ui_fixture');
@@ -250,7 +250,7 @@ try {
       assert.equal(await page.locator('.workspace-project-table tbody tr').count(), 3);
       report.checks.push('One Runner: select and add exact project roots');
       await desktopNav('extensions');
-      assert.equal(await page.getByRole('tab', { name: 'Coding Agents' }).getAttribute('aria-selected'), 'true');
+      assert.equal(await page.getByRole('tab', { name: 'Coding agents' }).getAttribute('aria-selected'), 'true');
       assert.equal(await page.locator('.activity-project-filter').count(), 0);
       await page.getByRole('button', { name: 'Authorize Runner Capabilities', exact: true }).click();
       await page.getByRole('dialog').waitFor();
@@ -271,7 +271,7 @@ try {
       await page.getByRole('button', { name: 'Restart Runner', exact: true }).click();
       await page.getByText('Configured · Active', { exact: true }).waitFor();
       await screenshot('desktop-acp-active-1440');
-      await page.getByRole('tab', { name: 'SSH Resources', exact: true }).click();
+      await page.getByRole('tab', { name: 'SSH resources', exact: true }).click();
       await page.getByRole('button', { name: 'Add SSH Resource', exact: true }).click();
       await page.getByRole('dialog').getByLabel('Resource Name', { exact: true }).waitFor();
       await screenshot('desktop-ssh-dialog-1440');
@@ -281,7 +281,7 @@ try {
       report.checks.push('Merged Coding Agents-only explicit authorization, deferred activation, and SSH dialog');
       await page.getByRole('tab', { name: 'Instructions', exact: true }).click();
       await page.getByLabel('Global instruction files').fill('/fixture/AGENTS.md');
-      await page.getByLabel('Configured Skill roots').fill('/fixture/skills-next');
+      await page.getByLabel('Configured Skill folders').fill('/fixture/skills-next');
       await page.locator('[data-webcodex-action="save-runner-settings"]').click();
       await page.waitForFunction(() => window.__fixtureCalls.some(call => call.cmd === 'update_runner_settings'));
       const request = await page.evaluate(() => window.__fixtureCalls.find(call => call.cmd === 'update_runner_settings').args.request);
@@ -344,9 +344,9 @@ try {
   {
     const context = await prepare('/desktop/?state=disconnected');
     await desktopNav('connection');
-    await page.getByRole('button', { name: 'Add Connection' }).click();
+    await page.getByRole('button', { name: 'Add connection' }).click();
     assert(await page.getByRole('dialog').getByLabel('Tunnel ID').isEditable());
-    assert(await page.getByRole('dialog').getByLabel('API Key').isEditable());
+    assert(await page.getByRole('dialog').getByLabel('API key').isEditable());
     report.checks.push('Disconnected Tunnel credentials stay editable');
     await context.close();
   }
@@ -370,7 +370,7 @@ try {
     assert.equal(await page.locator('.goal-plan-stepper .mantine-Stepper-step').count(), 3, `Runtime ${width}: Goal plan must use three Mantine steps`);
     assert.equal(await page.locator('.goal-plan-stepper .mantine-Stepper-step[data-progress]').count(), 1, `Runtime ${width}: current Goal step must be distinct`);
     report.checks.push(`Runtime ${width} segmented work switch and progress`);
-    await activeRail('.app-nav .nav-button.active .ui-selection-rail', `Runtime ${width}`);
+    await activeRail('.app-nav .nav-button.active[aria-current="page"]', `Runtime ${width}`);
     if (width === 1440) {
       const picker = page.locator('.nav-utilities .accent-picker');
       await accentChoice(picker, 'Runtime 1440', 'Indigo', true);
@@ -645,7 +645,7 @@ try {
     await noOverflow('Runtime compact sidebar 924');
     await screenshot('runtime-compact-sidebar-dark-924');
     await page.locator('.app-nav .nav-button[title="Projects"]').click();
-    await activeRail('.app-nav .nav-button.active .ui-selection-rail', 'Runtime compact Projects');
+    await activeRail('.app-nav .nav-button.active[aria-current="page"]', 'Runtime compact Projects');
     await page.locator('.app-nav .nav-button[title="Work"]').click();
     report.checks.push('Runtime compact sidebar icon, brand, preferences, and navigation at 924 px');
     await context.close();
@@ -659,7 +659,8 @@ try {
     await page.locator('#overview-section .overview-item').first().waitFor();
     assert.equal(await page.locator('#projects-section .admin-data-table').count(), 1);
     report.checks.push(`Admin ${width} component project table`);
-    await activeRail('.section-nav a[aria-current] .admin-nav-rail', `Admin ${width}`);
+    assert.equal(await page.locator('.section-nav a[aria-current]').count(), 1, 'Admin has exactly one current navigation destination');
+    report.checks.push(`Admin ${width} current navigation destination`);
     const sectionEdges = await page.locator('#overview-section, #devices-section, #projects-section').evaluateAll(elements => elements.map(element => {
       const rect = element.getBoundingClientRect(); return [rect.left, rect.right];
     }));

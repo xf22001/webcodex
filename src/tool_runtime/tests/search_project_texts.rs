@@ -1484,16 +1484,15 @@ async fn search_project_texts_retry_uses_only_remaining_absolute_deadline() {
     let late = runtime
         .runner_registry
         .complete(RunnerResultRequest {
-            client_id: client_id.to_string(),
-            runner_instance_id: "inst".to_string(),
-            request_id: request.request_id,
             exit_code: Some(0),
             stdout: Some(search_stdout("matches", "src/late.rs", "late")),
             stderr: Some(String::new()),
-            stdout_truncated: false,
-            stderr_truncated: false,
             duration_ms: Some(200),
-            error: None,
+            ..runner_result_request(
+                client_id.to_string(),
+                "inst".to_string(),
+                request.request_id,
+            )
         })
         .await;
     assert!(
@@ -2181,16 +2180,15 @@ async fn search_project_texts_deadline_preserves_fast_result_and_cancels_unfinis
         let late = runtime
             .runner_registry
             .complete(RunnerResultRequest {
-                client_id: client_id.to_string(),
-                runner_instance_id: "inst".to_string(),
-                request_id: request.request_id,
                 exit_code: Some(0),
                 stdout: Some(search_stdout("matches", "src/late.rs", "late")),
                 stderr: Some(String::new()),
-                stdout_truncated: false,
-                stderr_truncated: false,
                 duration_ms: Some(200),
-                error: None,
+                ..runner_result_request(
+                    client_id.to_string(),
+                    "inst".to_string(),
+                    request.request_id,
+                )
             })
             .await;
         assert!(late.is_err(), "timed-out Runner request was not cancelled");
@@ -2299,8 +2297,7 @@ async fn search_project_texts_records_one_event_without_patterns_and_aggregates_
 #[tokio::test]
 async fn search_project_texts_outer_recording_session_preserves_complete_sparse_shape() {
     use crate::tool_runtime::kernel::{
-        HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
-        ToolProtocolCapabilities, ToolTransport,
+        ToolCallRequest, ToolInvocationMetadata, ToolProtocolCapabilities,
     };
 
     let root = tempfile::tempdir().unwrap();
@@ -2328,14 +2325,7 @@ async fn search_project_texts_outer_recording_session_preserves_complete_sparse_
                         tool_name: "search_project_texts".to_string(),
                         arguments,
                     },
-                    ToolCallContext {
-                        transport: ToolTransport::Mcp,
-                        session_id: Some(&session_id),
-                        auth: Some(&auth),
-                        window: None,
-                        record_oauth_scope_denials: false,
-                        host_file_import_trust: HostFileImportTrust::Untrusted,
-                    },
+                    mcp_recording_context(&session_id, &auth),
                     ToolInvocationMetadata {
                         ..Default::default()
                     },
@@ -2384,8 +2374,7 @@ async fn search_project_texts_outer_recording_session_preserves_complete_sparse_
 #[tokio::test]
 async fn search_project_texts_outer_recorder_observes_canonical_batch_before_primary_projection() {
     use crate::tool_runtime::kernel::{
-        HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
-        ToolProtocolCapabilities, ToolTransport,
+        ToolCallRequest, ToolInvocationMetadata, ToolProtocolCapabilities,
     };
 
     let root = tempfile::tempdir().unwrap();
@@ -2414,14 +2403,7 @@ async fn search_project_texts_outer_recorder_observes_canonical_batch_before_pri
                         tool_name: "search_project_texts".to_string(),
                         arguments,
                     },
-                    ToolCallContext {
-                        transport: ToolTransport::Mcp,
-                        session_id: Some(&session_id),
-                        auth: Some(&auth),
-                        window: None,
-                        record_oauth_scope_denials: false,
-                        host_file_import_trust: HostFileImportTrust::Untrusted,
-                    },
+                    mcp_recording_context(&session_id, &auth),
                     ToolInvocationMetadata::default(),
                     ToolProtocolCapabilities::default(),
                 )
@@ -2456,8 +2438,7 @@ async fn search_project_texts_outer_recorder_observes_canonical_batch_before_pri
 #[tokio::test]
 async fn search_project_texts_outer_recording_session_keeps_final_response_under_hard_cap() {
     use crate::tool_runtime::kernel::{
-        HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
-        ToolProtocolCapabilities, ToolTransport,
+        ToolCallRequest, ToolInvocationMetadata, ToolProtocolCapabilities,
     };
     use webcodex_core::runtime_contract::MODEL_INSPECTION_MAX_RESULT_BYTES as MAX_SERIALIZED_OUTPUT_BYTES;
 
@@ -2490,14 +2471,7 @@ async fn search_project_texts_outer_recording_session_keeps_final_response_under
                         tool_name: "search_project_texts".to_string(),
                         arguments,
                     },
-                    ToolCallContext {
-                        transport: ToolTransport::Mcp,
-                        session_id: Some(&session_id),
-                        auth: Some(&auth),
-                        window: None,
-                        record_oauth_scope_denials: false,
-                        host_file_import_trust: HostFileImportTrust::Untrusted,
-                    },
+                    mcp_recording_context(&session_id, &auth),
                     ToolInvocationMetadata {
                         context_request: vec!["webcodex.workflow".to_string()],
 

@@ -1549,7 +1549,13 @@ fn mcp_tools_list_compact_materializes_only_authorized_inputs() {
                     .filter(|tool| {
                         matches!(
                             tool["name"].as_str(),
-                            Some("work_result_thread_panel" | "search_mentions")
+                            Some(
+                                "work_result_thread_panel"
+                                    | "search_mentions"
+                                    | "read_workbench_state"
+                                    | "update_workbench_settings"
+                                    | "submit_workbench_work"
+                            )
                         )
                     })
                     .count();
@@ -2315,9 +2321,29 @@ fn mcp_compact_descriptions_preserve_selection_and_schema_literals() {
         (
             "project_build",
             vec![
-                "Portable Rust/Go project build",
+                "Build Rust/Go/Python/Node via Runner argv",
+                "no installs",
+                "Rust/Go: packages/all_packages, locked",
+                "Rust dependency_resolution_policy=offline adds Cargo --offline",
+                "not OS sandbox",
+                "others reject",
+                "Python: pyproject.toml, -m build --no-isolation; no scope",
+                "Node: declared script; no scope/policy; hooks may write/network",
+                "Artifacts don't prove correctness",
                 "same durable Job",
-                "pending never authorizes retry or redispatch",
+                "observe_jobs, never retry/redispatch",
+            ],
+        ),
+        (
+            "project_validate",
+            vec![
+                "Validate Rust/Go/Python/Node",
+                "no installs",
+                "Only structured evidence proves counts",
+                "Vitest/Jest require project_validation_node_json_v1",
+                "Scripts may write/use network",
+                "same Job; observe_jobs, never retry",
+                "Scope/filter/policy: read_tool_manifest",
             ],
         ),
         (
@@ -2383,6 +2409,10 @@ fn mcp_compact_descriptions_preserve_selection_and_schema_literals() {
                 .clone()
         };
         let description = descriptor["description"].as_str().unwrap();
+        if name == "project_build" {
+            assert_eq!(description, "Build Rust/Go/Python/Node via Runner argv; no installs. Rust/Go: packages/all_packages, locked. Rust dependency_resolution_policy=offline adds Cargo --offline (not OS sandbox); others reject. Python: pyproject.toml, -m build --no-isolation; no scope. Node: declared script; no scope/policy; hooks may write/network. Artifacts don't prove correctness. Pending: same durable Job; observe_jobs, never retry/redispatch.");
+            assert!(!description.contains("artifact contract"));
+        }
         for phrase in phrases {
             assert!(description.contains(phrase), "{name}: {description}");
         }
@@ -2631,6 +2661,39 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
         marginal_cost
     }
 
+    // Only the new Rust project_build offline input receives a marginal budget;
+    // canonical/full ToolSpecs and unrelated model-facing tools keep their
+    // previous ceilings. Count its compact schema key, value and delimiter.
+    fn project_build_offline_marginal_allowance(model_tools: &[Value]) -> usize {
+        let Some(tool) = model_tools
+            .iter()
+            .find(|tool| tool["name"] == "project_build")
+        else {
+            return 0;
+        };
+        assert!(
+            tool["description"].as_str().is_some_and(
+                |description| description.contains("dependency_resolution_policy=offline")
+            ),
+            "compact project_build discovery must advertise offline dependency resolution"
+        );
+        let Some(policy) = tool.pointer("/inputSchema/properties/dependency_resolution_policy")
+        else {
+            return 0;
+        };
+        let marginal_cost = "\"dependency_resolution_policy\":".len()
+            + serde_json::to_vec(policy).unwrap().len()
+            + 1;
+        assert!(
+            marginal_cost <= 256,
+            "project_build offline field cost {marginal_cost} bytes exceeds 256 byte allowance ceiling"
+        );
+        marginal_cost
+    }
+
+    // The explicit Node lint action adds a closed schema variant and provenance.
+    // Reserve a narrow 512-byte increment; retain the existing base ceilings.
+    const NODE_LINT_SCHEMA_ALLOWANCE_BYTES: usize = 512;
     for (label, auth, model_max_bytes) in [
         ("anonymous", None, 75_000),
         ("scoped", Some(&scoped), 78_000),
@@ -2687,10 +2750,17 @@ async fn mcp_tools_list_stateless_serialized_size_budget() {
                 } else {
                     0
                 };
+                let project_build_offline_marginal_byte_budget = if compact {
+                    project_build_offline_marginal_allowance(model_tools)
+                } else {
+                    0
+                };
                 let model_byte_budget = model_max_bytes
+                    + NODE_LINT_SCHEMA_ALLOWANCE_BYTES
                     + if app_enabled { 4_000 } else { 0 }
                     + experimental_code_mode_byte_budget
-                    + project_format_marginal_byte_budget;
+                    + project_format_marginal_byte_budget
+                    + project_build_offline_marginal_byte_budget;
                 // Raw transport includes private App bridge descriptors and Host
                 // presentation metadata. Keep a coarse overhead ceiling so transport
                 // cannot grow silently, but do not force model guidance to pay for it.

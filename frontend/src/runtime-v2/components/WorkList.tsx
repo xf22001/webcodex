@@ -1,12 +1,10 @@
-import { ActionIcon, TextInput } from "@mantine/core";
+import { ActionIcon, Select, TextInput } from "@mantine/core";
 import { ArrowUpRight, Search } from "lucide-react";
-import { motion } from "motion/react";
 import { useMemo, useState } from "react";
 import { relativeTime } from "../model/format.js";
 import type { WorkBucket, WorkItem } from "../model/work.js";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
-import { WorkSurfaceSwitch, type WorkSurface } from "./GoalWorkbench.js";
 
 const BUCKET_ORDER: WorkBucket[] = ["running", "attention", "active", "recent"];
 export const BUCKET_LABEL: Record<WorkBucket, string> = {
@@ -23,8 +21,6 @@ type Props = {
   locating: boolean;
   language: RuntimeLanguage;
   inventoryIncomplete: boolean;
-  surface: WorkSurface;
-  onSurfaceChange: (surface: WorkSurface) => void;
   onSearch: (value: string) => void;
   onLocateExact: () => void;
   onSelect: (item: WorkItem) => void;
@@ -37,8 +33,6 @@ export function WorkList({
   locating,
   language,
   inventoryIncomplete,
-  surface,
-  onSurfaceChange,
   onSearch,
   onLocateExact,
   onSelect,
@@ -67,15 +61,13 @@ export function WorkList({
     <aside className="work-list-panel">
       <div className="work-list-header">
         <div><span className="eyebrow">{t("Workspace")}</span><h1>{t("Work")}</h1></div>
-        <WorkSurfaceSwitch surface={surface} onSurfaceChange={onSurfaceChange} language={language} />
       </div>
       <div className="work-list-filters">
         <label className="activity-project-filter">
           <span>{t("Project filter")}</span>
-          <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
-            <option value="">{t("All Projects")}</option>
-            {projectOptions.map(([id, name]) => <option key={id} value={id}>{name} · {id}</option>)}
-          </select>
+          <Select aria-label={t("Project filter")} value={projectFilter} allowDeselect={false}
+            onChange={(value) => setProjectFilter(value ?? "")}
+            data={[{ value: "", label: t("All Projects") }, ...projectOptions.map(([id, name]) => ({ value: id, label: `${name} · ${id}` }))]} />
         </label>
         <TextInput className="work-search-field" type="search" leftSection={<Search size={15} />}
           aria-label={t("Search Sessions")}
@@ -103,11 +95,11 @@ export function WorkList({
                 <button
                   className={"work-row" + (selectedKey === item.key ? " selected" : "")}
                   type="button"
+                  aria-pressed={selectedKey === item.key}
                   onClick={() => onSelect(item)}
                   data-testid={"work-row-" + item.sessionId}
                   key={item.key}
                 >
-                  {selectedKey === item.key && <motion.span className="ui-selection-rail" layoutId="runtime-session-rail" aria-hidden="true" />}
                   <span className={"work-state-dot " + item.bucket} />
                   <span className="work-row-body">
                     <strong>{item.title}</strong>

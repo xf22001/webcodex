@@ -40,11 +40,13 @@ impl Workflow {
                 .session_id;
         let agent = runtime.create_agent_identity(
             Some(&auth),
-            "workflow-agent".into(),
-            "Workflow Agent".into(),
-            None,
-            Vec::new(),
-            "workflow-agent".into(),
+            webcodex_tool_contracts::CreateAgentIdentityInput {
+                handle: "workflow-agent".into(),
+                display_name: "Workflow Agent".into(),
+                description: None,
+                specialty_labels: Vec::new(),
+                idempotency_key: "workflow-agent".into(),
+            },
         );
         assert!(agent.success, "{:?}", agent.output);
         let agent_id = agent.output["agent"]["agent_id"]
@@ -253,10 +255,12 @@ async fn goal_continuity_carrier_readiness_tracks_exact_endpoint_generation() {
 
     let first = fixture.runtime.attach_agent_endpoint(
         Some(&fixture.auth),
-        fixture.agent_id.clone(),
-        "ChatGPT".into(),
-        Some("goal-continuity-view-1".into()),
-        "goal-continuity-endpoint-1".into(),
+        webcodex_tool_contracts::RotateAgentContinuationEndpointInput {
+            agent_id: fixture.agent_id.clone(),
+            host: "ChatGPT".into(),
+            client_attachment_id: Some("goal-continuity-view-1".into()),
+            idempotency_key: "goal-continuity-endpoint-1".into(),
+        },
     );
     assert!(first.success, "{:?}", first.output);
     let first_endpoint = first.output["endpoint"]["endpoint_id"]
@@ -291,10 +295,12 @@ async fn goal_continuity_carrier_readiness_tracks_exact_endpoint_generation() {
 
     let second = fixture.runtime.attach_agent_endpoint(
         Some(&fixture.auth),
-        fixture.agent_id.clone(),
-        "ChatGPT".into(),
-        Some("goal-continuity-view-2".into()),
-        "goal-continuity-endpoint-2".into(),
+        webcodex_tool_contracts::RotateAgentContinuationEndpointInput {
+            agent_id: fixture.agent_id.clone(),
+            host: "ChatGPT".into(),
+            client_attachment_id: Some("goal-continuity-view-2".into()),
+            idempotency_key: "goal-continuity-endpoint-2".into(),
+        },
     );
     assert!(second.success, "{:?}", second.output);
     let second_endpoint = second.output["endpoint"]["endpoint_id"]
@@ -519,11 +525,13 @@ async fn goal_continuity_does_not_retarget_an_existing_stall_wake_after_controll
 
     let replacement = fixture.runtime.create_agent_identity(
         Some(&fixture.auth),
-        "replacement-controller".into(),
-        "Replacement Controller".into(),
-        None,
-        Vec::new(),
-        "replacement-controller-agent".into(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "replacement-controller".into(),
+            display_name: "Replacement Controller".into(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "replacement-controller-agent".into(),
+        },
     );
     assert!(replacement.success, "{:?}", replacement.output);
     let replacement_id = replacement.output["agent"]["agent_id"]
@@ -534,6 +542,7 @@ async fn goal_continuity_does_not_retarget_an_existing_stall_wake_after_controll
         Some(&fixture.auth),
         fixture.goal_id.clone(),
         2,
+        None,
         None,
         None,
         Some(replacement_id),
@@ -670,10 +679,12 @@ async fn goal_continuity_ignores_unrelated_task_wait_and_other_goal_wakes_on_sam
 
     let endpoint = fixture.runtime.attach_agent_endpoint(
         Some(&fixture.auth),
-        fixture.agent_id.clone(),
-        "ChatGPT".into(),
-        Some("unrelated-wait-view".into()),
-        "unrelated-wait-endpoint".into(),
+        webcodex_tool_contracts::RotateAgentContinuationEndpointInput {
+            agent_id: fixture.agent_id.clone(),
+            host: "ChatGPT".into(),
+            client_attachment_id: Some("unrelated-wait-view".into()),
+            idempotency_key: "unrelated-wait-endpoint".into(),
+        },
     );
     assert!(endpoint.success, "{:?}", endpoint.output);
     let endpoint_id = endpoint.output["endpoint"]["endpoint_id"]
@@ -685,11 +696,13 @@ async fn goal_continuity_ignores_unrelated_task_wait_and_other_goal_wakes_on_sam
         .unwrap();
     let worker = fixture.runtime.create_agent_identity(
         Some(&fixture.auth),
-        "unrelated-wait-worker".into(),
-        "Unrelated Wait Worker".into(),
-        None,
-        Vec::new(),
-        "unrelated-wait-worker-agent".into(),
+        webcodex_tool_contracts::CreateAgentIdentityInput {
+            handle: "unrelated-wait-worker".into(),
+            display_name: "Unrelated Wait Worker".into(),
+            description: None,
+            specialty_labels: Vec::new(),
+            idempotency_key: "unrelated-wait-worker-agent".into(),
+        },
     );
     assert!(worker.success, "{:?}", worker.output);
     let worker_id = worker.output["agent"]["agent_id"]
@@ -881,6 +894,23 @@ async fn goal_workflow_unobserved_or_stale_card_never_wakes_even_when_attention_
     assert_eq!(goal_activity(&state)["state"], "attention_needed");
     assert_no_attention(&fixture.recheck(now).await);
     fixture.poll(now - crate::db::GOAL_CARD_OBSERVATION_LEASE_MS - 1);
+    let observations = std::sync::Mutex::new(Vec::new());
+    assert!(fixture
+        .db
+        .record_goal_workflow_stalled_diagnosed(
+            &fixture.principal(),
+            &fixture.candidate(T0),
+            || now,
+            |reason, age, margin| observations.lock().unwrap().push((reason, age, margin)),
+        )
+        .unwrap()
+        .is_none());
+    let observations = observations.into_inner().unwrap();
+    assert!(observations.contains(&("observation_checked", Some(75_001), Some(-1))));
+    assert!(observations
+        .iter()
+        .any(|(reason, _, _)| *reason == "observation_ineligible"));
+
     assert_no_attention(&fixture.recheck(now).await);
     // Unrelated transport activity is not a live Goal Plan View.
     record_goal_window_event(
@@ -1128,10 +1158,12 @@ async fn goal_workflow_revoked_correlated_project_is_partial_even_with_older_wor
     let fixture = Workflow::new(true).await;
     let endpoint = fixture.runtime.attach_agent_endpoint(
         Some(&fixture.auth),
-        fixture.agent_id.clone(),
-        "ChatGPT".into(),
-        Some("goal-partial-readiness-view".into()),
-        "goal-partial-readiness-endpoint".into(),
+        webcodex_tool_contracts::RotateAgentContinuationEndpointInput {
+            agent_id: fixture.agent_id.clone(),
+            host: "ChatGPT".into(),
+            client_attachment_id: Some("goal-partial-readiness-view".into()),
+            idempotency_key: "goal-partial-readiness-endpoint".into(),
+        },
     );
     assert!(endpoint.success, "{:?}", endpoint.output);
     let bound = fixture.runtime.agent_continuation_bind_for_window(
@@ -1720,11 +1752,13 @@ async fn goal_workflow_same_durable_agent_is_worker_and_controller_and_stall_use
 
         let replacement = fixture.runtime.create_agent_identity(
             Some(&fixture.auth),
-            "post-resume-replacement".into(),
-            "Post Resume Replacement".into(),
-            None,
-            Vec::new(),
-            format!("post-resume-replacement-{delivery_unknown}"),
+            webcodex_tool_contracts::CreateAgentIdentityInput {
+                handle: "post-resume-replacement".into(),
+                display_name: "Post Resume Replacement".into(),
+                description: None,
+                specialty_labels: Vec::new(),
+                idempotency_key: format!("post-resume-replacement-{delivery_unknown}"),
+            },
         );
         assert!(replacement.success, "{:?}", replacement.output);
         let replacement_id = replacement.output["agent"]["agent_id"]
@@ -1735,6 +1769,7 @@ async fn goal_workflow_same_durable_agent_is_worker_and_controller_and_stall_use
             Some(&fixture.auth),
             fixture.goal_id.clone(),
             2,
+            None,
             None,
             None,
             Some(replacement_id),
@@ -2378,4 +2413,134 @@ async fn goal_workflow_maximum_encoded_plan_remains_within_card_projection_budge
     assert!(projection.success);
     assert!(projection.output["goal_plan"].to_string().len() <= 40_960);
     assert!(!projection.output.to_string().contains("PRIVATE_OBJECTIVE"));
+}
+
+#[tokio::test]
+async fn revise_goal_plan_dispatch_updates_card_handoff_and_closeout_without_execution_authority() {
+    let fixture = Workflow::new(true).await;
+    let progressed = fixture.runtime.checkpoint_goal(
+        Some(&fixture.auth),
+        fixture.goal_id.clone(),
+        2,
+        GoalCheckpoint {
+            completed_step_ids: vec!["inspect".into()],
+            current_step_id: Some("implement".into()),
+            summary: "Inspection changes remaining work".into(),
+        },
+        "revision-progress".into(),
+    );
+    assert!(progressed.success, "{:?}", progressed.output);
+    let arguments = json!({
+        "goal_id": fixture.goal_id, "expected_revision": 3, "reason": "Remove obsolete implementation and add review",
+        "steps": [{"id": "inspect", "title": "inspect"}, {"id": "validate", "title": "Revised validation"}, {"id": "new", "title": "New review"}],
+        "idempotency_key": "revise-dispatch"
+    });
+    let call = ToolCall::from_tool_name("revise_goal_plan", arguments.clone()).unwrap();
+    assert_eq!(call.tool_name(), "revise_goal_plan");
+    let revised = fixture
+        .runtime
+        .dispatch_with_auth(call, Some(&fixture.auth))
+        .await;
+    assert!(revised.success, "{:?}", revised.output);
+    assert_eq!(revised.output["goal"]["summary"]["revision"], 4);
+    assert_eq!(
+        revised.output["goal"]["plan_history"]["revisions"][0]["plan"],
+        progressed.output["goal"]["plan"]
+    );
+    let card = fixture
+        .runtime
+        .present_goal_plan(Some(&fixture.auth), fixture.goal_id.clone())
+        .await;
+    assert!(card.success, "{:?}", card.output);
+    assert_eq!(
+        card.output["goal_plan"]["steps"],
+        revised.output["goal"]["plan"]["steps"]
+    );
+    assert!(card.output["goal_plan"]["current_step_id"].is_null());
+    assert_eq!(card.output["goal_plan"]["completed_step_count"], 1);
+    assert_eq!(card.output["goal_plan"]["total_step_count"], 3);
+    let recovery = fixture
+        .runtime
+        .recovery_goal_context_for_session(Some(&fixture.auth), &fixture.session_id)
+        .unwrap();
+    assert_eq!(recovery["goal"]["revision"], 4);
+    assert_eq!(
+        recovery["goal"]["plan"]["steps"]["items"][1]["title"],
+        "Revised validation"
+    );
+    let follow_up = fixture
+        .runtime
+        .active_goal_context_for_session(Some(&fixture.auth), &fixture.session_id)
+        .unwrap();
+    assert_eq!(follow_up["goals"][0]["revision"], 4);
+    assert_eq!(follow_up["goals"][0]["incomplete_step_count"], 2);
+    assert!(follow_up["goals"][0]["current_step"].is_null());
+    let replay = fixture
+        .runtime
+        .dispatch_with_auth(
+            ToolCall::from_tool_name("revise_goal_plan", arguments.clone()).unwrap(),
+            Some(&fixture.auth),
+        )
+        .await;
+    assert!(replay.success && replay.output["replayed"] == true);
+    assert_eq!(replay.output["goal"], revised.output["goal"]);
+    let foreign = goal_activity_auth("foreign-plan-revision");
+    let hidden = fixture
+        .runtime
+        .dispatch_with_auth(
+            ToolCall::from_tool_name("revise_goal_plan", arguments.clone()).unwrap(),
+            Some(&foreign),
+        )
+        .await;
+    assert!(!hidden.success);
+    assert_eq!(hidden.output["error_kind"], "goal_not_found");
+    let mut read_only = fixture.auth.clone();
+    read_only
+        .scopes
+        .retain(|scope| scope != SCOPE_COMMUNICATION_MANAGE);
+    // Scope admission belongs to the canonical kernel, before concrete dispatch.
+    use crate::tool_runtime::kernel::{
+        HostFileImportTrust, ToolCallContext, ToolCallErrorStatus, ToolCallRequest, ToolTransport,
+    };
+    let forbidden = fixture
+        .runtime
+        .call_tool_with_context(
+            ToolCallRequest {
+                tool_name: "revise_goal_plan".into(),
+                arguments: arguments.clone(),
+            },
+            ToolCallContext {
+                transport: ToolTransport::Mcp,
+                session_id: None,
+                auth: Some(&read_only),
+                window: None,
+                record_oauth_scope_denials: false,
+                host_file_import_trust: HostFileImportTrust::Untrusted,
+            },
+        )
+        .await;
+    assert!(!forbidden.success);
+    assert!(forbidden.result.is_none());
+    assert!(matches!(
+        forbidden.error_status,
+        Some(ToolCallErrorStatus::InsufficientScope {
+            required_scope: Some(SCOPE_COMMUNICATION_MANAGE),
+            ..
+        })
+    ));
+    assert_eq!(
+        fixture
+            .db
+            .read_goal(
+                &communication_principal(Some(&fixture.auth)).unwrap(),
+                &fixture.goal_id
+            )
+            .unwrap()
+            .summary
+            .revision,
+        4
+    );
+    let mut injected_status = arguments;
+    injected_status["steps"][1]["status"] = "completed".into();
+    assert!(ToolCall::from_tool_name("revise_goal_plan", injected_status).is_err());
 }

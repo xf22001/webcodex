@@ -136,6 +136,39 @@ fn computer_observe_schema_is_closed_read_only_action_union() {
 }
 
 #[test]
+fn computer_element_state_discovery_guides_current_semantic_action_selection() {
+    let specs = registered_tool_specs();
+    for name in ["observe_computer", "control_computer"] {
+        let spec = spec_named(&specs, name);
+        for term in ["element_state", "can_press", "can_focus", "can_input_text"] {
+            assert!(spec.description.contains(term), "{name} omits {term}");
+        }
+    }
+
+    let observe = spec_named(&specs, "observe_computer");
+    let state = action_branch(&observe.input_schema, "element_state");
+    let description = state["description"].as_str().expect("state guidance");
+    for term in [
+        "can_press",
+        "can_focus",
+        "can_input_text",
+        "observation_generation",
+        "stale",
+    ] {
+        assert!(description.contains(term), "state schema omits {term}");
+    }
+    assert_eq!(state["properties"].as_object().unwrap().len(), 4);
+    let input = json!({
+        "action": "element_state", "client_id": "observed-client",
+        "surface_id": "observed-surface", "element_id": "observed-element"
+    });
+    test_support::validate_schema_instance(&input, &observe.input_schema).unwrap();
+    let mut unsupported = input;
+    unsupported["refresh"] = json!(true);
+    assert!(test_support::validate_schema_instance(&unsupported, &observe.input_schema).is_err());
+}
+
+#[test]
 fn computer_control_schema_is_closed_action_union() {
     let specs = registered_tool_specs();
     let spec = spec_named(&specs, "control_computer");
@@ -198,6 +231,117 @@ fn computer_control_schema_is_closed_action_union() {
             test_support::validate_schema_instance(&invalid, &spec.input_schema).is_err(),
             "{invalid}"
         );
+    }
+}
+
+#[test]
+fn computer_key_schema_discloses_closed_vocabulary_and_modifier_constraints() {
+    use webcodex_core::computer_input_contract::{
+        COMPUTER_KEY_INPUT_KEYS, COMPUTER_KEY_INPUT_MODIFIERS,
+    };
+
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "control_computer");
+    let key = action_properties(&spec.input_schema, "key");
+    assert_eq!(key["key"]["enum"], json!(COMPUTER_KEY_INPUT_KEYS));
+    let modifiers = key["modifiers"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["type"] == "array")
+        .unwrap();
+    assert_eq!(
+        modifiers["items"]["enum"],
+        json!(COMPUTER_KEY_INPUT_MODIFIERS)
+    );
+    assert_eq!(modifiers["maxItems"], COMPUTER_KEY_INPUT_MODIFIERS.len());
+    assert_eq!(modifiers["uniqueItems"], true);
+
+    for name in COMPUTER_KEY_INPUT_KEYS {
+        for modifiers in [
+            None,
+            Some(Value::Null),
+            Some(json!([])),
+            Some(json!(COMPUTER_KEY_INPUT_MODIFIERS)),
+        ] {
+            let mut input = json!({"action":"key","client_id":"special","surface_id":"surface_test","key":name});
+            if let Some(modifiers) = modifiers {
+                input["modifiers"] = modifiers;
+            }
+            test_support::validate_schema_instance(&input, &spec.input_schema).unwrap();
+        }
+    }
+    for (name, modifiers) in [
+        ("p", json!([])),
+        ("Ctrl+P", json!([])),
+        ("Enter", json!([])),
+        ("tab", json!(["ctrl"])),
+        ("tab", json!(["alt"])),
+        ("tab", json!(["Shift"])),
+        ("tab", json!("shift")),
+        ("tab", json!(true)),
+        ("tab", json!(0)),
+        ("tab", json!({})),
+        ("tab", json!([null])),
+        ("tab", json!([1])),
+        ("tab", json!(["shift", "shift"])),
+        (
+            "tab",
+            json!(["shift", "control", "option", "command", "shift"]),
+        ),
+    ] {
+        let input = json!({"action":"key","client_id":"special","surface_id":"surface_test","key":name,"modifiers":modifiers});
+        assert!(
+            test_support::validate_schema_instance(&input, &spec.input_schema).is_err(),
+            "{input}"
+        );
+    }
+    for text in [
+        "Ctrl+P",
+        "Shift+Tab",
+        "Windows",
+        "macOS",
+        "option+Tab",
+        "control+Escape",
+    ] {
+        assert!(
+            spec.description.contains(text),
+            "missing model guidance: {text}"
+        );
+    }
+}
+
+#[test]
+fn computer_key_wire_keeps_optional_modifiers_and_canonical_strings() {
+    let schema = crate::input_schema_for_tool("control_computer");
+    for modifiers in [
+        None,
+        Some(Value::Null),
+        Some(json!([])),
+        Some(json!(["shift"])),
+    ] {
+        let mut input =
+            json!({"action":"key","client_id":"special","surface_id":"surface_test","key":"tab"});
+        if let Some(modifiers) = modifiers {
+            input["modifiers"] = modifiers;
+        }
+        let expected_modifiers = input
+            .get("modifiers")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or(json!([]));
+        test_support::validate_schema_instance(&input, &schema).unwrap();
+        let call = ToolCall::from_tool_name("control_computer", input).unwrap();
+        let ToolCall::ComputerControl(crate::tool_call::ComputerControlToolCall::Key {
+            key,
+            modifiers,
+            ..
+        }) = call
+        else {
+            panic!("expected canonical Computer key input");
+        };
+        assert_eq!(key, "tab");
+        assert_eq!(json!(modifiers.unwrap_or_default()), expected_modifiers);
     }
 }
 

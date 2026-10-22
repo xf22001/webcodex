@@ -63,6 +63,7 @@ pub(super) struct PendingJobUpdateDelivery {
     pub(super) validation_progress: Option<ShellJobValidationProgress>,
     pub(super) test_count_evidence: Option<ShellJobTestCountEvidence>,
     pub(super) format_mutation: Option<webcodex_core::project_format::ProjectFormatMutationReport>,
+    pub(super) build_artifacts: Option<Vec<webcodex_core::project_build::ProjectBuildArtifact>>,
     pub(super) activity: Option<ShellJobActivity>,
     pub(super) finished: bool,
     /// Sequence-only liveness marker. Delivery must not project the current
@@ -84,6 +85,7 @@ impl PendingJobUpdateDelivery {
             validation_progress: update.validation_progress.clone(),
             test_count_evidence: update.test_count_evidence.clone(),
             format_mutation: update.format_mutation,
+            build_artifacts: update.build_artifacts.clone(),
             activity: update.activity,
             finished: update.finished,
             liveness_only: false,
@@ -101,6 +103,7 @@ impl PendingJobUpdateDelivery {
             validation_progress: job.snapshot.validation_progress.clone(),
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             finished: false,
             liveness_only: true,
@@ -241,6 +244,7 @@ pub(super) fn job_update_from_delivery(
             validation_progress: pending.validation_progress.clone(),
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             finished: false,
         };
@@ -257,6 +261,7 @@ pub(super) fn job_update_from_delivery(
     update.validation_progress = pending.validation_progress.clone();
     update.test_count_evidence = pending.test_count_evidence.clone();
     update.format_mutation = pending.format_mutation;
+    update.build_artifacts = pending.build_artifacts.clone();
     update.activity = pending.activity;
     update.finished = pending.finished;
     update
@@ -452,48 +457,72 @@ pub(super) fn spawn_job_heartbeat_worker_with_interval(
     interval: Duration,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let Some(signal) = signal.upgrade() else {
-            return;
-        };
-        let mut observed_generation = signal.generation();
-        let mut next_heartbeat = Instant::now() + interval;
-        loop {
-            let remaining = next_heartbeat.saturating_duration_since(Instant::now());
-            let Some(next) = signal.wait_for_change(observed_generation, remaining) else {
-                break;
-            };
-            observed_generation = next;
-            if shutting_down
-                .upgrade()
-                .is_none_or(|flag| flag.load(Ordering::SeqCst))
-            {
-                break;
-            }
-            if Instant::now() < next_heartbeat {
-                continue;
-            }
-
-            let Some(jobs_map) = jobs.upgrade() else {
-                break;
-            };
-            let Some(pending_map) = pending_job_updates.upgrade() else {
-                break;
-            };
-            let Some(delivery_order) = job_update_delivery_order.upgrade() else {
-                break;
-            };
-            let active_jobs =
-                queue_job_heartbeat_batch(&jobs_map, &pending_map, &delivery_order, &signal);
-            next_heartbeat = Instant::now() + interval;
-            if active_jobs > 0 {
-                tracing::debug!(
-                    active_jobs,
-                    interval_secs = interval.as_secs(),
-                    "runner job heartbeat batch queued"
-                );
-            }
-        }
+        run_job_heartbeat_worker(
+            jobs,
+            pending_job_updates,
+            job_update_delivery_order,
+            shutting_down,
+            signal,
+            interval,
+            Instant::now,
+            JobUpdateDeliverySignal::wait_for_change,
+        );
     })
+}
+
+// Clock and wait injection keep cadence assertions independent of OS scheduling;
+// the spawned worker retains its native Instant/Condvar timing.
+pub(super) fn run_job_heartbeat_worker(
+    jobs: Weak<Mutex<HashMap<String, RunningJob>>>,
+    pending_job_updates: Weak<Mutex<HashMap<String, JobUpdateDeliveryQueue>>>,
+    job_update_delivery_order: Weak<Mutex<()>>,
+    shutting_down: Weak<AtomicBool>,
+    signal: Weak<JobUpdateDeliverySignal>,
+    interval: Duration,
+    now: impl Fn() -> Instant,
+    mut wait_for_change: impl FnMut(&JobUpdateDeliverySignal, u64, Duration) -> Option<u64>,
+) {
+    let Some(signal) = signal.upgrade() else {
+        return;
+    };
+    let mut observed_generation = signal.generation();
+    let mut next_heartbeat = now() + interval;
+    loop {
+        let remaining = next_heartbeat.saturating_duration_since(now());
+        let Some(next) = wait_for_change(&signal, observed_generation, remaining) else {
+            break;
+        };
+        observed_generation = next;
+        if shutting_down
+            .upgrade()
+            .is_none_or(|flag| flag.load(Ordering::SeqCst))
+        {
+            break;
+        }
+        if now() < next_heartbeat {
+            continue;
+        }
+
+        let Some(jobs_map) = jobs.upgrade() else {
+            break;
+        };
+        let Some(pending_map) = pending_job_updates.upgrade() else {
+            break;
+        };
+        let Some(delivery_order) = job_update_delivery_order.upgrade() else {
+            break;
+        };
+        let active_jobs =
+            queue_job_heartbeat_batch(&jobs_map, &pending_map, &delivery_order, &signal);
+        next_heartbeat = now() + interval;
+        if active_jobs > 0 {
+            tracing::debug!(
+                active_jobs,
+                interval_secs = interval.as_secs(),
+                "runner job heartbeat batch queued"
+            );
+        }
+    }
 }
 impl JobManager {
     pub(crate) fn install_sink(&self, sink: RunnerSink) {
@@ -577,6 +606,7 @@ impl JobManager {
                         validation_progress: snapshot.validation_progress.clone(),
                         test_count_evidence: snapshot.test_count_evidence.clone(),
                         format_mutation: snapshot.format_mutation,
+                        build_artifacts: snapshot.build_artifacts.clone(),
                         activity: snapshot.activity,
                         finished: runner_job_is_terminal(&snapshot.status),
                         liveness_only: false,

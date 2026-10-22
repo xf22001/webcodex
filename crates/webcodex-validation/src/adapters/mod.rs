@@ -5,7 +5,9 @@ mod node;
 mod python;
 mod rust;
 
-use webcodex_core::project_validation::{ProjectDependencyMode, ProjectDependencyPolicy};
+use webcodex_core::project_validation::{
+    ProjectDependencyMode, ProjectDependencyPolicy, ProjectDependencyResolutionPolicy,
+};
 use webcodex_core::runner_protocol::ShellJobValidationStep;
 use webcodex_core::shell_quote::shell_escape_simple;
 use webcodex_core::validation_evidence::ValidationDiagnostics;
@@ -40,6 +42,7 @@ pub struct ValidationCommandOptions {
     /// reject this Go-specific option rather than silently ignoring it.
     pub go_packages: Option<Vec<String>>,
     pub dependency_mode: Option<ProjectDependencyMode>,
+    pub dependency_resolution_policy: Option<ProjectDependencyResolutionPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +55,7 @@ pub struct CargoCheckOptions {
     pub packages: Option<Vec<String>>,
     pub all_packages: bool,
     pub dependency_mode: Option<ProjectDependencyMode>,
+    pub dependency_resolution_policy: Option<ProjectDependencyResolutionPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +71,7 @@ pub struct CargoTestOptions {
     pub all_packages: bool,
     pub no_run: Option<bool>,
     pub dependency_mode: Option<ProjectDependencyMode>,
+    pub dependency_resolution_policy: Option<ProjectDependencyResolutionPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,6 +93,7 @@ pub struct GoTestOptions {
 pub enum CargoReadOnlyValidationOperation {
     FormatCheck,
     Check(CargoCheckOptions),
+    Clippy(CargoCheckOptions),
     Test(CargoTestOptions),
 }
 
@@ -160,7 +166,8 @@ impl ReadOnlyValidationOperation {
             | Self::Cargo(CargoReadOnlyValidationOperation::FormatCheck) => {
                 return Err("dependency_policy_unsupported")
             }
-            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => {
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options))
+            | Self::Cargo(CargoReadOnlyValidationOperation::Clippy(options)) => {
                 options.dependency_mode = Some(policy.mode);
             }
             Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => {
@@ -176,6 +183,37 @@ impl ReadOnlyValidationOperation {
         Ok(self)
     }
 
+    pub fn with_dependency_resolution_policy(
+        mut self,
+        policy: Option<ProjectDependencyResolutionPolicy>,
+    ) -> Result<Self, &'static str> {
+        let Some(policy) = policy else {
+            return Ok(self);
+        };
+        match &mut self {
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => {
+                options.dependency_resolution_policy = Some(policy)
+            }
+            Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => {
+                options.dependency_resolution_policy = Some(policy)
+            }
+            _ => return Err("dependency_resolution_policy_unsupported"),
+        }
+        Ok(self)
+    }
+
+    fn dependency_resolution_policy(&self) -> Option<ProjectDependencyResolutionPolicy> {
+        match self {
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => {
+                options.dependency_resolution_policy
+            }
+            Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => {
+                options.dependency_resolution_policy
+            }
+            _ => None,
+        }
+    }
+
     fn dependency_mode(&self) -> Option<ProjectDependencyMode> {
         match self {
             Self::Python(_)
@@ -184,7 +222,8 @@ impl ReadOnlyValidationOperation {
             | Self::NodeScriptCheck
             | Self::NodeNativeTest
             | Self::Cargo(CargoReadOnlyValidationOperation::FormatCheck) => None,
-            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => {
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options))
+            | Self::Cargo(CargoReadOnlyValidationOperation::Clippy(options)) => {
                 options.dependency_mode
             }
             Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => options.dependency_mode,
@@ -195,7 +234,10 @@ impl ReadOnlyValidationOperation {
 
     fn selects_all_packages(&self) -> bool {
         match self {
-            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => options.all_packages,
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options))
+            | Self::Cargo(CargoReadOnlyValidationOperation::Clippy(options)) => {
+                options.all_packages
+            }
             Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => options.all_packages,
             Self::Go(GoReadOnlyValidationOperation::Check(options)) => options.all_packages,
             Self::Go(GoReadOnlyValidationOperation::Test(options)) => options.all_packages,
@@ -240,6 +282,12 @@ impl ReadOnlyValidationOperation {
                 ValidationCompatibilityProfile {
                     tool_identity: "cargo_check",
                     validation_identity: ToolValidationIdentityKind::CargoCheck,
+                }
+            }
+            Self::Cargo(CargoReadOnlyValidationOperation::Clippy(_)) => {
+                ValidationCompatibilityProfile {
+                    tool_identity: "cargo_clippy",
+                    validation_identity: ToolValidationIdentityKind::CargoClippy,
                 }
             }
             Self::Cargo(CargoReadOnlyValidationOperation::Test(_)) => {
@@ -288,7 +336,8 @@ impl ReadOnlyValidationOperation {
                     check: true,
                     ..ValidationCommandOptions::default()
                 }),
-            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => {
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options))
+            | Self::Cargo(CargoReadOnlyValidationOperation::Clippy(options)) => {
                 adapter.build_readonly_plan(ValidationCommandOptions::from(options.clone()))
             }
             Self::Cargo(CargoReadOnlyValidationOperation::Test(options)) => {
@@ -319,7 +368,8 @@ impl ReadOnlyValidationOperation {
                 "cwd": cwd,
                 "check": true,
             }),
-            Self::Cargo(CargoReadOnlyValidationOperation::Check(options)) => serde_json::json!({
+            Self::Cargo(CargoReadOnlyValidationOperation::Check(options))
+            | Self::Cargo(CargoReadOnlyValidationOperation::Clippy(options)) => serde_json::json!({
                 "cwd": cwd,
                 "all_targets": options.all_targets,
                 "all_features": options.all_features,
@@ -362,6 +412,11 @@ impl ReadOnlyValidationOperation {
                     webcodex_core::validation_identity::StructuredValidationExecutionContext::ProjectDependencyLockedV1,
                 )?;
         }
+        if self.dependency_resolution_policy() == Some(ProjectDependencyResolutionPolicy::Offline) {
+            identity = webcodex_core::validation_identity::contextualize_structured_validation_target_identity(
+                &identity, webcodex_core::validation_identity::StructuredValidationExecutionContext::ProjectDependencyOfflineV1,
+            )?;
+        }
         if matches!(self, Self::Cargo(_)) && self.selects_all_packages() {
             identity =
                 webcodex_core::validation_identity::contextualize_structured_validation_target_identity(
@@ -398,6 +453,14 @@ pub fn project_validation_operation(
                 ..Default::default()
             }),
         )),
+        ("rust", Lint) => Ok(ReadOnlyValidationOperation::Cargo(
+            CargoReadOnlyValidationOperation::Clippy(CargoCheckOptions {
+                packages,
+                all_packages,
+                ..Default::default()
+            }),
+        )),
+        (_, Lint) => Err("validation_action_unsupported"),
         ("rust", Test) => Ok(ReadOnlyValidationOperation::Cargo(
             CargoReadOnlyValidationOperation::Test(CargoTestOptions {
                 packages,
@@ -445,6 +508,7 @@ impl From<CargoCheckOptions> for ValidationCommandOptions {
             cargo_packages: options.packages,
             all_packages: options.all_packages,
             dependency_mode: options.dependency_mode,
+            dependency_resolution_policy: options.dependency_resolution_policy,
             ..Self::default()
         }
     }
@@ -464,6 +528,7 @@ impl From<CargoTestOptions> for ValidationCommandOptions {
             all_packages: options.all_packages,
             no_run: options.no_run,
             dependency_mode: options.dependency_mode,
+            dependency_resolution_policy: options.dependency_resolution_policy,
             ..Self::default()
         }
     }
@@ -619,6 +684,7 @@ pub fn validation_adapter_for_recipe(
     validation_adapter_for_tool(match (backend, action) {
         ("rust", Format) => "cargo_fmt",
         ("rust", Check) => "cargo_check",
+        ("rust", Lint) => "cargo_clippy",
         ("rust", Test) => "cargo_test",
         ("go", Check) => "go_vet",
         ("go", Test) => "go_test",
@@ -658,4 +724,22 @@ pub fn validation_evidence_profile_for_recipe(
         _ => validation_adapter_for_recipe(backend, action)
             .map(|adapter| adapter as &dyn ValidationEvidenceProfile),
     }
+}
+
+/// Project planning selects the framework from a closed Runner-owned step,
+/// never from an arbitrary adapter string supplied over the wire.
+pub fn validation_evidence_profile_for_project_step(
+    backend: &str,
+    action: crate::SemanticCheck,
+    step: &ShellJobValidationStep,
+) -> Option<&'static dyn ValidationEvidenceProfile> {
+    if backend == "node" && action == crate::SemanticCheck::Test {
+        return validation_evidence_profile_for_tool(match step.node_json_framework() {
+            Some("vitest") => "node:vitest:test",
+            Some("jest") => "node:jest:test",
+            None if step.is_structured_node_tap_test() => "node:tap:test",
+            _ => return None,
+        });
+    }
+    validation_evidence_profile_for_recipe(backend, action)
 }

@@ -1,6 +1,7 @@
 use super::access_control::{
-    assert_runner_access, job_visible_to_access as shell_job_visible_to_auth,
+    assert_runner_access_typed, job_visible_to_access as shell_job_visible_to_auth,
 };
+use super::execution_admission::ExecutionAdmissionError;
 use super::jobs::{
     append_log_limited, assert_active_instance_locked, command_preview, is_final_job_status,
     job_view, notify_job_heartbeat, notify_job_update, observe_job_terminal, parse_job_lifecycle,
@@ -9,17 +10,14 @@ use super::jobs::{
 use super::reconciliation::validate_stream_snapshot;
 use super::requests::{
     capability_upgrade_error, enqueue_pending_request_locked, next_request_id,
-    notify_runner_locked, remove_pending_request_locked,
+    notify_runner_locked, require_capabilities, retire_job_request_locked,
 };
 use super::state::{
     DetachedIdempotencyIntent, JobLifecycleState, JobObservationState, JobRecoveryPhase,
     JobRecoveryReason, JobRecoveryState, ShellJobRecord, ShellJobVisibility,
 };
 use super::validation::{validate_id, validate_run_request, validate_runner_instance_id};
-use super::{
-    now_ts, RunnerFeature, RunnerRegistry, DETACHED_IDEMPOTENCY_CONFLICT,
-    DETACHED_IDEMPOTENCY_RECOVERY_PREFIX,
-};
+use super::{now_ts, RunnerFeature, RunnerRegistry};
 use crate::DetachedInitiatorIdentity;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -375,6 +373,7 @@ struct JobPublicMutationSignature {
     validation_progress: Option<webcodex_core::runner_protocol::ShellJobValidationProgress>,
     test_count_evidence: Option<webcodex_core::runner_protocol::ShellJobTestCountEvidence>,
     format_mutation: Option<webcodex_core::project_format::ProjectFormatMutationReport>,
+    build_artifacts: Option<Vec<webcodex_core::project_build::ProjectBuildArtifact>>,
     activity: Option<ShellJobActivity>,
     recovered_after_server_restart: bool,
     reconciled_at: Option<i64>,
@@ -396,6 +395,7 @@ fn public_mutation_signature(job: &ShellJobRecord) -> JobPublicMutationSignature
         validation_progress: job.validation_progress.clone(),
         test_count_evidence: job.test_count_evidence.clone(),
         format_mutation: job.format_mutation,
+        build_artifacts: job.build_artifacts.clone(),
         activity: job.activity,
         recovered_after_server_restart: job.recovery.recovered_after_server_restart,
         reconciled_at: job.recovery.reconciled_at,
@@ -506,7 +506,11 @@ fn validate_test_count_evidence(
         return Ok(());
     };
     let cargo_test = job.validation.as_ref().is_some_and(|metadata| {
-        metadata.adapter == "cargo_test" && metadata.kind == "test" && metadata.no_run != Some(true)
+        matches!(
+            metadata.adapter.as_str(),
+            "cargo_test" | "node:vitest:test" | "node:jest:test"
+        ) && metadata.kind == "test"
+            && metadata.no_run != Some(true)
     });
     if !cargo_test || !lifecycle.is_terminal() || !update.finished || !evidence.is_valid() {
         return invalid_progress("test_count_evidence_invalid");
@@ -786,14 +790,35 @@ impl RunnerRegistry {
         access: Option<&crate::RunnerAccess>,
         detached_initiator: Option<&DetachedInitiatorIdentity>,
     ) -> Result<ShellJobInfo, String> {
+        self.start_job_with_metadata_for_access_typed(
+            body,
+            requested_by,
+            metadata,
+            access,
+            detached_initiator,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    pub async fn start_job_with_metadata_for_access_typed(
+        &self,
+        body: ShellJobOpRequest,
+        requested_by: String,
+        metadata: ShellJobStartMetadata,
+        access: Option<&crate::RunnerAccess>,
+        detached_initiator: Option<&DetachedInitiatorIdentity>,
+    ) -> Result<ShellJobInfo, ExecutionAdmissionError> {
         let client_id = body
             .client_id
             .clone()
-            .ok_or_else(|| "client_id is required for op=start".to_string())?;
+            .ok_or_else(|| "client_id is required for op=start".to_string())
+            .map_err(ExecutionAdmissionError::invalid_request)?;
         let command = body
             .command
             .clone()
-            .ok_or_else(|| "command is required for op=start".to_string())?;
+            .ok_or_else(|| "command is required for op=start".to_string())
+            .map_err(ExecutionAdmissionError::invalid_request)?;
         let timeout_secs = body.timeout_secs.unwrap_or(120);
         let normalized_job_cwd = body.cwd.clone().map(|cwd| cwd.trim().to_string());
         let request_id = next_request_id();
@@ -802,15 +827,13 @@ impl RunnerRegistry {
         // SSH resource. Only the inverse is invalid: remote execution without
         // the Workflow Session that owns the SSH context.
         if metadata.ssh_resource.is_some() && metadata.session_id.is_none() {
-            return Err(
+            return Err(ExecutionAdmissionError::invalid_request(
                 "ssh_session_required: an SSH resource requires a Workflow Session id".to_string(),
-            );
+            ));
         }
         if metadata.ssh_resource.is_some() && metadata.explicit_shell.is_some() {
-            return Err(
-                "explicit_shell_selection is local-only; named SSH shell selection must stay in the remote compatibility path"
-                    .to_string(),
-            );
+            return Err(ExecutionAdmissionError::invalid_request("explicit_shell_selection is local-only; named SSH shell selection must stay in the remote compatibility path"
+                    .to_string()));
         }
         if metadata.ssh_resource.as_deref().is_some_and(|resource| {
             resource.is_empty()
@@ -820,7 +843,9 @@ impl RunnerRegistry {
                     character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
                 })
         }) {
-            return Err("ssh_resource_invalid: resource name is invalid".to_string());
+            return Err(ExecutionAdmissionError::invalid_request(
+                "ssh_resource_invalid: resource name is invalid".to_string(),
+            ));
         }
         let validation_steps = metadata.validation_steps;
         let validation = metadata.validation;
@@ -832,7 +857,9 @@ impl RunnerRegistry {
         if login
             && (metadata.ssh_resource.is_some() || explicit_shell != Some(ExecutionShell::Bash))
         {
-            return Err("bash login mode requires local shell=bash".to_string());
+            return Err(ExecutionAdmissionError::invalid_request(
+                "bash login mode requires local shell=bash".to_string(),
+            ));
         }
         let structured_execution = metadata.structured_execution;
         let javascript_script_request = matches!(
@@ -860,6 +887,13 @@ impl RunnerRegistry {
             }) => Some(runner_instance_id.clone()),
             _ => None,
         };
+        let go_format_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::ProjectFormat { plan, .. })
+                if matches!(plan.profile, webcodex_core::project_format::ProjectFormatProfile::Go {})
+        );
+        let project_node_build_request = matches!(structured_execution.as_ref(), Some(StructuredJobExecution::ProjectBuild(plan)) if plan.provenance.backend == "node");
+        let python_build_request = matches!(&structured_execution, Some(StructuredJobExecution::ProjectBuild(plan)) if plan.provenance.backend == "python");
         let project_build_request = matches!(
             structured_execution.as_ref(),
             Some(StructuredJobExecution::ProjectBuild(_))
@@ -888,6 +922,14 @@ impl RunnerRegistry {
             .as_ref()
             .and_then(|metadata| metadata.project_validation.as_ref())
             .is_some_and(|provenance| provenance.request.dependency_policy.is_some());
+        let project_resolution_offline_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::ProjectBuild(plan))
+                if plan.provenance.request.dependency_resolution_policy.is_some()
+        ) || validation
+            .as_ref()
+            .and_then(|metadata| metadata.project_validation.as_ref())
+            .is_some_and(|provenance| provenance.request.dependency_resolution_policy.is_some());
         let project_go_single_module_request = matches!(
             structured_execution.as_ref(),
             Some(StructuredJobExecution::ProjectBuild(plan))
@@ -901,9 +943,9 @@ impl RunnerRegistry {
                 || !validation_steps.is_empty()
                 || validation.is_some())
         {
-            return Err(
+            return Err(ExecutionAdmissionError::invalid_request(
                 "explicit_shell_selection is valid only for raw shell Job starts".to_string(),
-            );
+            ));
         }
         let structured_stdin = metadata.stdin;
         if validation_steps.len() > 3
@@ -921,41 +963,50 @@ impl RunnerRegistry {
                 .len()
                 != validation_steps.len()
         {
-            return Err("invalid structured validation plan".to_string());
+            return Err(ExecutionAdmissionError::invalid_request(
+                "invalid structured validation plan".to_string(),
+            ));
         }
         if validation
             .as_ref()
             .is_some_and(|metadata| !metadata.is_valid() || metadata.steps != validation_steps)
         {
-            return Err("invalid structured validation metadata".to_string());
+            return Err(ExecutionAdmissionError::invalid_request(
+                "invalid structured validation metadata".to_string(),
+            ));
         }
         if structured_execution.is_some()
             && (!validation_steps.is_empty() || validation.is_some() || !command.is_empty())
         {
-            return Err(
+            return Err(ExecutionAdmissionError::invalid_request(
                 "typed structured Job starts require command=\"\" and no validation plan"
                     .to_string(),
-            );
+            ));
         }
         let (safe_command_preview, structured_metadata, job_kind) = match structured_execution
             .as_ref()
         {
             Some(StructuredJobExecution::ProjectFormat { plan, .. }) => {
-                plan.digest().map_err(str::to_string)?;
+                plan.digest()
+                    .map_err(str::to_string)
+                    .map_err(ExecutionAdmissionError::invalid_request)?;
                 if structured_stdin.is_some()
                     || metadata.ssh_resource.is_some()
                     || metadata.visibility != ShellJobVisibility::Public
                     || metadata.project_id.as_deref()
                         != Some(format!("agent:{client_id}:{}", plan.request.project_id).as_str())
                 {
-                    return Err("invalid project format Job authority".into());
+                    return Err(ExecutionAdmissionError::permission_denied(
+                        "invalid project format Job authority",
+                    ));
                 }
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     None,
                     timeout_secs,
                     webcodex_core::project_format::PROJECT_FORMAT_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 (
                     "project_format selected files".into(),
                     Some(webcodex_core::project_format::structured_metadata()),
@@ -964,15 +1015,19 @@ impl RunnerRegistry {
             }
             Some(StructuredJobExecution::ProjectBuild(plan)) => {
                 if !plan.is_valid() || structured_stdin.is_some() {
-                    return Err("invalid typed project build Job plan".to_string());
+                    return Err(ExecutionAdmissionError::invalid_request(
+                        "invalid typed project build Job plan".to_string(),
+                    ));
                 }
-                validate_process_argv(&plan.process)?;
+                validate_process_argv(&plan.process)
+                    .map_err(ExecutionAdmissionError::invalid_request)?;
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     None,
                     timeout_secs,
                     PROCESS_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview = process_preview(
                     &plan.process.executable,
                     plan.process.args.iter().map(String::as_str),
@@ -990,13 +1045,14 @@ impl RunnerRegistry {
                 (preview, Some(safe), "project_build")
             }
             Some(StructuredJobExecution::Process(process)) => {
-                validate_process_argv(process)?;
+                validate_process_argv(process).map_err(ExecutionAdmissionError::invalid_request)?;
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     structured_stdin.as_deref(),
                     timeout_secs,
                     PROCESS_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview =
                     process_preview(&process.executable, process.args.iter().map(String::as_str));
                 let safe = ShellJobStructuredExecutionMetadata {
@@ -1012,19 +1068,20 @@ impl RunnerRegistry {
                 (preview, Some(safe), "run_process")
             }
             Some(StructuredJobExecution::InteractiveProcess(process)) => {
-                validate_process_argv(process)?;
+                validate_process_argv(process).map_err(ExecutionAdmissionError::invalid_request)?;
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     None,
                     timeout_secs,
                     PROCESS_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 if structured_stdin.is_some()
                     || validation_identity.is_some()
                     || validation_tool.is_some()
                     || assertion_name.is_some()
                 {
-                    return Err("interactive process requires subsequent keyed input and is not validation evidence".into());
+                    return Err(ExecutionAdmissionError::invalid_request("interactive process requires subsequent keyed input and is not validation evidence"));
                 }
                 let safe = ShellJobStructuredExecutionMetadata {
                     execution_source: "run_process_interactive".into(),
@@ -1043,13 +1100,14 @@ impl RunnerRegistry {
                 )
             }
             Some(StructuredJobExecution::DetachedProcess(process)) => {
-                validate_process_argv(process)?;
+                validate_process_argv(process).map_err(ExecutionAdmissionError::invalid_request)?;
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     structured_stdin.as_deref(),
                     timeout_secs,
                     PROCESS_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview = format!("detached process ({} args)", process.args.len());
                 let safe = ShellJobStructuredExecutionMetadata {
                     execution_source: "run_detached_process".to_string(),
@@ -1069,7 +1127,8 @@ impl RunnerRegistry {
                     structured_stdin.as_deref(),
                     normalized_job_cwd.as_deref(),
                     timeout_secs,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview = script_preview(
                     script.language.as_str(),
                     script.script.len(),
@@ -1090,16 +1149,20 @@ impl RunnerRegistry {
             Some(StructuredJobExecution::SkillResource(request)) => {
                 request
                     .validate()
-                    .map_err(|error| format!("invalid Runner Skill execution request: {error}"))?;
+                    .map_err(|error| format!("invalid Runner Skill execution request: {error}"))
+                    .map_err(ExecutionAdmissionError::invalid_request)?;
                 if structured_stdin.is_some() {
-                    return Err("Skill resource Job does not accept generic stdin".to_string());
+                    return Err(ExecutionAdmissionError::invalid_request(
+                        "Skill resource Job does not accept generic stdin".to_string(),
+                    ));
                 }
                 validate_structured_job_common(
                     normalized_job_cwd.as_deref(),
                     None,
                     timeout_secs,
                     STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
-                )?;
+                )
+                .map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview = format!("trusted Skill resource {}", request.path);
                 let safe = ShellJobStructuredExecutionMetadata {
                     execution_source: "run_skill_resource".to_string(),
@@ -1123,7 +1186,7 @@ impl RunnerRegistry {
                     timeout_secs,
                     wait_timeout_secs: 0,
                 };
-                validate_run_request(&run)?;
+                validate_run_request(&run).map_err(ExecutionAdmissionError::invalid_request)?;
                 let preview = if validation_steps.is_empty() {
                     command_preview(&run.command)
                 } else {
@@ -1145,10 +1208,10 @@ impl RunnerRegistry {
         );
         let detached_idempotency_key = metadata.detached_idempotency_key.as_deref();
         if detached_request != detached_idempotency_key.is_some() {
-            return Err(
+            return Err(ExecutionAdmissionError::invalid_request(
                 "detached idempotency_key must be present exactly for detached process Job starts"
                     .to_string(),
-            );
+            ));
         }
         let detached_intent = if let Some(StructuredJobExecution::DetachedProcess(process)) =
             structured_execution.as_ref()
@@ -1170,15 +1233,19 @@ impl RunnerRegistry {
         let mut inner = self.inner.lock().await;
         let job_id = match detached_idempotency_key {
             Some(key) => detached_job_id_for_key(
-                detached_initiator.ok_or_else(|| {
-                    "detached idempotency requires a stable authenticated caller identity"
-                        .to_string()
-                })?,
+                detached_initiator
+                    .ok_or_else(|| {
+                        "detached idempotency requires a stable authenticated caller identity"
+                            .to_string()
+                    })
+                    .map_err(ExecutionAdmissionError::permission_denied)?,
                 key,
-            )?,
+            )
+            .map_err(ExecutionAdmissionError::invalid_request)?,
             None => allocate_job_id(&inner.jobs_by_id, || {
                 format!("wc_job_{}", webcodex_core::compact::random_suffix::<12>())
-            })?,
+            })
+            .map_err(ExecutionAdmissionError::unavailable)?,
         };
         let validation_step_names = validation_steps
             .iter()
@@ -1300,182 +1367,160 @@ impl RunnerRegistry {
                 created_at,
             },
             RunnerOperation::Job(job_operation),
-        )?;
+        )
+        .map_err(ExecutionAdmissionError::invalid_request)?;
         let Some(runner) = inner.runners.get(&client_id) else {
-            return Err(format!("unknown shell client: {}", client_id));
+            return Err(ExecutionAdmissionError::unknown_runner(client_id.clone()));
         };
         if access.is_some() {
-            assert_runner_access(access, runner)?;
+            assert_runner_access_typed(access, runner)?;
         }
         if !(runner.runner_features.supports(RunnerFeature::AsyncJobs)
             || runner
                 .runner_features
                 .supports(RunnerFeature::AsyncShellJobs))
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "runner {} does not support async shell jobs",
                 client_id
-            ));
+            )));
         }
         if explicit_shell.is_some()
             && !runner
                 .runner_features
                 .supports(RunnerFeature::ExplicitShellSelection)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support explicit_shell_selection"
-            ));
+            )));
         }
         if login
             && !runner
                 .runner_features
                 .supports(RunnerFeature::BashLoginShell)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support bash_login_shell"
-            ));
+            )));
         }
         if structured_metadata.is_some()
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredExecutionJobs)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support structured_execution_jobs"
-            ));
+            )));
         }
         if let Some(expected_instance) = format_runner_instance {
             if !self.inner.has_receipt_store() {
-                return Err("format_execution_unavailable".into());
+                return Err(ExecutionAdmissionError::unavailable(
+                    "format_execution_unavailable",
+                ));
             }
             if !runner
                 .runner_features
                 .supports(RunnerFeature::ProjectFormat)
             {
-                return Err(capability_upgrade_error(
-                    &client_id,
-                    RunnerFeature::ProjectFormat,
+                return Err(ExecutionAdmissionError::capability_unavailable(
+                    capability_upgrade_error(&client_id, RunnerFeature::ProjectFormat),
                 ));
             }
             if runner.runner_instance_id != expected_instance {
-                return Err("format_runner_replaced".into());
+                return Err(ExecutionAdmissionError::target_changed(
+                    "format_runner_replaced",
+                ));
+            }
+            if go_format_request
+                && !runner
+                    .runner_features
+                    .supports(RunnerFeature::ProjectFormatGo)
+            {
+                return Err(ExecutionAdmissionError::capability_unavailable(
+                    capability_upgrade_error(&client_id, RunnerFeature::ProjectFormatGo),
+                ));
             }
         }
-        if project_build_request && !runner.runner_features.supports(RunnerFeature::ProjectBuild) {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectBuild,
-            ));
-        }
-        if project_all_packages_request
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectAllPackages)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectAllPackages,
-            ));
-        }
-        if project_dependency_policy_request
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectDependencyPolicy)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectDependencyPolicy,
-            ));
-        }
-        if project_go_single_module_request
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectGoSingleModule)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectGoSingleModule,
-            ));
-        }
+        require_capabilities(
+            &client_id,
+            &runner.runner_features,
+            [
+                project_node_build_request.then_some(RunnerFeature::ProjectBuildNode),
+                project_build_request.then_some(RunnerFeature::ProjectBuild),
+                python_build_request.then_some(RunnerFeature::ProjectBuildPython),
+                project_all_packages_request.then_some(RunnerFeature::ProjectAllPackages),
+                project_dependency_policy_request.then_some(RunnerFeature::ProjectDependencyPolicy),
+                project_resolution_offline_request
+                    .then_some(RunnerFeature::ProjectDependencyResolutionOffline),
+                project_go_single_module_request.then_some(RunnerFeature::ProjectGoSingleModule),
+            ],
+        )
+        .map_err(ExecutionAdmissionError::capability_unavailable)?;
         if javascript_script_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredScriptJavascript)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support structured_script_javascript"
-            ));
+            )));
         }
         if typescript_script_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredScriptTypescript)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support structured_script_typescript"
-            ));
+            )));
         }
         if python_script_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredScriptPython)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support structured_script_python"
-            ));
+            )));
         }
         if skill_resource_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::SkillResourceExecution)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support skill_resource_execution"
-            ));
+            )));
         }
         if interactive_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::JobProcessInput)
         {
-            return Err(
-                "capability_unavailable: upgrade target Runner for job_process_input_v1".into(),
-            );
+            return Err(ExecutionAdmissionError::capability_unavailable(
+                "capability_unavailable: upgrade target Runner for job_process_input_v1",
+            ));
         }
         if detached_request
             && !runner
                 .runner_features
                 .supports(RunnerFeature::DetachedProcessJobs)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: runner {client_id} does not support detached_process_jobs"
-            ));
+            )));
         }
         if structured_metadata.is_some() && metadata.ssh_resource.is_some() {
-            return Err(
-                "ssh_resource_unsupported_for_request: typed structured Jobs do not support SSH resources"
-                    .to_string(),
-            );
+            return Err(ExecutionAdmissionError::invalid_request("ssh_resource_unsupported_for_request: typed structured Jobs do not support SSH resources"
+                    .to_string()));
         }
         if metadata.ssh_resource.is_some()
             && !runner.runner_features.supports(RunnerFeature::SshShell)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "agent_capability_unavailable: runner {} does not support ssh_shell",
                 client_id
-            ));
-        }
-        if validation
-            .as_ref()
-            .is_some_and(|v| v.project_validation.is_some())
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidation)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidation,
-            ));
+            )));
         }
         // Auto-detected Node scripts need admission recheck against the actual
         // retained Job adapter and step, including on Runner replacement.
@@ -1485,16 +1530,6 @@ impl RunnerRegistry {
             || validation_steps
                 .iter()
                 .any(ShellJobValidationStep::is_structured_node_check);
-        if node_script_check
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidationNodeScriptCheck)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidationNodeScriptCheck,
-            ));
-        }
         let python_ruff = validation.as_ref().is_some_and(|v| {
             matches!(
                 v.adapter.as_str(),
@@ -1503,48 +1538,18 @@ impl RunnerRegistry {
         }) || validation_steps
             .iter()
             .any(ShellJobValidationStep::is_structured_ruff);
-        if python_ruff
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidationPythonRuff)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidationPythonRuff,
-            ));
-        }
         let python_pytest = validation
             .as_ref()
             .is_some_and(|v| v.adapter == "python:pytest:test")
             || validation_steps
                 .iter()
                 .any(ShellJobValidationStep::is_structured_pytest);
-        if python_pytest
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidationPythonPytest)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidationPythonPytest,
-            ));
-        }
         let node_test = validation
             .as_ref()
             .is_some_and(|v| v.adapter == "node:tap:test")
             || validation_steps
                 .iter()
-                .any(|step| step.program == "node" && step.name == "test");
-        if node_test
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidationNodeTap)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidationNodeTap,
-            ));
-        }
+                .any(ShellJobValidationStep::is_structured_node_tap_test);
         // Recheck at admission, not only during the earlier planning round trip:
         // a replacement/older Runner must never reinterpret new filters or counts.
         let project_test_options = validation
@@ -1554,25 +1559,40 @@ impl RunnerRegistry {
         let go_test_filter = validation_steps.iter().any(|step| {
             step.is_structured_go_test_json() && step.args.get(2).is_some_and(|arg| arg == "-run")
         });
-        if (project_test_options || go_test_filter)
-            && !runner
-                .runner_features
-                .supports(RunnerFeature::ProjectValidationTestOptions)
-        {
-            return Err(capability_upgrade_error(
-                &client_id,
-                RunnerFeature::ProjectValidationTestOptions,
-            ));
-        }
+        require_capabilities(
+            &client_id,
+            &runner.runner_features,
+            [
+                validation
+                    .as_ref()
+                    .is_some_and(|v| v.project_validation.is_some())
+                    .then_some(RunnerFeature::ProjectValidation),
+                node_script_check.then_some(RunnerFeature::ProjectValidationNodeScriptCheck),
+                python_ruff.then_some(RunnerFeature::ProjectValidationPythonRuff),
+                python_pytest.then_some(RunnerFeature::ProjectValidationPythonPytest),
+                validation_steps
+                    .iter()
+                    .any(|step| step.node_json_framework().is_some())
+                    .then_some(RunnerFeature::ProjectValidationNodeJson),
+                validation_steps
+                    .iter()
+                    .any(|step| step.program == "cargo" && step.name == "lint")
+                    .then_some(RunnerFeature::ProjectValidationRustClippy),
+                node_test.then_some(RunnerFeature::ProjectValidationNodeTap),
+                (project_test_options || go_test_filter)
+                    .then_some(RunnerFeature::ProjectValidationTestOptions),
+            ],
+        )
+        .map_err(ExecutionAdmissionError::capability_unavailable)?;
         if !validation_steps.is_empty()
             && !runner
                 .runner_features
                 .supports(RunnerFeature::StructuredValidationArgv)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_validation_unavailable: runner {} does not support structured argv validation jobs",
                 client_id
-            ));
+            )));
         }
         if validation
             .as_ref()
@@ -1582,10 +1602,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::StructuredCargoTestCountAssertion)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_cargo_test_count_assertion_unavailable: runner {} does not support durable Cargo test-count assertions",
                 client_id
-            ));
+            )));
         }
         if validation
             .as_ref()
@@ -1594,10 +1614,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::StructuredCargoTestExecutionPolicy)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_cargo_test_execution_policy_unavailable: runner {} does not support durable Cargo validation execution-policy metadata",
                 client_id
-            ));
+            )));
         }
         if validation_steps.iter().any(|step| {
             step.program == "cargo"
@@ -1607,10 +1627,10 @@ impl RunnerRegistry {
             .runner_features
             .supports(RunnerFeature::StructuredCargoTestLib)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_cargo_test_lib_unavailable: runner {} does not support Cargo test --lib validation argv",
                 client_id
-            ));
+            )));
         }
         if validation_steps
             .iter()
@@ -1619,10 +1639,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::StructuredCargoCheckPackages)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "capability_unavailable: structured_cargo_check_packages_unavailable: runner {} does not support repeated Cargo check package selectors",
                 client_id
-            ));
+            )));
         }
         if validation_steps
             .iter()
@@ -1631,10 +1651,10 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::StructuredGoTestJson)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_go_test_json_unavailable: runner {} does not support machine-readable Go test validation",
                 client_id
-            ));
+            )));
         }
         if validation_steps.iter().any(|step| {
             step.is_structured_go_test_json() && step.args.as_slice() != ["test", "-json", "./..."]
@@ -1642,10 +1662,10 @@ impl RunnerRegistry {
             .runner_features
             .supports(RunnerFeature::StructuredGoTestPackages)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_go_test_packages_unavailable: runner {} does not support focused Go package validation argv",
                 client_id
-            ));
+            )));
         }
         if validation
             .as_ref()
@@ -1654,17 +1674,19 @@ impl RunnerRegistry {
                 .runner_features
                 .supports(RunnerFeature::StructuredGoTestTool)
         {
-            return Err(format!(
+            return Err(ExecutionAdmissionError::capability_unavailable(format!(
                 "structured_go_test_tool_unavailable: runner {} does not support the first-class go_test validation contract",
                 client_id
-            ));
+            )));
         }
         if metadata
             .project_id
             .as_deref()
             .is_some_and(|project| inner.unregistering_projects.contains_key(project))
         {
-            return Err("project_unregister_in_progress".to_string());
+            return Err(ExecutionAdmissionError::target_changed(
+                "project_unregister_in_progress".to_string(),
+            ));
         }
         let runner_instance_id = runner.runner_instance_id.clone();
         let auth_group = runner.auth_group.clone();
@@ -1672,8 +1694,8 @@ impl RunnerRegistry {
         if let Some(intent) = detached_intent.as_ref() {
             if let Some(existing) = inner.jobs_by_id.get(&job_id) {
                 if existing.kind != "run_detached_process" {
-                    return Err(format!(
-                        "{DETACHED_IDEMPOTENCY_CONFLICT}: idempotency key resolves to a non-detached Job"
+                    return Err(ExecutionAdmissionError::idempotency_conflict(
+                        "idempotency key resolves to a non-detached Job",
                     ));
                 }
                 match existing.detached_idempotency_intent.as_ref() {
@@ -1681,12 +1703,10 @@ impl RunnerRegistry {
                         return Ok(job_view(existing));
                     }
                     Some(_) => {
-                        return Err(format!(
-                            "{DETACHED_IDEMPOTENCY_CONFLICT}: idempotency key was already used for different detached process intent"
-                        ));
+                        return Err(ExecutionAdmissionError::idempotency_conflict("idempotency key was already used for different detached process intent"));
                     }
                     None => {
-                        return Err(format!("{DETACHED_IDEMPOTENCY_RECOVERY_PREFIX}{job_id}"));
+                        return Err(ExecutionAdmissionError::idempotency_recovery(job_id));
                     }
                 }
             }
@@ -1734,6 +1754,7 @@ impl RunnerRegistry {
             validation_progress: None,
             test_count_evidence: None,
             format_mutation: None,
+            build_artifacts: None,
             activity: None,
             last_update_seq: 0,
             visibility: metadata.visibility,
@@ -1948,8 +1969,7 @@ impl RunnerRegistry {
         }
         if job.lifecycle == JobLifecycleState::Queued {
             if let Some(request_id) = job.request_id.as_deref() {
-                remove_pending_request_locked(&mut inner, request_id);
-                inner.request_to_job.remove(request_id);
+                retire_job_request_locked(&mut inner, &job.client_id, request_id);
             }
             inner.jobs_by_id.remove(job_id);
             return Ok(true);
@@ -2009,11 +2029,7 @@ impl RunnerRegistry {
             return false;
         };
         if let Some(request_id) = job.request_id {
-            inner.request_to_job.remove(&request_id);
-            inner.pending_by_id.remove(&request_id);
-            if let Some(queue) = inner.queues_by_runner.get_mut(&job.client_id) {
-                queue.retain(|id| id != &request_id);
-            }
+            retire_job_request_locked(&mut inner, &job.client_id, &request_id);
         }
         true
     }
@@ -2067,11 +2083,7 @@ impl RunnerRegistry {
             .jobs_by_id
             .remove(job_id)
             .expect("projected hidden Job was checked under the registry lock");
-        inner.request_to_job.remove(&request_id);
-        inner.pending_by_id.remove(&request_id);
-        if let Some(queue) = inner.queues_by_runner.get_mut(&removed.client_id) {
-            queue.retain(|id| id != &request_id);
-        }
+        retire_job_request_locked(&mut inner, &removed.client_id, &request_id);
         true
     }
 
@@ -2199,38 +2211,33 @@ impl RunnerRegistry {
                 && shell_job_visible_to_auth(auth, &inner, job)
                 && client_id.is_none_or(|id| job.client_id == id)
         }) {
-            let status = job.public_status();
-            let lifecycle =
-                webcodex_core::runner_job_lifecycle::RunnerJobLifecycle::from_wire(status);
-            let active = super::job_status::job_status_is_active(status);
-            let running =
-                matches!(
-                lifecycle,
-                Ok(webcodex_core::runner_job_lifecycle::RunnerJobLifecycle::Running
-                    | webcodex_core::runner_job_lifecycle::RunnerJobLifecycle::StartedLegacy)
-            );
-            let queued = matches!(
-                lifecycle,
-                Ok(
-                    webcodex_core::runner_job_lifecycle::RunnerJobLifecycle::Queued
-                        | webcodex_core::runner_job_lifecycle::RunnerJobLifecycle::RunnerQueued
-                )
-            );
-            let in_slot = lifecycle.is_ok_and(|state| state.occupies_execution_slot());
+            // Aggregate the Registry's typed facts, not a wire-status round trip.
+            // Recovery masks visible execution/queue counts here; the separate
+            // capacity aggregate deliberately retains underlying slot ownership.
+            let lifecycle = job.lifecycle;
+            let recovering = job.recovery_active();
+            let active = lifecycle.is_active();
+            let running = !recovering
+                && matches!(
+                    lifecycle,
+                    JobLifecycleState::Running | JobLifecycleState::StartedLegacy
+                );
+            let queued = !recovering
+                && matches!(
+                    lifecycle,
+                    JobLifecycleState::Queued | JobLifecycleState::RunnerQueued
+                );
+            let in_slot = !recovering && lifecycle.occupies_execution_slot();
             result.active_count += usize::from(active);
             result.running_count += usize::from(running);
             result.queued_count += usize::from(queued);
-            result.recovering_count += usize::from(status == "recovering");
+            result.recovering_count += usize::from(recovering);
             result.lost_after_reconcile_count += usize::from(
-                status == "lost"
-                    && matches!(
-                        job.recovery.public_reason(),
-                        Some(
-                            "runner_inventory_missing"
-                                | "runner_instance_replaced"
-                                | "runner_recovery_deadline_exceeded"
-                        )
-                    ),
+                lifecycle == JobLifecycleState::Lost
+                    && job
+                        .recovery
+                        .reason
+                        .is_some_and(JobRecoveryReason::implies_lost_after_reconcile),
             );
             if active || in_slot || queued {
                 let runner = result.by_runner.entry(job.client_id.clone()).or_default();
@@ -2947,8 +2954,7 @@ impl RunnerRegistry {
         match job.lifecycle {
             JobLifecycleState::Queued => {
                 if let Some(request_id) = &job.request_id {
-                    remove_pending_request_locked(&mut inner, request_id);
-                    inner.request_to_job.remove(request_id);
+                    retire_job_request_locked(&mut inner, &job.client_id, request_id);
                 }
                 let job = inner.jobs_by_id.get_mut(job_id).expect("job exists");
                 let terminal_now = now_ts();
@@ -3184,6 +3190,16 @@ impl RunnerRegistry {
                     )
                     .map_err(|_| ValidationProtocolError("format_mutation_invalid"))
                 })
+                .and_then(|_| {
+                    webcodex_core::project_build::validate_build_artifact_report(
+                        &job.kind,
+                        incoming_lifecycle.as_wire(),
+                        body.exit_code,
+                        body.command_execution_state,
+                        body.build_artifacts.as_deref(),
+                    )
+                    .map_err(ValidationProtocolError)
+                })
                 .and_then(|_| validate_command_execution_state(job, &body, incoming_lifecycle))
                 .and_then(|_| validate_job_activity(job, &body, incoming_lifecycle))
             {
@@ -3214,6 +3230,9 @@ impl RunnerRegistry {
                 }
                 if body.validation_progress.is_some() {
                     job.validation_progress = body.validation_progress.clone();
+                }
+                if body.build_artifacts.is_some() {
+                    job.build_artifacts = body.build_artifacts.clone();
                 }
                 if body.format_mutation.is_some() {
                     job.format_mutation = body.format_mutation;

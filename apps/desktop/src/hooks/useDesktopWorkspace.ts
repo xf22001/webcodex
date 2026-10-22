@@ -58,7 +58,8 @@ export function useDesktopWorkspace() {
   useEffect(() => {
     const navigateWithKeyboard = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat) return;
-      const page = NAVIGATION[Number(event.key) - 1];
+      // Ctrl/⌘+, is the conventional desktop shortcut for preferences.
+      const page = event.key === "," ? "settings" : NAVIGATION[Number(event.key) - 1];
       if (!page) return;
       event.preventDefault();
       setNavigation(page);
@@ -74,7 +75,12 @@ export function useDesktopWorkspace() {
 
   const commitState = useCallback((next: DesktopState) => {
     stateVersionRef.current += 1;
-    setState(next);
+    // The native RuntimeRefresh reconciles this error on confirmed recovery.
+    // A getState response may still carry the old error during that handoff;
+    // never publish contradictory Runner-ready + runner_offline UI state.
+    const staleRunnerError = next.readiness.runner === "ready" && next.runtime_error?.code === "runner_offline";
+    setState(staleRunnerError ? { ...next, runtime_error: null } : next);
+    setError((current) => current?.code === "runner_offline" && next.readiness.runner === "ready" ? null : current);
   }, []);
 
   const observeFailedOperation = useCallback(async (value: unknown, current: () => boolean = () => true) => {

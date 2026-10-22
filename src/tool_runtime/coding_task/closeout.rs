@@ -487,6 +487,7 @@ impl ToolRuntime {
             "hard_blockers",
             "advisories",
             "task_outcome",
+            "acceptance",
             "evidence_history",
             "evidence_integrity",
             "informational_notes",
@@ -613,6 +614,35 @@ pub(super) fn finish_decision_output(
         }
     }
     decision["suggested_next_actions"] = json!(actions);
+    decision["acceptance"] = super::super::acceptance_evidence::acceptance_evidence(
+        facts,
+        super::super::acceptance_evidence::AcceptanceContext {
+            outputs: task_outputs,
+            snapshot_changed: presentation
+                .pointer("/handoff_brief/basis/reason_codes")
+                .and_then(Value::as_array)
+                .is_some_and(|reasons| {
+                    reasons.iter().any(|reason| {
+                        matches!(
+                            reason.as_str(),
+                            Some(
+                                "session_changed_during_snapshot"
+                                    | "external_observations_changed_during_snapshot"
+                            )
+                        )
+                    })
+                }),
+            history_partial: presentation
+                .pointer("/handoff_brief/basis/reason_codes")
+                .and_then(Value::as_array)
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason.as_str() == Some("attempt_boundary_evicted"))
+                }),
+            ..Default::default()
+        },
+    );
     decision
         .as_object_mut()
         .expect("finish decision output is an object")
@@ -635,6 +665,7 @@ pub(super) fn compact_finish_output(decision: &Value) -> Value {
         "validation": compact_finish_validation(decision.get("validation").unwrap_or(&Value::Null)),
         "tool_failures": decision.get("tool_failures").cloned().unwrap_or_else(|| compact_tool_failures(&Value::Null)),
         "task_outcome": decision.get("task_outcome").cloned().unwrap_or(Value::Null),
+        "acceptance": decision.get("acceptance").cloned().unwrap_or(Value::Null),
         "evidence_integrity": decision.get("evidence_integrity").cloned().unwrap_or(Value::Null),
         "warnings": decision.get("warnings").cloned().unwrap_or_else(|| json!([])),
         "suggested_next_actions": decision.get("suggested_next_actions").cloned().unwrap_or_else(|| json!([])),
@@ -700,7 +731,7 @@ pub(super) fn finish_suggested_next_actions(
         );
     }
     if facts.jobs.blocking_active_count > 0 {
-        actions.push("stop or await blocking active jobs".into());
+        actions.push("preserve the blocking Job identities; finish independent work, then wait_for_job_readiness and observe_jobs on those same Jobs; cancel only when intended".into());
     }
     if facts.validation.cargo_test_zero_tests {
         actions.push("cargo_test ran zero tests; verify the test filter or command".into());

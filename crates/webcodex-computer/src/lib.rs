@@ -3,10 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 #[cfg(any(test, target_os = "macos"))]
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
+use webcodex_core::computer_input_contract::{
+    COMPUTER_KEY_INPUT_KEYS, COMPUTER_KEY_INPUT_MODIFIERS,
+};
 
 pub const MAX_WINDOWS: usize = 64;
 pub const MAX_APPLICATIONS: usize = 64;
@@ -24,20 +27,6 @@ const MAX_INPUT_TEXT_BYTES: usize = 2048;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024;
 #[cfg(any(test, target_os = "macos", windows))]
 const MAX_CLIPBOARD_NATIVE_STORAGE_BYTES: usize = 64 * 1024;
-const COMPUTER_KEY_INPUT_KEYS: &[&str] = &[
-    "enter",
-    "escape",
-    "tab",
-    "arrow_up",
-    "arrow_down",
-    "arrow_left",
-    "arrow_right",
-    "page_up",
-    "page_down",
-    "home",
-    "end",
-];
-const COMPUTER_KEY_INPUT_MODIFIERS: &[&str] = &["shift", "control", "option", "command"];
 
 // Snapshot selectors are non-secret identities. Their owning collection decides
 // occupancy; no process-wide identity registry or authority is introduced.
@@ -92,6 +81,8 @@ fn validate_key_input(key: &str, modifiers: &[String]) -> Result<(), String> {
 }
 const MAX_ACCESSIBILITY_DEPTH: usize = 8;
 const MAX_ACCESSIBILITY_NODES: usize = 256;
+#[cfg(any(test, target_os = "macos", windows))]
+const MAX_ACCESSIBILITY_PATH_DEPTH: usize = 32;
 pub const DEFAULT_ACCESSIBILITY_DEPTH: usize = 6;
 pub const DEFAULT_ACCESSIBILITY_NODES: usize = 128;
 const RGBA_BYTES_PER_PIXEL: u64 = 4;
@@ -272,6 +263,29 @@ impl ElementRecord {
     }
 }
 
+// Relative tree depth remains 0..8. Repeated scoped observations also bound
+// retained absolute lineage and the native work needed to re-resolve a handle.
+#[cfg(any(test, target_os = "macos", windows))]
+fn accessibility_tree_seed(
+    root: Option<&ElementRecord>,
+) -> Result<(Vec<usize>, Vec<ElementFingerprint>, bool), String> {
+    let Some(root) = root else {
+        return Ok((Vec::new(), Vec::new(), false));
+    };
+    if root.path.len() > MAX_ACCESSIBILITY_PATH_DEPTH
+        || root.lineage.len() != root.path.len() + 1
+        || root
+            .path
+            .iter()
+            .any(|index| *index >= MAX_ACCESSIBILITY_NODES)
+    {
+        return Err("stale_element: subtree root exceeds bounded correlation".into());
+    }
+    let ancestors = root.lineage[..root.path.len()].to_vec();
+    let protected = ancestors.iter().any(|node| node.protected);
+    Ok((root.path.clone(), ancestors, protected))
+}
+
 fn validate_input_text(text: &str) -> Result<usize, String> {
     let text_bytes = text.len();
     if text_bytes == 0 || text_bytes > MAX_INPUT_TEXT_BYTES || text.contains('\0') {
@@ -442,6 +456,53 @@ fn is_secure_text_fingerprint(fingerprint: &ElementFingerprint) -> bool {
             .subrole
             .as_deref()
             .is_some_and(|subrole| subrole.contains("Secure"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn finish_ax_fingerprint(
+    mut fingerprint: ElementFingerprint,
+    mut read_text: impl FnMut(&'static str) -> Result<Option<String>, String>,
+) -> Result<ElementFingerprint, String> {
+    // Retain one inherited protection marker for secure roles, native protected
+    // content, and all descendants before any potentially sensitive text read.
+    fingerprint.protected |= is_secure_text_fingerprint(&fingerprint);
+    fingerprint.title = if fingerprint.protected {
+        None
+    } else {
+        read_text("AXTitle")?
+    };
+    fingerprint.description = if fingerprint.protected {
+        None
+    } else {
+        read_text("AXDescription")?
+    };
+    fingerprint.placeholder = if fingerprint.protected {
+        None
+    } else {
+        read_text("AXPlaceholderValue")?
+    };
+    Ok(fingerprint)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn ax_accessibility_tree_seed(
+    root: Option<&ElementRecord>,
+) -> Result<(Vec<usize>, Vec<ElementFingerprint>, bool), String> {
+    let (path, lineage, protected) = accessibility_tree_seed(root)?;
+    let protected = protected || lineage.iter().any(is_secure_text_fingerprint);
+    Ok((path, lineage, protected))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn ax_observed_value(
+    fingerprint: &ElementFingerprint,
+    read_value: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    if fingerprint.protected {
+        Ok(None)
+    } else {
+        read_value()
+    }
 }
 
 #[cfg(any(test, target_os = "macos", windows))]
@@ -868,6 +929,7 @@ pub struct ComputerConfig {
 
 pub struct ComputerRuntime {
     config: ComputerConfig,
+    browser_user_handoffs: Mutex<HashMap<String, SurfaceRecord>>,
     surfaces: Mutex<HashMap<String, SurfaceRecord>>,
     elements: Mutex<ElementRegistry>,
     applications: Mutex<HashMap<String, ApplicationRecord>>,
@@ -879,6 +941,7 @@ impl ComputerRuntime {
     pub fn new(config: ComputerConfig) -> Self {
         Self {
             config,
+            browser_user_handoffs: Mutex::new(HashMap::new()),
             surfaces: Mutex::new(HashMap::new()),
             elements: Mutex::new(ElementRegistry::default()),
             applications: Mutex::new(HashMap::new()),
@@ -892,7 +955,114 @@ impl ComputerRuntime {
     }
 
     pub fn write_clipboard(&self, text: &str) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         platform::write_clipboard(text)
+    }
+
+    /// Runner-only input reservation for a live, exactly resolved Browser window.
+    /// Native focus, pointer and clipboard effects share one desktop, so all
+    /// Computer effects stay blocked until every explicit reservation is released.
+    /// The guard also serializes reservation admission with in-flight native input.
+    pub fn begin_browser_user_handoff(&self, surface_id: &str, fence: &str) -> Result<(), String> {
+        if fence.is_empty()
+            || fence.len() > 128
+            || !fence
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        {
+            return Err("invalid_request: Browser handoff fence is invalid".into());
+        }
+        let mut holds = self
+            .browser_user_handoffs
+            .lock()
+            .map_err(|_| "computer_state_error: Browser handoff lock poisoned".to_string())?;
+        let record = self
+            .surfaces
+            .lock()
+            .map_err(|_| "computer_state_error: surface registry lock poisoned".to_string())?
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| "stale_surface: unknown or stale surface_id".to_string())?;
+        if let Some(existing) = holds.get(fence) {
+            return if existing == &record {
+                Ok(())
+            } else {
+                Err("browser_user_handoff_conflict: fence belongs to another surface".into())
+            };
+        }
+        if holds.len() >= MAX_WINDOWS {
+            return Err("browser_user_handoff_limit: native input reservations are full".into());
+        }
+        holds.insert(fence.to_string(), record);
+        Ok(())
+    }
+
+    /// Validate the exact reservation and invalidate pre-handoff observations.
+    /// Keep native input blocked until the Browser owner observes a fresh snapshot
+    /// and releases this reservation through cancel_browser_user_handoff.
+    pub fn finish_browser_user_handoff(&self, fence: &str) -> Result<(), String> {
+        let holds = self
+            .browser_user_handoffs
+            .lock()
+            .map_err(|_| "computer_state_error: Browser handoff lock poisoned".to_string())?;
+        if !holds.contains_key(fence) {
+            return Err(
+                "browser_user_handoff_stale: native input reservation is unavailable".into(),
+            );
+        }
+        self.elements
+            .lock()
+            .map_err(|_| "computer_state_error: element registry lock poisoned".to_string())?
+            .clear();
+        self.display_snapshots
+            .lock()
+            .map_err(|_| {
+                "computer_state_error: display snapshot registry lock poisoned".to_string()
+            })?
+            .bindings
+            .clear();
+        Ok(())
+    }
+
+    /// Browser fresh-snapshot recovery or close/shutdown releases the reservation.
+    /// Releasing an already-removed reservation is inert.
+    pub fn cancel_browser_user_handoff(&self, fence: &str) -> Result<(), String> {
+        let mut holds = self
+            .browser_user_handoffs
+            .lock()
+            .map_err(|_| "computer_state_error: Browser handoff lock poisoned".to_string())?;
+        if !holds.contains_key(fence) {
+            return Ok(());
+        }
+        self.elements
+            .lock()
+            .map_err(|_| "computer_state_error: element registry lock poisoned".to_string())?
+            .clear();
+        self.display_snapshots
+            .lock()
+            .map_err(|_| {
+                "computer_state_error: display snapshot registry lock poisoned".to_string()
+            })?
+            .bindings
+            .clear();
+        holds.remove(fence);
+        Ok(())
+    }
+
+    fn native_effect_guard(
+        &self,
+    ) -> Result<MutexGuard<'_, HashMap<String, SurfaceRecord>>, String> {
+        let holds = self
+            .browser_user_handoffs
+            .lock()
+            .map_err(|_| "computer_state_error: Browser handoff lock poisoned".to_string())?;
+        if !holds.is_empty() {
+            return Err(
+                "browser_user_handoff_active: native desktop effects are paused for user input"
+                    .into(),
+            );
+        }
+        Ok(holds)
     }
 
     /// Runner-internal Browser handoff. The caller must retain an exact live
@@ -1178,6 +1348,7 @@ impl ComputerRuntime {
         x: u32,
         y: u32,
     ) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if !valid_display_id(display_id) || snapshot_generation == 0 {
             return Err(
                 "invalid_request: pointer display_id or snapshot_generation is invalid".to_string(),
@@ -1232,6 +1403,7 @@ impl ComputerRuntime {
         }))
     }
     pub fn launch_application(&self, application_id: &str) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         self.with_current_application(application_id, |record| {
             platform::launch_application(application_id, record)
         })
@@ -1270,6 +1442,16 @@ impl ComputerRuntime {
         max_depth: usize,
         max_nodes: usize,
     ) -> Result<Value, String> {
+        self.accessibility_tree_scoped(surface_id, None, max_depth, max_nodes)
+    }
+
+    pub fn accessibility_tree_scoped(
+        &self,
+        surface_id: &str,
+        root_element_id: Option<&str>,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<Value, String> {
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -1285,10 +1467,42 @@ impl ComputerRuntime {
             .get(surface_id)
             .cloned()
             .ok_or_else(|| "stale_surface: unknown or stale surface_id".to_string())?;
+        let scope = root_element_id
+            .map(|id| {
+                if !id.starts_with("element_")
+                    || id.len() <= "element_".len()
+                    || id.len() > MAX_ELEMENT_ID_BYTES
+                {
+                    return Err("invalid_request: root_element_id is invalid".to_string());
+                }
+                let (element, generation) = self
+                    .elements
+                    .lock()
+                    .map_err(|_| {
+                        "computer_state_error: element registry lock poisoned".to_string()
+                    })?
+                    .get_with_generation(id)
+                    .ok_or_else(|| {
+                        "stale_element: unknown, evicted, or stale subtree root".to_string()
+                    })?;
+                if element.surface_id != surface_id {
+                    return Err(
+                        "stale_element: subtree root belongs to a different surface".to_string()
+                    );
+                }
+                Ok((element, generation))
+            })
+            .transpose()?;
+        let tree = match scope.as_ref() {
+            Some((root, _)) => {
+                platform::accessibility_tree_scoped(surface_id, &record, max_depth, max_nodes, root)
+            }
+            None => platform::accessibility_tree(surface_id, &record, max_depth, max_nodes),
+        }?;
         let AccessibilityTreeResult {
             mut output,
             elements,
-        } = platform::accessibility_tree(surface_id, &record, max_depth, max_nodes)?;
+        } = tree;
         let surface_registry = self
             .surfaces
             .lock()
@@ -1308,6 +1522,16 @@ impl ComputerRuntime {
             .elements
             .lock()
             .map_err(|_| "computer_state_error: element registry lock poisoned".to_string())?;
+        if let (Some(id), Some(expected)) = (root_element_id, scope.as_ref()) {
+            if element_registry.get_with_generation(id).as_ref() != Some(expected) {
+                return Err(
+                    "stale_element: subtree root generation changed during observation".into(),
+                );
+            }
+            // Wire-only scope receipt: the Server verifies and removes it before
+            // projecting the canonical fresh tree to the model.
+            object.insert("root_element_id".into(), json!(id));
+        }
         let observation_generation = element_registry.replace_surface(surface_id, elements)?;
         object.insert(
             "observation_generation".to_string(),
@@ -1356,6 +1580,7 @@ impl ComputerRuntime {
     }
 
     pub fn activate_window(&self, surface_id: &str) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -1375,6 +1600,7 @@ impl ComputerRuntime {
         element_id: &str,
         action: ComputerAction,
     ) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -1405,6 +1631,7 @@ impl ComputerRuntime {
     }
 
     pub fn scroll_to_element(&self, surface_id: &str, element_id: &str) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -1440,6 +1667,7 @@ impl ComputerRuntime {
         key: &str,
         modifiers: &[String],
     ) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -1461,6 +1689,7 @@ impl ComputerRuntime {
         element_id: &str,
         text: &str,
     ) -> Result<Value, String> {
+        let _handoff = self.native_effect_guard()?;
         if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
             return Err("invalid_request: surface_id is invalid".to_string());
         }
@@ -2084,6 +2313,9 @@ mod ax_observation_bound_tests {
 }
 
 #[cfg(test)]
+mod macos_observation_tests;
+
+#[cfg(test)]
 mod element_registry_tests {
     #[test]
     fn compact_selectors_retry_collision_and_stop_at_budget() {
@@ -2119,6 +2351,50 @@ mod element_registry_tests {
             placeholder: None,
             protected: false,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn computer_windows_combobox_read_does_not_grant_text_input_or_focus() {
+        let mut combo = fingerprint("Theme");
+        combo.role = "AXComboBox".into();
+        assert!(platform::uia_observes_value(&combo));
+        assert!(!is_supported_text_input_fingerprint(&combo));
+        assert!(!platform::uia_semantic_text_input_role(&combo.role));
+        assert!(!platform::uia_semantic_focus_role(&combo.role));
+        combo.protected = true;
+        assert!(!platform::uia_observes_value(&combo));
+        combo.protected = false;
+        combo.role = "AXButton".into();
+        assert!(!platform::uia_observes_value(&combo));
+    }
+
+    #[test]
+    fn computer_subtree_seed_bounds_absolute_lineage_and_inherits_protection() {
+        assert_eq!(
+            accessibility_tree_seed(None).unwrap(),
+            (vec![], vec![], false)
+        );
+        let mut root = record(
+            "surface_test",
+            "group",
+            vec![0; MAX_ACCESSIBILITY_PATH_DEPTH],
+        );
+        let (path, ancestors, protected) = accessibility_tree_seed(Some(&root)).unwrap();
+        assert_eq!(path.len(), MAX_ACCESSIBILITY_PATH_DEPTH);
+        assert_eq!(ancestors.len(), path.len());
+        assert!(!protected);
+        root.lineage[0].protected = true;
+        assert!(accessibility_tree_seed(Some(&root)).unwrap().2);
+        root.path.push(0);
+        root.lineage.push(fingerprint("child"));
+        assert!(accessibility_tree_seed(Some(&root)).is_err());
+        root.path = vec![MAX_ACCESSIBILITY_NODES];
+        root.lineage = vec![fingerprint("root"); 2];
+        assert!(accessibility_tree_seed(Some(&root)).is_err());
+        root.path = vec![0];
+        root.lineage.pop();
+        assert!(accessibility_tree_seed(Some(&root)).is_err());
     }
 
     fn record(surface_id: &str, label: &str, path: Vec<usize>) -> ElementRecord {
@@ -2728,6 +3004,14 @@ mod key_input_runtime_tests {
 
     #[test]
     fn key_input_vocabulary_and_modifiers_are_closed() {
+        let modifiers = COMPUTER_KEY_INPUT_MODIFIERS
+            .iter()
+            .map(|modifier| modifier.to_string())
+            .collect::<Vec<_>>();
+        for key in COMPUTER_KEY_INPUT_KEYS {
+            assert!(validate_key_input(key, &[]).is_ok());
+            assert!(validate_key_input(key, &modifiers).is_ok());
+        }
         assert!(validate_key_input("tab", &["shift".to_string()]).is_ok());
         assert!(validate_key_input("a", &[]).is_err());
         assert!(validate_key_input("enter", &["shift".to_string(), "shift".to_string()]).is_err());
@@ -3135,6 +3419,16 @@ mod platform {
             "unsupported_platform: computer accessibility observation is unavailable on this platform"
                 .to_string(),
         )
+    }
+
+    pub(super) fn accessibility_tree_scoped(
+        surface_id: &str,
+        surface: &SurfaceRecord,
+        max_depth: usize,
+        max_nodes: usize,
+        _root: &ElementRecord,
+    ) -> Result<AccessibilityTreeResult, String> {
+        accessibility_tree(surface_id, surface, max_depth, max_nodes)
     }
 
     pub(super) fn element_state(
