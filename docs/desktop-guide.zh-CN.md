@@ -24,9 +24,9 @@ Runner 文件系统 policy 仍然是权限边界。全新 Desktop 的本机 Runn
 
 **项目 → 设备** 显示每个 Runner 上报的持久任务运行数、排队数和当前生效的并发上限。计数来自 Server 的容量聚合；已请求停止的任务在真正终止前仍计入运行数，因为它们仍占用执行槽位。离线、过期、不可用或未上报的状态不会显示为零使用量；普通请求调度队列单独计算。
 
-打开 **设置 → Runtime 与服务 → Runner 任务容量**，可为 Desktop 管理的本地 Runner 保存 **1–64** 的整数并发上限。默认值仍为 **4**，已保存的配置与实际生效值分别显示。**保存，下次重启时生效** 只修改身份匹配的本地 Runner 配置，保留其他内容并拒绝冲突修改，不会热重载或自动重启。
+打开 **设置 → Runtime 与服务 → Runner 任务容量**，可为 Desktop 管理的本地 Runner 保存 **1–64** 的整数并发上限。未配置时默认值为 **32**，已有显式配置值保持不变，已保存的配置与实际生效值分别显示。**保存并热应用** 暂存身份匹配的本地 Runner 配置，保留其他内容，随后使用 Check → Reload 与 Generation Fence 验证生效。明确拒绝时只回滚未被外部修改的候选；结果不确定时要求核对，不盲目重试或回滚。运行中的 Job 继续执行。
 
-准备好后选择 **重启 Runner…**，确认中断警告。重启会应用已保存的 Runner 配置，可能中断任务、浏览器会话和用户接管。Desktop 复用现有进程所有权或持久服务重启机制。远程及独立管理的 Runner 保持只读，需由实际管理者修改配置并重启。只有刷新后的 Runner 状态上报新上限，界面才会确认它已生效。
+**重启 Runner…** 保留为独立操作，仍需确认中断警告。重启会应用已保存的 Runner 配置，可能中断任务、浏览器会话和用户接管。Desktop 复用现有进程所有权或持久服务重启机制。远程及独立管理的 Runner 保持只读，需由实际管理者修改并应用配置。只有刷新后的 Runner 状态上报新上限，界面才会确认它已生效。
 
 ## Windows 启动与升级
 
@@ -131,3 +131,9 @@ Full Runtime 由 Server、Runner 和 Runner 已观察到的 Project 清单组成
 Desktop 重启会恢复已保存的 Server/Runner 身份和 Connections，不会预先注册 Project。只有模型驱动的工作解析了具体目录时，才会出现对应 Runtime Project。在线且完整的 Runner inventory 是这些注册状态的权威来源；Desktop 可以清理过期的展示历史，但正常 Desktop UI 不负责修改 Project 注册状态。
 
 项目目录、Git 文件和 Runner policy 是彼此独立的边界：按需注册 Project 只是为已经获得授权的路径创建或复用 runtime identity，不会扩大 `allowed_roots`。
+
+## 本机 Computer 活动与暂停
+
+Windows 原生托盘显示 Computer 观察和控制活动，并为保存的本机 Runner 提供
+**暂停 Computer Control**。暂停控制后仍可观察。恢复、可选边缘提示、快捷键和执行边界
+见[本机 Computer Control](agent/computer-local-control.zh-CN.md)。

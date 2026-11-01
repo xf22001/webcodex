@@ -114,7 +114,7 @@ fn instruction_sidecar_budget_preserves_sources_and_local_guidance() {
     );
     let combined = ProjectInstructionsSnapshot::with_runner_files(globals.files, locals, true);
     for budget in [19 * 1024, 12 * 1024] {
-        let projection = project_instructions_context_projection(&combined, budget);
+        let projection = project_instructions_context_projection(&combined, budget, false);
         assert!(serialized_len(&projection) <= budget);
         let sources = projection["sources"].as_array().unwrap();
         assert_eq!(sources.len(), 21);
@@ -191,9 +191,11 @@ fn bootstrap_guidance_reuses_observations_with_explicit_freshness_exceptions() {
         "content_included=true",
         "Follow read_more",
         "compaction/context loss",
-        "initial branch/HEAD/status observation",
+        "work_on_project.workspace observes branch/HEAD/status",
         "mutation fences",
-        "without get_lsp_status",
+        "available=true needs no extra probe",
+        "only index_readiness=ready confirms indexing",
+        "Navigation waits are bounded",
         "include_extension_catalog=true/default",
         "complete/sufficient catalog",
         "changed catalog revision/runtime",

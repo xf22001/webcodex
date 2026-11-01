@@ -10,10 +10,11 @@ use super::inputs::{
 };
 use super::*;
 impl ToolRuntime {
-    pub(super) async fn dispatch_computer_control(
+    pub(super) async fn dispatch_computer_control_action(
         &self,
         call: ComputerControlToolCall,
         auth: Option<&AuthContext>,
+        expected_instance: Option<&str>,
     ) -> ToolResult {
         match call {
             ComputerControlToolCall::LaunchApplication {
@@ -59,13 +60,20 @@ impl ToolRuntime {
             }
 
             call @ (ComputerControlToolCall::Press { .. }
-            | ComputerControlToolCall::Focus { .. }) => {
+            | ComputerControlToolCall::Focus { .. }
+            | ComputerControlToolCall::Select { .. }) => {
                 let (client_id, surface_id, element_id, action) = match call {
                     ComputerControlToolCall::Press {
                         client_id,
                         surface_id,
                         element_id,
+                        ..
                     } => (client_id, surface_id, element_id, "press"),
+                    ComputerControlToolCall::Select {
+                        client_id,
+                        surface_id,
+                        element_id,
+                    } => (client_id, surface_id, element_id, "select"),
                     ComputerControlToolCall::Focus {
                         client_id,
                         surface_id,
@@ -82,7 +90,7 @@ impl ToolRuntime {
                 {
                     return computer_error("invalid_element", "element_id is invalid");
                 }
-                self.dispatch_computer_request(
+                self.dispatch_computer_request_for_instance(
                     &client_id,
                     "computer_control",
                     json!({
@@ -94,6 +102,7 @@ impl ToolRuntime {
                     None,
                     Some(surface_id.as_str()),
                     None,
+                    expected_instance,
                 )
                 .await
             }
@@ -244,6 +253,7 @@ impl ToolRuntime {
                 surface_id,
                 element_id,
                 text,
+                ..
             } => {
                 if surface_id.is_empty() || surface_id.len() > MAX_SURFACE_ID_BYTES {
                     return computer_error("invalid_surface", "surface_id is invalid");
@@ -257,7 +267,7 @@ impl ToolRuntime {
                 if let Err(message) = validate_input_text(&text) {
                     return computer_error("invalid_request", message);
                 }
-                self.dispatch_computer_request(
+                self.dispatch_computer_request_for_instance(
                     &client_id,
                     "computer_input_text",
                     json!({
@@ -269,6 +279,7 @@ impl ToolRuntime {
                     None,
                     Some(surface_id.as_str()),
                     None,
+                    expected_instance,
                 )
                 .await
             }

@@ -9,16 +9,23 @@ use super::helpers::{
     command_rejected_message, explicit_shell_dispatch_command, is_safe_job_id,
     project_relative_runner_cwd, resolve_runner_cwd, validate_raw_shell_command_length,
 };
+use super::process::{execution_admission_failure_result, process_tool_failure_result};
+use super::structured_execution::{
+    apply_runner_timeout_cap, continued_execution_state, StructuredExecutionBudget,
+};
 use super::tool_result::{RecoveryKind, SuggestedToolCall, ToolResult};
 use super::{
     execution_outcome::ExecutionOutcomeFacts, ExecutionPurpose, ExecutionShell, ToolRuntime,
 };
 use crate::auth::AuthContext;
-use crate::runner_http::{command_preview, ShellJobStartMetadata, COMMAND_PREVIEW_MAX_CHARS};
+use crate::runner_http::{
+    command_preview, JobShellTarget, JobStartContext, JobStartExecution, JobStartRequest,
+    JobValidationPlan, COMMAND_PREVIEW_MAX_CHARS,
+};
 use crate::runner_protocol::{
-    ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource, ShellJobActivityState,
-    ShellJobInfo, ShellJobOpRequest, ShellJobStructuredExecutionMetadata,
-    ShellJobTestCountEvidence, ShellJobValidationStep,
+    ShellCommandExecutionState, ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource,
+    ShellJobActivityState, ShellJobInfo, ShellJobStructuredExecutionMetadata,
+    ShellJobTestCountEvidence, ShellJobValidationStep, RAW_SHELL_JOB_TIMEOUT_DEFAULT_SECS,
 };
 
 pub(crate) fn is_blocking_active_job_status(status: &str) -> bool {
@@ -1117,9 +1124,13 @@ pub(super) fn sparsify_job_handoff_model_result(result: &mut ToolResult) {
         return;
     }
     let continuation = call.clone();
+    let timeout = output.get("timeout").cloned();
     output.clear();
     output.insert("execution_state".to_string(), json!("pending"));
     output.insert("continuation".to_string(), continuation);
+    if let Some(timeout) = timeout {
+        output.insert("timeout".to_string(), timeout);
+    }
 }
 
 fn list_jobs_recovery_suggested_call(project: Option<&str>) -> Value {
@@ -1475,6 +1486,22 @@ impl ToolRuntime {
         shell: Option<ExecutionShell>,
         ssh_resource: Option<&str>,
     ) -> ToolResult {
+        let budget = match StructuredExecutionBudget::resolve_raw_shell_job(timeout_secs) {
+            Ok(budget) => budget,
+            Err(error) => {
+                return process_tool_failure_result(
+                    command_rejected_message(
+                        format!("run_job {error}"),
+                        "pass a positive timeout_secs, or omit it for the 3600-second default; values above 86400 seconds are clamped.",
+                    ),
+                    "invalid_arguments",
+                    ShellCommandExecutionState::NotStarted,
+                )
+            }
+        };
+        let requested_timeout_secs = timeout_secs
+            .map(|timeout| timeout as u64)
+            .unwrap_or(RAW_SHELL_JOB_TIMEOUT_DEFAULT_SECS);
         if let Err(error) = validate_raw_shell_command_length(&command) {
             return ToolResult::err(command_rejected_message(
                 error,
@@ -1490,10 +1517,17 @@ impl ToolRuntime {
         };
         let project_id = resolved.resolved_id.clone();
         let proj = resolved.config;
-        let max_runtime = timeout_secs.unwrap_or(3600).clamp(1, 604800);
         let declared_purpose = purpose.unwrap_or_default();
         let command_summary = command_preview(&command);
         let client_id = proj.client_id.clone();
+        let (budget, timeout_cap) = apply_runner_timeout_cap(
+            &self.runner_registry,
+            &client_id,
+            auth,
+            Some(requested_timeout_secs),
+            budget,
+        )
+        .await;
         let remote = ssh_resource.is_some();
         if remote && !validation_steps.is_empty() {
             return ToolResult::err(
@@ -1558,56 +1592,53 @@ impl ToolRuntime {
             _ => command.clone(),
         };
         match self
-                .runner_registry
-                .start_job_with_metadata_for_access(
-                    ShellJobOpRequest {
-                        login: false,
-                        op: "start".to_string(),
-                        client_id: Some(client_id),
-                        cwd: effective_cwd,
-                        command: Some(dispatched_command),
-                        timeout_secs: Some(max_runtime as u64),
-                        job_id: None,
-                        since_stdout_line: None,
-                        since_stderr_line: None,
-                        tail_lines: None,
-                        limit: None,
-                        codex: None,
+            .runner_registry
+            .start_job(
+                JobStartRequest {
+                    client_id: client_id,
+                    cwd: effective_cwd,
+                    timeout_secs: budget.effective_timeout_secs,
+                    execution: if validation_steps.is_empty() {
+                        JobStartExecution::Shell {
+                            command: dispatched_command,
+                            target: match ssh_resource {
+                                Some(resource) => JobShellTarget::Ssh {
+                                    resource: resource.to_string(),
+                                },
+                                None => JobShellTarget::Local {
+                                    shell,
+                                    login: false,
+                                },
+                            },
+                        }
+                    } else {
+                        JobStartExecution::Validation {
+                            plan: JobValidationPlan::Steps(validation_steps),
+                            ssh_resource: ssh_resource.map(str::to_string),
+                        }
                     },
-                    "tool_runtime".to_string(),
-                    ShellJobStartMetadata {
+                    context: JobStartContext {
                         project_id: Some(project_id.clone()),
                         session_id: session_id.clone(),
-                        ssh_resource: ssh_resource.map(str::to_string),
                         project_cwd: Some(resolved_cwd.clone()),
                         purpose: Some(declared_purpose.as_str().to_string()),
                         shell: Some(actual_shell.to_string()),
-                        explicit_shell: if !remote && validation_steps.is_empty() {
-                            shell
-                        } else {
-                            None
-                        },
-                        validation_steps,
-                        validation: None,
                         visibility: crate::runner_http::ShellJobVisibility::Public,
-                        validation_identity: None,
-                        validation_tool: None,
-                        assertion_name: None,
-                        structured_execution: None,
-                        stdin: None,
-                        detached_idempotency_key: None,
                     },
-                    crate::runner_http::runner_access_from_auth(auth).as_ref(),
-                    None,
-                )
-                .await
-            {
-                Ok(job) => {
-                    let continuation = observe_job_continuation(
-                        &job.job_id,
-                        job.observation_token.as_deref(),
-                    );
-                    ToolResult::ok(json!({
+                    codex: None,
+                },
+                "tool_runtime".to_string(),
+                crate::runner_http::runner_access_from_auth(auth).as_ref(),
+                None,
+            )
+            .await
+        {
+            Ok(job) => {
+                let continuation =
+                    observe_job_continuation(&job.job_id, job.observation_token.as_deref());
+                let (execution_state, command_started) =
+                    continued_execution_state(&job.status, job.started_at.is_some());
+                let mut output = json!({
                     "job_id": job.job_id,
                     "kind": job.kind,
                     "status": job.status,
@@ -1619,7 +1650,18 @@ impl ToolRuntime {
                     "shell": actual_shell,
                     "executor": "agent",
                     "ssh_resource": ssh_resource,
-                    "execution_state": "started",
+                    "execution_state": execution_state,
+                    "command_started": command_started,
+                    "execution_lifetime": "runner",
+                    "requested_timeout_secs": requested_timeout_secs,
+                    "effective_timeout_secs": timeout_cap.runner_policy_known.then_some(budget.effective_timeout_secs),
+                    "timeout_limit_source": timeout_cap.source,
+                    "timeout_policy_basis": if timeout_cap.runner_policy_known { "last_registered_runner_policy" } else { "runner_policy_unavailable" },
+                    "timeout_notice": if timeout_cap.runner_policy_known {
+                        "Dispatch budget only; Runner enforces its current policy."
+                    } else {
+                        "Runner policy unavailable; actual execution budget may be lower."
+                    },
                     "created_at": job.created_at,
                     "observation_token": job.observation_token,
                     "continuation_semantics": job_observation_continuation_semantics(),
@@ -1631,13 +1673,27 @@ impl ToolRuntime {
                     "stdout_truncated": false,
                     "stderr_truncated": false,
                     "continuation": continuation,
-                }))
+                });
+                if !timeout_cap.runner_policy_known {
+                    output["dispatched_timeout_secs"] = json!(budget.effective_timeout_secs);
                 }
-                Err(e) => ToolResult::err(command_rejected_message(
-                    e,
-                    "confirm the agent is connected and async jobs are allowed, then retry or use run_shell for short commands.",
-                )),
+                ToolResult::ok(output)
             }
+            Err(error) => {
+                let next_step = match error.failure_kind() {
+                    "invalid_arguments" => {
+                        "correct the rejected execution arguments before retrying."
+                    }
+                    "agent_offline" => "check the selected Runner connection before retrying.",
+                    "capability_unavailable" => "select a Runner that supports asynchronous Jobs.",
+                    "permission_denied" => {
+                        "check the current connection identity and execution authorization."
+                    }
+                    _ => "inspect the admission failure before retrying this unstarted request.",
+                };
+                execution_admission_failure_result(error, next_step)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1892,6 +1948,8 @@ impl ToolRuntime {
                     "stderr_lines": next_stderr_line.saturating_sub(1),
                     "stdout_returned_lines": wait.stdout_returned_lines,
                     "stderr_returned_lines": wait.stderr_returned_lines,
+                    "stdout_returned_bytes": stdout.len(),
+                    "stderr_returned_bytes": stderr.len(),
                     "stdout_truncated": wait.stdout_truncated,
                     "stderr_truncated": wait.stderr_truncated,
                     "stdout_retained_from_line": job.stdout_retained_from_line,
@@ -1936,6 +1994,13 @@ impl ToolRuntime {
                     "detected_summary": detected_summary,
                     "validation": validation,
                 });
+                if let Some(error) = job
+                    .error
+                    .as_deref()
+                    .filter(|error| !error.trim().is_empty())
+                {
+                    output["error"] = json!(error);
+                }
                 if let Some(artifacts) = &job.build_artifacts {
                     output["build_artifacts"] = json!(artifacts);
                 }
@@ -1991,7 +2056,25 @@ impl ToolRuntime {
         let summaries = page
             .jobs
             .iter()
-            .map(|job| self.model_job_summary_value(job))
+            .map(|job| {
+                let mut summary = self.model_job_summary_value(job);
+                summary["command_summary"] = json!(job.command_preview);
+                if let Some(fields) = summary.as_object_mut() {
+                    fields.retain(|_, value| !value.is_null());
+                    for key in [
+                        "executor",
+                        "client_id",
+                        "last_update_seq",
+                        "structured_execution",
+                    ] {
+                        fields.remove(key);
+                    }
+                    if fields.get("recovered_after_server_restart") == Some(&json!(false)) {
+                        fields.remove("recovered_after_server_restart");
+                    }
+                }
+                summary
+            })
             .collect::<Vec<_>>();
         ToolResult::ok(json!({
             "jobs": summaries,
@@ -2210,19 +2293,16 @@ impl ToolRuntime {
         ))
     }
 
-    /// Bounded active job summary for finish/handoff. Never returns stdout,
-    /// stderr, tails, command text, or command previews.
-    pub(crate) async fn active_jobs_summary(
+    /// Project-wide facts are counted before the display limit; only continuation
+    /// selection is scoped to the caller's Session.
+    pub(crate) async fn active_jobs_snapshot(
         &self,
         project: Option<&str>,
         continuation_session_id: Option<&str>,
         auth: Option<&AuthContext>,
         limit: usize,
-    ) -> Value {
-        let max = limit.clamp(1, 20);
-        let mut active = Vec::new();
-        let mut continuation_candidates = Vec::new();
-        for job in self
+    ) -> ActiveJobsSummary {
+        let mut jobs = self
             .runner_registry
             .list_jobs_for_auth_filtered(
                 crate::runner_http::runner_access_from_auth(auth).as_ref(),
@@ -2230,57 +2310,94 @@ impl ToolRuntime {
                 project,
                 None,
             )
-            .await
-        {
-            if !webcodex_runner_registry::job_status_is_active(&job.status) {
-                continue;
-            }
-            let summary = self.model_job_summary_value(&job);
-            if continuation_session_id.is_some()
+            .await;
+        jobs.retain(|job| webcodex_runner_registry::job_status_is_active(&job.status));
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        let facts = super::closeout_facts::JobFacts {
+            blocking_active_count: jobs
+                .iter()
+                .filter(|job| is_blocking_active_job_status(&job.status))
+                .count() as u64,
+            terminal_pending_count: jobs
+                .iter()
+                .filter(|job| is_stop_pending_job_status(&job.status))
+                .count() as u64,
+        };
+        let mut candidates = jobs.iter().filter(|job| {
+            continuation_session_id.is_some()
                 && job.session_id.as_deref() == continuation_session_id
-            {
-                continuation_candidates.push(active_job_continuation_brief(&summary));
-            }
-            active.push(summary);
-        }
-
-        active.sort_by(|a, b| {
-            b["created_at"]
-                .as_i64()
-                .unwrap_or(0)
-                .cmp(&a["created_at"].as_i64().unwrap_or(0))
         });
-        let running_count = active
-            .iter()
-            .filter(|summary| {
-                summary
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_blocking_active_job_status)
-            })
-            .count();
-        // `recovering` jobs are a subset of running/blocking-active jobs that the
-        // runner must reconcile before their output can be trusted. Counted over
-        // the full active vector (not the truncated `recent` list) so the count is
-        // reliable regardless of how many recent jobs are surfaced.
-        let recovering_count = active
-            .iter()
-            .filter(|summary| summary.get("status").and_then(Value::as_str) == Some("recovering"))
-            .count();
-        let stop_requested_count = active
-            .iter()
-            .filter(|summary| {
-                summary
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_stop_pending_job_status)
-            })
-            .count();
-        let terminal_pending_count = stop_requested_count;
-        let blocking_active_count = running_count;
-        let nonblocking_active_count = terminal_pending_count;
-        let active_count = blocking_active_count + nonblocking_active_count;
-        let recent: Vec<Value> = active.iter().take(max).map(active_job_brief).collect();
+        let active_job = match (candidates.next(), candidates.next()) {
+            (Some(job), None) => Some(active_job_continuation_brief(
+                &self.model_job_summary_value(job),
+            )),
+            _ => None,
+        };
+        let recent_limit = limit.clamp(1, 20);
+        ActiveJobsSummary {
+            facts,
+            latest_job_status: jobs
+                .first()
+                .map_or("not_observed", |job| job.status.as_str())
+                .to_owned(),
+            recovering_count: jobs.iter().filter(|job| job.status == "recovering").count() as u64,
+            recent: jobs
+                .iter()
+                .take(recent_limit)
+                .map(|job| active_job_brief(&self.model_job_summary_value(job)))
+                .collect(),
+            recent_limit,
+            active_job,
+        }
+    }
+
+    /// Bounded display summary. Never returns output, tails, or command text.
+    pub(crate) async fn active_jobs_summary(
+        &self,
+        project: Option<&str>,
+        continuation_session_id: Option<&str>,
+        auth: Option<&AuthContext>,
+        limit: usize,
+    ) -> Value {
+        self.active_jobs_snapshot(project, continuation_session_id, auth, limit)
+            .await
+            .to_value()
+    }
+}
+
+/// Authoritative Job facts and their bounded presentation come from one inventory.
+pub(crate) struct ActiveJobsSummary {
+    facts: super::closeout_facts::JobFacts,
+    recovering_count: u64,
+    latest_job_status: String,
+    recent: Vec<Value>,
+    recent_limit: usize,
+    active_job: Option<Value>,
+}
+
+impl ActiveJobsSummary {
+    pub(crate) fn facts(&self) -> super::closeout_facts::JobFacts {
+        self.facts.clone()
+    }
+
+    pub(crate) fn continuation_snapshot(
+        &self,
+    ) -> webcodex_workflow_session::ContinuationJobSnapshot {
+        let active_count = self.facts.blocking_active_count + self.facts.terminal_pending_count;
+        webcodex_workflow_session::ContinuationJobSnapshot {
+            active_count,
+            running_count: self.facts.blocking_active_count,
+            recovering_count: self.recovering_count,
+            terminal_pending_count: self.facts.terminal_pending_count,
+            recent_truncated: active_count > self.recent_limit as u64,
+            latest_job_status: self.latest_job_status.clone(),
+        }
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        let blocking_active_count = self.facts.blocking_active_count;
+        let terminal_pending_count = self.facts.terminal_pending_count;
+        let active_count = blocking_active_count + terminal_pending_count;
         let mut warnings = Vec::new();
         if blocking_active_count > 0 {
             warnings.push(json!({
@@ -2299,7 +2416,7 @@ impl ToolRuntime {
             warnings.push(json!({
                 "kind": "jobs_terminal_pending",
                 "blocking": false,
-                "stop_requested_count": stop_requested_count,
+                "stop_requested_count": terminal_pending_count,
                 "terminal_pending_count": terminal_pending_count,
                 "message": format!(
                     "{} job{} stop_requested and waiting for terminal status",
@@ -2310,19 +2427,19 @@ impl ToolRuntime {
         }
         let mut output = json!({
             "active_count": active_count,
-            "running_count": running_count,
-            "recovering_count": recovering_count,
-            "stop_requested_count": stop_requested_count,
+            "running_count": blocking_active_count,
+            "recovering_count": self.recovering_count,
+            "stop_requested_count": terminal_pending_count,
             "terminal_pending_count": terminal_pending_count,
             "blocking_active_count": blocking_active_count,
-            "nonblocking_active_count": nonblocking_active_count,
-            "recent": recent,
-            "recent_limit": max,
-            "truncated": active_count > max,
+            "nonblocking_active_count": terminal_pending_count,
+            "recent": self.recent,
+            "recent_limit": self.recent_limit,
+            "truncated": active_count > self.recent_limit as u64,
             "warnings": warnings,
         });
-        if continuation_candidates.len() == 1 {
-            output["active_job"] = continuation_candidates.pop().unwrap_or(Value::Null);
+        if let Some(job) = &self.active_job {
+            output["active_job"] = job.clone();
         }
         output
     }

@@ -74,6 +74,7 @@ async fn collaboration_message_projection_reuses_authority_fence_and_hides_compl
     let assignment_fence = runtime
         .sessions
         .get_assignment(&session.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     runtime
@@ -88,6 +89,7 @@ async fn collaboration_message_projection_reuses_authority_fence_and_hides_compl
             author_session_id: Some("wc_sess_worker0000000000".to_string()),
             expected_assignment_fence: assignment_fence,
         })
+        .await
         .unwrap();
 
     let board = session_messages_for_auth(
@@ -500,6 +502,7 @@ async fn browser_message_mutations_fail_closed_on_authority_and_state_conflicts(
     let assignment_fence = runtime
         .sessions
         .get_assignment(&session.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     runtime
@@ -514,6 +517,7 @@ async fn browser_message_mutations_fail_closed_on_authority_and_state_conflicts(
             author_session_id: None,
             expected_assignment_fence: assignment_fence,
         })
+        .await
         .unwrap();
     assert_eq!(
         session_replace_message_for_auth(
@@ -564,6 +568,7 @@ async fn browser_message_mutation_json_and_uncertain_errors_are_distinct() {
     let (_tmp, service) = hosted_service(test_runtime());
     let unknown_field =
         TestClient::post("http://localhost/api/runtime-console/workflow-session-withdraw-message")
+            .bearer_auth("console-bootstrap-test")
             .json(&serde_json::json!({
                 "project": "agent:missing:project",
                 "session_id": "wc_sess_missing000000000",
@@ -618,8 +623,7 @@ async fn browser_message_mutation_persistence_uncertain_is_503_and_retains_live_
         })
         .unwrap();
     runtime.sessions.flush_persistence();
-    std::fs::remove_dir_all(&ledger_dir).unwrap();
-    std::fs::write(&ledger_dir, b"block durable ledger recreation").unwrap();
+    runtime.sessions.set_persistence_failure_for_test(true);
     let (_tmp, service) = hosted_service_with_shared_key(runtime.clone(), token);
 
     let mut response =
@@ -774,7 +778,7 @@ async fn collaboration_observation_route_preserves_baseline_update_timeout_and_p
 }
 
 #[tokio::test]
-async fn collaboration_observation_route_surfaces_history_loss_from_authoritative_retention() {
+async fn collaboration_observation_route_keeps_history_after_message_churn() {
     let runtime = test_runtime();
     let auth = crate::auth::shared_key_context("runtime-console-history-loss");
     let project_id = "agent:client-a:proj-a";
@@ -794,7 +798,7 @@ async fn collaboration_observation_route_surfaces_history_loss_from_authoritativ
     .await
     .unwrap();
 
-    let retention_limit = runtime.sessions.status().max_messages_per_session;
+    let retention_limit = 500;
     for index in 0..=retention_limit {
         runtime
             .sessions
@@ -823,7 +827,7 @@ async fn collaboration_observation_route_surfaces_history_loss_from_authoritativ
     .await
     .unwrap();
     assert!(observed.changed);
-    assert!(observed.history_lost);
+    assert!(!observed.history_lost);
     assert!(observed.has_more);
     assert_eq!(observed.messages.len(), 100);
 }

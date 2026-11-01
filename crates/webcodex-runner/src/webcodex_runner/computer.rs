@@ -22,7 +22,56 @@ pub(super) fn computer_runtime() -> &'static ComputerRuntime {
         ComputerRuntime::new(ComputerConfig {
             max_encoded_image_bytes: MAX_MCP_IMAGE_BYTES,
         })
+        .with_local_control(
+            LOCAL_CONTROL
+                .get()
+                .cloned()
+                .unwrap_or_else(webcodex_computer::local_control::LocalControl::new),
+        )
     })
+}
+
+#[cfg(windows)]
+pub(crate) fn configure_local_control(dir: &std::path::Path) -> Result<(), String> {
+    let control = webcodex_computer::local_control::LocalControl::persistent(dir)?;
+    let serve_result = webcodex_computer::local_control::serve(dir, control.clone());
+    let control = local_control_after_pipe_start(control, serve_result)?;
+    LOCAL_CONTROL
+        .set(control)
+        .map_err(|_| "computer control already configured".to_string())
+}
+
+#[cfg(windows)]
+fn local_control_after_pipe_start(
+    control: std::sync::Arc<webcodex_computer::local_control::LocalControl>,
+    serve_result: Result<(), String>,
+) -> Result<std::sync::Arc<webcodex_computer::local_control::LocalControl>, String> {
+    match serve_result {
+        Ok(()) => Ok(control),
+        Err(error)
+            if error == webcodex_computer::local_control::INTERACTIVE_SESSION_REQUIRED_ERROR =>
+        {
+            // An unmanaged Runner launched as a Windows Session 0 task still
+            // needs to serve its independent Shell/file/Job requests. There is
+            // no physical desktop for a management pipe, so fail the Computer
+            // gate closed rather than failing the entire Runner process.
+            tracing::warn!(
+                "No interactive Computer session; native control is disabled for this Runner"
+            );
+            Ok(webcodex_computer::local_control::LocalControl::disabled())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+static LOCAL_CONTROL: OnceLock<std::sync::Arc<webcodex_computer::local_control::LocalControl>> =
+    OnceLock::new();
+
+pub(crate) fn local_control_epoch() -> Option<String> {
+    LOCAL_CONTROL
+        .get()
+        .and_then(|control| control.snapshot().ok())
+        .map(|state| state.epoch)
 }
 
 #[cfg(test)]
@@ -39,6 +88,20 @@ fn ensure_exact_payload_fields(payload: &Value, expected: &[&str]) -> Result<(),
         return Err("invalid_request: computer payload contains unsupported fields".to_string());
     }
     Ok(())
+}
+
+fn element_state_selection_requested(payload: &Value) -> Result<bool, String> {
+    let fields: &[&str] = if payload.get("include_selection").is_some() {
+        &["surface_id", "element_id", "include_selection"]
+    } else {
+        &["surface_id", "element_id"]
+    };
+    ensure_exact_payload_fields(payload, fields)?;
+    match payload.get("include_selection") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err("invalid_request: include_selection must be boolean".into()),
+    }
 }
 
 fn optional_snapshot_region(payload: &Value) -> Result<Option<SnapshotRegion>, String> {
@@ -70,6 +133,20 @@ pub(crate) fn handle_computer_operation_with_runtime(
     operation: &RunnerComputerOperation,
 ) -> CommandResult {
     let start = Instant::now();
+    let is_control = operation.kind.is_effect();
+    let control = LOCAL_CONTROL
+        .get()
+        .unwrap_or_else(|| runtime.local_control());
+    if is_control && LOCAL_CONTROL.get().is_some() && operation.control_epoch.is_none() {
+        return err_cmd(
+            start,
+            "computer_control_changed: Server must bind the current local control epoch".into(),
+        );
+    }
+    let _activity = match control.begin(is_control, operation.control_epoch.as_deref()) {
+        Ok(guard) => guard,
+        Err(error) => return err_cmd(start, error),
+    };
     let payload = match serde_json::from_str::<Value>(&operation.payload) {
         Ok(value) => value,
         Err(_) => {
@@ -152,8 +229,8 @@ pub(crate) fn handle_computer_operation_with_runtime(
                 runtime.accessibility_tree_scoped(surface_id, root, max_depth, max_nodes)
             })
         }
-        RunnerComputerOperationKind::ElementState => {
-            ensure_exact_payload_fields(&payload, &["surface_id", "element_id"]).and_then(|()| {
+        RunnerComputerOperationKind::ElementState => element_state_selection_requested(&payload)
+            .and_then(|include_selection| {
                 let surface_id = payload
                     .get("surface_id")
                     .and_then(Value::as_str)
@@ -162,9 +239,8 @@ pub(crate) fn handle_computer_operation_with_runtime(
                     .get("element_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "invalid_request: element_id is required".to_string())?;
-                runtime.element_state(surface_id, element_id)
-            })
-        }
+                runtime.element_state(surface_id, element_id, include_selection)
+            }),
         RunnerComputerOperationKind::ActivateWindow => {
             ensure_exact_payload_fields(&payload, &["surface_id"])
                 .and_then(|()| {
@@ -225,33 +301,11 @@ pub(crate) fn handle_computer_operation_with_runtime(
                 })
                 .and_then(|text| runtime.write_clipboard(text))
         }
-        RunnerComputerOperationKind::KeyInput => {
-            ensure_exact_payload_fields(&payload, &["surface_id", "key", "modifiers"]).and_then(
-                |()| {
-                    let surface_id = payload
-                        .get("surface_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "invalid_request: surface_id is required".to_string())?;
-                    let key = payload
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "invalid_request: key is required".to_string())?;
-                    let modifier_values = payload
-                        .get("modifiers")
-                        .and_then(Value::as_array)
-                        .ok_or_else(|| "invalid_request: modifiers must be an array".to_string())?;
-                    let modifiers = modifier_values
-                        .iter()
-                        .map(|value| {
-                            value.as_str().map(str::to_string).ok_or_else(|| {
-                                "invalid_request: each modifier must be a string".to_string()
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    runtime.key_input(surface_id, key, &modifiers)
-                },
-            )
-        }
+        RunnerComputerOperationKind::KeyInput => serde_json::from_value::<
+            webcodex_core::computer_input_contract::ComputerKeyInputPayload,
+        >(payload)
+        .map_err(|_| "invalid_request: invalid computer key input payload".to_string())
+        .and_then(|input| runtime.key_input(&input.surface_id, &input.key, &input.modifiers)),
         RunnerComputerOperationKind::PointerMove | RunnerComputerOperationKind::PointerClick => {
             ensure_exact_payload_fields(&payload, &["display_id", "snapshot_generation", "x", "y"])
                 .and_then(|()| {

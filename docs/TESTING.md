@@ -44,6 +44,29 @@ and release jobs upload them even on failure. They never contain signing argv or
 environment dumps. Successful preflight does not guarantee later disk space,
 notarization, or signing availability; final checks remain authoritative.
 
+## CLI JSON map configurations
+
+CLI text must be identical with serde_json's default sorted map and its
+`preserve_order` map. Combined Server/Runner builds enable `preserve_order`
+through `agent-client-protocol-schema`; a Server-only test run does not cover
+that production dependency graph. Inspect the resolved graph with
+`cargo tree --locked -p webcodex -p webcodex-runner -e features -i serde_json`.
+
+Run the same CLI snapshots and order regressions in both configurations:
+
+```bash
+cargo test --locked -p webcodex --lib cli
+cargo test --locked -p webcodex --lib --features serde_json/preserve_order cli
+```
+
+The Linux Server CI lane runs the default suite and a second CLI pass with
+`preserve_order`. Both use the same checked-in snapshots. Reversed object
+insertion fixtures also cover inline recovery calls, manifests, generic fields,
+and the lossless JSON fallback. Tool-specific field order remains explicit;
+other object keys are lexical, while arrays, search hits, and log lines retain
+their source order. Canonical API JSON and third-party provider payloads do not
+adopt the CLI text ordering policy.
+
 ## Test Lanes
 
 | Lane | Purpose | Default resources | Typical command |
@@ -65,6 +88,7 @@ notarization, or signing availability; final checks remain authoritative.
 | real-process hosted-connect harness | Build the real Server, Runner, and CLI; start a shared-key-enabled loopback Server; run `webcodex connect`; verify same-key project visibility and a read, cross-key isolation, detached Runner survival, repeated-connect PID reuse, hosted `runner status`, explicit stop, secret-safe output/log/state, and an untouched Git checkout. | Local processes, isolated XDG config/state roots, a temp Git project, bounded curl and outer timeout, trap cleanup; never production. | `bash scripts/e2e_hosted_connect.sh` |
 | real-process job reconciliation harness | Boot a real server plus a WebSocket runner that advertises `job_state_reconciliation`. Scenario A keeps a raw async Job running across a SERVER-only restart and asserts the SAME runner instance, original `job_id`, preserved ownership/project/session, non-regressing sequence/log cursors, `recovered_after_server_restart`, original-process stop, and one side-effect set. Scenario B lets a Job complete while the Server is offline and reconciles the terminal result without duplicate logs or execution. Scenario C forces `run_process` past its synchronous grace window, then proves the handed-off structured Job survives a Server restart and an old Server-epoch observation token refreshes immediately for the same `job_id`. Scenario D uses a delayed Cargo fixture to force a real `cargo_check` validation handoff past its sync window, then proves the same restart/token-refresh/stop contract with the validation command started exactly once. Ordinary Runner-owned Jobs keep the Runner process alive for these scenarios; `run_detached_process` restart survival is a separate supervisor-ownership contract covered by its focused Runner suites and production dogfood. | Local processes, temp dirs/ports/tokens, and a temp project; no production services or QUIC certs. Scenario D intentionally takes roughly the validation sync window plus restart time. | `bash scripts/e2e_job_reconciliation_ws.sh` |
 | real-process job recovery failure/non-reconciliation harness | Cover the failure and non-reconciliation paths the happy-path reconciliation harness omits, using `WEBCODEX_JOB_RECOVERY_GRACE_SECS=10` (clamped, above the 5s floor) so the deadline is bounded without waiting the 120s default. Scenario C: kill the runner only (server stays up), let the job enter `recovering`, and assert the non-request-triggered recovery-timeout sweep transitions it to `lost` with `runner_recovery_deadline_exceeded`, `ended_at` set once, one list record, stop-on-lost stable, and the command never re-executes. Scenario D: instance B replaces instance A (same client_id, new `agent_instance_id`); A's job becomes `lost` with `runner_instance_replaced`, B starts its own new job, A's late update is rejected, first `ended_at`/reason preserved. Scenario E: a generation-2 Runner registered with `WEBCODEX_RUNNER_DISABLE_JOB_STATE_RECONCILIATION=1` (no capability, no inventory) dispatches a job and, on disconnect, deterministically fences it to `lost` with `runner_disconnected_without_reconciliation` (never `recovering`); after a server restart its public lost receipt remains observable within retention, and a same-client new no-reconciliation instance cannot revive execution. Scenario F: a long job across three server restarts keeps the same `job_id`, runs the command once, keeps `last_update_seq`/log cursors non-regressing and markers non-duplicating, and reaches a terminal `stopped` that survives a third restart with `ended_at` unchanged by terminal inventory replay. | Local processes, temp dirs/ports/tokens, and a temp project; no production services or QUIC certs. | `bash scripts/e2e_job_recovery_failures_ws.sh` |
+| project-scoped parent-root admission | Real `webcodex share --auth oauth --project-roots DIR` process with a real Server and WebSocket Runner: authorize with PKCE S256, then admit an already-registered project, a new Git directory and a new non-Git directory through the MCP `work_on_project` entry point, create and resume a managed worktree, collapse concurrent admissions to one project identity, and assert denials for out-of-root, prefix-sibling, symlink-escape and missing roots plus exact-path credentials keeping their fence. Also covers root replacement, omitted-flag restore and `--no-project-roots` clearing without revival. | Temporary state dir, loopback ports, a temp fixture root; re-authorizes each share launch instead of reusing a token. Unix only. | `python3 scripts/e2e_project_share_roots.py --bin-dir <dogfood bin dir>` |
 | security auth matrix | Cover OAuth, scope policy, shared-key behavior, token classes, read-only session guards, and denied mutations. | No external identity provider by default; use local fixtures and synthetic tokens. | `cargo test -p webcodex --lib oauth -- --nocapture`; `cargo test -p webcodex --lib scope -- --nocapture`; `cargo test -p webcodex --lib metadata -- --nocapture` |
 | MCP conformance baseline | Exercise the real Salvo `/mcp` handlers through a disposable loopback fixture against a pinned upstream referee, then gate on check-level coverage/classification rather than process exit alone. | Loopback product fixture; immutable external referee source/dependencies fetched only by the explicit script/CI lane; no production credentials. | `bash scripts/mcp_conformance.sh`; see [`MCP_CONFORMANCE.md`](MCP_CONFORMANCE.md). |
 
@@ -187,28 +211,25 @@ change is ready for review.
 
 ## No-build guidance preflight
 
-Before compiling Rust after changing model-facing tool guidance or its literal
-test requirements, run `python3 scripts/check_builtin_guidance_contract.py`
-(Windows: `python`). It reads the canonical Direct and Host guidance
-contributors, the corresponding Rust test phrase arrays, and the Rust-owned
-item-count/character limits. It fails closed on unexpected source layouts or
-missing literal phrases; no Cargo command or network access is involved.
+Before compiling Rust after changing bundled guidance, run
+`python3 scripts/check_builtin_guidance_contract.py` (Windows: `python`).
+It groups contributors by their declared target and checks nonempty content,
+duplicate items and Rust-owned item/character targets. It does not parse Rust
+tests or freeze ordinary wording. Rust composition, schema and behavior tests
+remain the semantic authority.
 
-The ordinary Linux Server CI Rust shard runs this cheap preflight **before**
-the package compile. It catches straightforward guidance drift before the
-expensive Rust suite, but **does not replace** that suite or prove the dynamic
-standard startup payload is below 16 KiB. All existing Server, experimental
-Code Mode, permission, schema, and platform gates still run after a successful
-preflight. Changing a valid Rust guidance representation may require updating
-this intentionally strict static parser and its fixtures together.
+The Linux Server CI Rust shard runs this cheap size/shape preflight before
+compilation. It neither replaces the Rust suite nor proves aggregate startup or
+context payload bounds. A change to the supported Rust literal representation
+may require updating the small source reader; prose edits do not.
 
 Run `python3 -m unittest scripts.tests.test_check_builtin_guidance_contract`
-for focused non-compiling negative cases. They cover over-budget guidance,
-missing text required by Rust tests, malformed literals, and pre-Cargo CI
-ordering. The verifier also reproduced three historical failed PR guidance
-revisions in less than two milliseconds each, while accepting the corrected
-revision; actual CI savings depend on where the failing build would have
-stopped otherwise.
+for no-build negative cases. They cover empty/malformed contributors, combined
+target budgets, oversized items and invalid limits, and prove that rewording
+guidance needs no parallel phrase updates. The Rust tests cover task chapter
+selection, strategy isolation, closed schemas and critical authority/recovery
+semantics. Review meaningful prose changes in the diff; do not add broad golden
+snapshots or arrays of required editorial phrases.
 
 ## CI Mapping
 

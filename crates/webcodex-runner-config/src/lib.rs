@@ -289,6 +289,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             structured_go_test_json: false,
             project_validation_v1: false,
             project_build_v1: false,
+            project_build_rust_options_v1: false,
             project_build_node_v1: false,
             project_validation_node_json_v1: false,
             project_build_python_v1: false,
@@ -301,12 +302,14 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             project_go_single_module_v1: false,
             project_validation_package_scope_v1: false,
             project_all_packages_v1: false,
+            project_workspace_exclusions_v1: false,
             project_validation_test_options_v1: false,
             project_validation_python_pytest_v1: false,
             project_validation_python_ruff_v1: false,
             project_validation_node_script_check_v1: false,
             project_validation_node_tap_v1: false,
             project_validation_rust_clippy_v1: false,
+            project_validation_rust_clippy_offline_v1: false,
             // Like JSON parsing, first-class durable go_test support is
             // advertised by the running binary, never by generated static config.
             structured_go_test_tool: false,
@@ -381,12 +384,16 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // Control authority is runtime/platform-specific and is never
             // implied by either observation capability in generated config.
             computer_control: false,
+            computer_local_control: false,
             // Semantic scroll-to-element is an independently advertised native
             // capability and is never inferred from computer_control.
             computer_scroll_to_element: false,
             // Closed key input is independently advertised only by a running native
             // implementation and is never inferred from computer_control.
             computer_key_input: false,
+            computer_selection: false,
+            computer_letter_shortcuts: false,
+            computer_key_chords: false,
             // Exact window activation is independently advertised only by the
             // running binary after the native handler is installed.
             computer_window_activate: false,

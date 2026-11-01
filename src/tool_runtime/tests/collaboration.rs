@@ -885,6 +885,7 @@ async fn collaboration_two_sessions_keep_execution_history_and_explicit_provenan
     let assignment_fence = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo_id)
+        .await
         .unwrap()
         .assignment_fence;
     let forged_author_error = super::super::ToolCall::from_tool_name(
@@ -902,7 +903,19 @@ async fn collaboration_two_sessions_keep_execution_history_and_explicit_provenan
     )
     .expect_err("caller-controlled completion author must fail closed");
     assert!(
-        forged_author_error.contains("unknown field `author_session_id`"),
+        forged_author_error.contains("[field]: unknown field"),
+        "{forged_author_error}"
+    );
+    assert!(
+        forged_author_error.contains("accepted top-level fields include"),
+        "{forged_author_error}"
+    );
+    assert!(
+        !forged_author_error.contains("author_session_id"),
+        "{forged_author_error}"
+    );
+    assert!(
+        !forged_author_error.contains("wc_sess_forged_should_be_ignored"),
         "{forged_author_error}"
     );
 
@@ -1079,6 +1092,7 @@ async fn collaboration_completion_without_recording_session_has_null_author_even
     let assignment_fence = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     let window = ClientWindow::for_test("no-recorder-author-window");
@@ -1126,6 +1140,7 @@ async fn collaboration_explicit_recording_session_is_completion_author() {
     let assignment_fence = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     let window = ClientWindow::for_test("recorder-vs-current-window");
@@ -1197,6 +1212,7 @@ async fn collaboration_cross_project_recorder_fails_closed_before_completion() {
     let assignment_fence = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     let window = ClientWindow::for_test("cross-project-worker");
@@ -1473,6 +1489,7 @@ async fn collaboration_mixed_project_scope_fails_closed_in_both_directions() {
     let scoped_assignment_fence = runtime
         .sessions
         .get_assignment(&scoped_coordinator.session_id, &scoped_todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     for (tool_name, arguments) in [
@@ -1556,6 +1573,7 @@ async fn collaboration_mixed_project_scope_fails_closed_in_both_directions() {
     let unscoped_assignment_fence = runtime
         .sessions
         .get_assignment(&unscoped_coordinator_id, &unscoped_todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
     for (tool_name, arguments) in [
@@ -1676,10 +1694,11 @@ async fn project_scoped_session_authority_rejects_recycled_project_identity() {
     let assignment_fence = runtime
         .sessions
         .get_assignment(&session_id, &todo_id)
+        .await
         .unwrap()
         .assignment_fence;
     runtime.sessions.flush_persistence();
-    let persisted = std::fs::read_to_string(&ledger).unwrap();
+    let persisted = webcodex_workflow_session::root_test_support::read_ledger(&ledger).unwrap();
     assert!(persisted.contains("owner_authority_fingerprint"));
     assert!(!persisted.contains("recycled-authority-a"));
 
@@ -1862,6 +1881,7 @@ async fn projectless_session_owner_authority_blocks_known_ids_from_foreign_princ
     let assignment_fence = runtime
         .sessions
         .get_assignment(&session_id, &todo_id)
+        .await
         .unwrap()
         .assignment_fence;
 
@@ -1974,7 +1994,7 @@ async fn projectless_owner_fingerprint_survives_restart_without_raw_principal_ma
     assert!(started.success, "{:?}", started.error);
     let session_id = started.output["session_id"].as_str().unwrap().to_string();
     runtime.sessions.flush_persistence();
-    let persisted = std::fs::read_to_string(&ledger).unwrap();
+    let persisted = webcodex_workflow_session::root_test_support::read_ledger(&ledger).unwrap();
     assert!(persisted.contains("owner_authority_fingerprint"));
     assert!(!persisted.contains(alice_identity));
     drop(runtime);
@@ -2035,8 +2055,10 @@ async fn legacy_projectless_owner_hash_is_not_accepted_after_restart() {
             .unwrap();
     assert_ne!(legacy_fingerprint, canonical_fingerprint);
 
-    let mut persisted: Value =
-        serde_json::from_str(&std::fs::read_to_string(&ledger).unwrap()).unwrap();
+    let mut persisted: Value = serde_json::from_str(
+        &webcodex_workflow_session::root_test_support::read_ledger(&ledger).unwrap(),
+    )
+    .unwrap();
     let row = persisted["sessions"]
         .as_array_mut()
         .unwrap()
@@ -2096,6 +2118,7 @@ async fn collaboration_foreign_owner_cannot_read_or_complete_known_session_and_t
     let assignment_fence = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo.message_id)
+        .await
         .unwrap()
         .assignment_fence;
 

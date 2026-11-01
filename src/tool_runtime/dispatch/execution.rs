@@ -55,6 +55,14 @@ impl ToolRuntime {
                     .await
             }
             ToolCall::CodingAgentCancel { run_id } => self.coding_agent_cancel(run_id, auth).await,
+            ToolCall::CodingAgentDiagnose {
+                project,
+                provider_id,
+                include_live_acp,
+            } => {
+                self.coding_agent_diagnose(project, provider_id, include_live_acp, auth)
+                    .await
+            }
 
             call @ (ToolCall::RunProcess { .. }
             | ToolCall::RunDetachedProcess { .. }
@@ -86,6 +94,9 @@ impl ToolRuntime {
                 .await
             }
             ToolCall::ProjectBuild {
+                profile,
+                targets,
+                artifact_policy,
                 project,
                 session_id,
                 cwd,
@@ -103,6 +114,9 @@ impl ToolRuntime {
                     scope,
                     dependency_policy,
                     dependency_resolution_policy,
+                    profile,
+                    targets,
+                    artifact_policy,
                     timeout_secs,
                     structured_handoff_max_secs,
                     ssh_resource.as_deref(),

@@ -286,7 +286,6 @@ fn gate_router(config: Arc<crate::Config>, db: Arc<crate::Database>) -> Router {
                 .push(Router::with_path("tools/call").post(echo_ok))
                 .push(Router::with_path("future/authenticated-route").post(echo_ok))
                 .push(Router::with_path("runtime-console/projects").post(echo_ok))
-                .push(Router::with_path("shell/job").post(echo_ok))
                 .push(Router::with_path("audit/sessions").post(echo_ok))
                 .push(Router::with_path("audit/session").post(echo_ok))
                 .push(Router::with_path("audit/stats").post(echo_ok))
@@ -588,7 +587,7 @@ async fn gate_unauthorized_response_is_json_not_html() {
 // -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn pat_verifier_bootstrap_when_auth_disabled() {
+async fn pat_verifier_rejects_when_bootstrap_token_is_missing() {
     let config = crate::Config {
         addr: "127.0.0.1:0".to_string(),
         data_dir: PathBuf::from("./data"),
@@ -598,9 +597,10 @@ async fn pat_verifier_bootstrap_when_auth_disabled() {
     };
     let verifier = PatVerifier;
     let result = verifier.verify(&config, None, "anything").await.unwrap();
-    let ctx = result.expect("should return bootstrap context");
-    assert!(ctx.is_bootstrap);
-    assert_eq!(ctx.kind, AuthKind::Bootstrap);
+    assert!(
+        result.is_none(),
+        "missing credential must not grant bootstrap"
+    );
 }
 
 #[tokio::test]
@@ -1731,9 +1731,24 @@ async fn authenticate_oauth2_stub_does_not_break_pat_fallback() {
 // -----------------------------------------------------------------------
 
 #[tokio::test]
+async fn tokenless_http_rejects_bootstrap_on_all_listener_addresses() {
+    let _env = AuthEnvGuard::auth_required();
+    for address in ["127.0.0.1:8080", "[::1]:8080", "0.0.0.0:8080", "[::]:8080"] {
+        let (_tmp, db) = gate_test_db();
+        let mut config = (*gate_test_config(None)).clone();
+        config.addr = address.to_string();
+        let service = salvo::Service::new(gate_router(Arc::new(config), db));
+        for token in [None, Some("untrusted")] {
+            let (status, _) = gate_send(&service, "/api/runtime/status", token).await;
+            assert_eq!(status, salvo::http::StatusCode::UNAUTHORIZED, "{address}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn authenticate_bearer_bootstrap_and_no_token() {
     let _env = AuthEnvGuard::auth_required();
-    // Auth disabled → bootstrap.
+    // Missing bootstrap credentials must not grant authority.
     let config = crate::Config {
         addr: "127.0.0.1:0".to_string(),
         data_dir: PathBuf::from("./data"),
@@ -1741,10 +1756,10 @@ async fn authenticate_bearer_bootstrap_and_no_token() {
         max_text_size: 2 * 1024 * 1024,
         oauth2: crate::OAuth2Config::default(),
     };
-    let ctx = authenticate_bearer(&config, None, Some("anything"))
+    assert!(authenticate_bearer(&config, None, Some("anything"))
         .await
-        .expect("auth disabled should return bootstrap");
-    assert!(ctx.is_bootstrap);
+        .is_none());
+    assert!(authenticate_bearer(&config, None, None).await.is_none());
 
     // Valid bootstrap token → bootstrap.
     let config = crate::Config {
@@ -2054,7 +2069,6 @@ async fn oauth2_scope_gate_matrix() {
     for (scopes, path) in [
         ("runtime:read", "/api/runtime/status"),
         ("project:read", "/api/runtime-console/projects"),
-        ("job:run", "/api/shell/job"),
     ] {
         let (_tmp, service, token) = gate_oauth2_token_with_scopes(scopes).await;
         let (status, body) = gate_send(&service, path, Some(&token)).await;
@@ -2063,7 +2077,7 @@ async fn oauth2_scope_gate_matrix() {
     // …every other surface stays closed with insufficient_scope, including
     // the OAuth authorize page, the Runner transport, and unknown routes
     // (fail closed).
-    let insufficient: [(&str, &str, Option<&str>); 6] = [
+    let insufficient: [(&str, &str, Option<&str>); 5] = [
         (
             "project:read",
             "/api/runtime/status",
@@ -2074,7 +2088,6 @@ async fn oauth2_scope_gate_matrix() {
             "/api/runtime-console/projects",
             Some(SCOPE_PROJECT_READ),
         ),
-        ("project:write", "/api/shell/job", Some(SCOPE_JOB_RUN)),
         ("runtime:read", "/oauth/authorize", None),
         ("runtime:read", "/api/shell/agent/register", None),
         ("runtime:read", "/api/future/authenticated-route", None),
@@ -2123,11 +2136,7 @@ async fn api_token_obeys_declared_scope_and_unknown_route_policy() {
     );
     let service = Service::new(gate_router(config, db));
 
-    for path in [
-        "/api/runtime/status",
-        "/api/runtime-console/projects",
-        "/api/shell/job",
-    ] {
+    for path in ["/api/runtime/status", "/api/runtime-console/projects"] {
         let (status, body) = gate_send(&service, path, Some(&user_token)).await;
         assert_eq!(status, StatusCode::OK, "{} body: {:?}", path, body);
     }

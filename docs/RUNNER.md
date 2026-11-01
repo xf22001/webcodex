@@ -546,17 +546,60 @@ tails, and can be stopped. Structured execution (`run_process`,
 outlives the synchronous grace period; the same process continues — it is never
 restarted.
 
-The Runner executes up to `max_concurrent_jobs` Jobs at once (default 4, valid
+The Runner executes up to `max_concurrent_jobs` Jobs at once (default 32, valid
 range 1..64). Values outside that range are rejected as configuration errors.
-This is an operational tuning control, not a security boundary, and requires a
-Runner restart to change:
+This operational tuning control supports `check_runner_config` followed by
+`reload_runner_config` (or Unix SIGHUP), without restarting:
 
 ```toml
-max_concurrent_jobs = 4
+max_concurrent_jobs = 32
 ```
+
+Increasing the limit immediately schedules existing queued Jobs. Decreasing it
+leaves running Jobs intact; new starts wait until occupied slots fall below the
+new limit. Running may temporarily exceed the limit. Registration and runtime
+metadata report the applied capacity with a config-generation fence, including
+after reconnect. Older Servers retain startup-only capacity observations.
 
 When all slots are occupied, an accepted Job remains the same queryable Job
 with the same `job_id` and reports `agent_queued`.
+
+
+### Execution budgets and lifetime ownership
+
+| Entry | Default | Tool/admission ceiling |
+|---|---:|---:|
+| `run_shell` | 60 s | 3600 s (1 hour) |
+| `run_job` | 3600 s | 86400 s (24 hours) |
+| `run_process`, `run_script`, `run_detached_process` | 60 s | 604800 s (7 days) |
+
+Positive oversized tool budgets are clamped. The Runner additionally enforces
+`policy.max_timeout_secs` (default 3600 s); a longer tool ceiling does not raise
+that policy. `run_job` reports `requested_timeout_secs`,
+`effective_timeout_secs`, and `timeout_limit_source` (`request`, `tool_limit`,
+`runner_policy`, or `runner_policy_unknown`). `timeout_policy_basis` and a short
+notice identify the last-registered-policy evidence boundary: the Runner still
+enforces its policy at execution admission. When a legacy Runner has not reported
+its policy, `effective_timeout_secs=null` and `dispatched_timeout_secs` is only the
+known Server budget; the actual Runner budget may be lower. Acceptance is not a
+guarantee that a process will run until the reported dispatch deadline.
+
+The initial `run_job` receipt retains its Job id and exact `observe_jobs`
+continuation. A queued receipt has `command_started=false`: that observation
+proves admission, not native process start. Ordinary Jobs are Runner-owned;
+Runner replacement does not inherit them. Choose `run_detached_process` from
+the start only when a native executable and explicit argv need supervisor
+ownership across Runner replacement. It does not accept an arbitrary shell
+command or guarantee survival across host reboot.
+
+Terminal Job records and detached replay keys have a separate bounded
+24-hour retention window after completion; this does not limit an active
+process to 24 hours. Count limits can shorten ordinary terminal retention.
+Job output is a bounded tail, so training should write full logs, checkpoints,
+and artifacts to project files. Those files are not deleted when a Job receipt
+expires. A timeout or unknown outcome never authorizes automatic re-execution
+and does not prove that every side effect ended. Observe the original Job and
+inspect the target state before deciding whether another attempt is safe.
 
 ## Transports in more detail
 
@@ -825,7 +868,7 @@ of finding its PID or sending signals manually:
 
 `reload_runner_config` never writes `runner.toml`; it only activates the candidate
 already on disk. Hot-reloadable policy, shell, configured Skill roots, configured
-instruction files, Native Plugin, and static SSH-resource changes can become active
+instruction files, Job capacity, Native Plugin, and static SSH-resource changes can become active
 immediately, while fields reported in `restart_required_fields`
 remain startup-only until the Runner restarts. Invalid candidates leave the active
 snapshot and generation unchanged. Managed `manage_ssh_resource` mutations are different:

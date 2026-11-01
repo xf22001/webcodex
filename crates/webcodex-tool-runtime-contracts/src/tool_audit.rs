@@ -241,6 +241,15 @@ impl ToolCallAuditProjection for ToolCall {
             Self::CodingAgentCancel { run_id } => serde_json::json!({
                 "run_id": run_id,
             }),
+            Self::CodingAgentDiagnose {
+                project,
+                provider_id,
+                include_live_acp,
+            } => serde_json::json!({
+                "project": project,
+                "provider_id": provider_id,
+                "include_live_acp": include_live_acp,
+            }),
             Self::RunScript {
                 project,
                 language,
@@ -1386,6 +1395,7 @@ impl ToolCallAuditProjection for ToolCall {
                 limit,
                 expected_definition_revision,
                 expected_package_revision,
+                expected_resource_sha256,
                 ..
             } => serde_json::json!({
                 "project": project,
@@ -1395,6 +1405,7 @@ impl ToolCallAuditProjection for ToolCall {
                 "limit": limit,
                 "expected_definition_revision": expected_definition_revision,
                 "expected_package_revision": expected_package_revision,
+                "expected_resource_sha256": expected_resource_sha256,
             }),
             Self::SkillVersions {
                 project,
@@ -2122,8 +2133,10 @@ impl ToolCallAuditProjection for ToolCall {
                 message,
                 delivery_key,
                 kind,
+                priority,
             } => serde_json::json!({
                 "kind": kind,
+                "priority": priority,
                 "project": project,
                 "session_id": session_id,
                 "message_chars": message.chars().count(),
@@ -2157,6 +2170,7 @@ impl ToolCallAuditProjection for ToolCall {
                 project,
                 query,
                 limit,
+                offset,
                 summary_only,
                 include_git_summary,
             } => serde_json::json!({
@@ -2165,6 +2179,7 @@ impl ToolCallAuditProjection for ToolCall {
                 "query_present": query.is_some(),
                 "query_length": query.as_deref().map(|value| value.chars().count()).unwrap_or_default(),
                 "limit": limit,
+                "offset": offset,
                 "summary_only": summary_only,
                 "include_git_summary": include_git_summary,
             }),
@@ -2172,16 +2187,19 @@ impl ToolCallAuditProjection for ToolCall {
                 client_id,
                 client_ids,
                 include_projects,
+                projects_offset,
                 summary_only,
                 query,
                 status,
                 limit,
+                offset,
             } => serde_json::json!({
                 "client_id_present": client_id.is_some(),
                 "client_ids_count": client_ids.as_ref().map(Vec::len).unwrap_or_default(),
                 "include_projects": include_projects,
+                "projects_offset": projects_offset,
                 "summary_only": summary_only,
-                "query_present": query.is_some(), "status": status, "limit": limit,
+                "query_present": query.is_some(), "status": status, "limit": limit, "offset": offset,
             }),
             Self::ListJobs {
                 limit,

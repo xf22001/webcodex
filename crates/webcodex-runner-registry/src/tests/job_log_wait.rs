@@ -56,6 +56,7 @@ async fn register_sequenced(registry: &RunnerRegistry, instance: &str) {
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -83,21 +84,13 @@ async fn start_wait_job(registry: &RunnerRegistry) -> crate::runner_protocol::Sh
     register_sequenced(registry, "inst-wait").await;
     registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("oe".to_string()),
+            JobStartRequest {
                 cwd: Some("/tmp".to_string()),
-                command: Some("printf 'line one\\n'".to_string()),
-                timeout_secs: Some(30),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                ..shell_job_start_request("oe", "printf 'line one\\n'", Some(30))
             },
             "tester".to_string(),
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -280,21 +273,13 @@ async fn job_log_wait_resets_cross_job_and_rejects_malformed_tokens() {
     let first = start_wait_job(&registry).await;
     let second = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".into(),
-                client_id: Some("oe".into()),
+            JobStartRequest {
                 cwd: Some("/tmp".into()),
-                command: Some("true".into()),
-                timeout_secs: Some(30),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                ..shell_job_start_request("oe", "true", Some(30))
             },
             "tester".into(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -644,6 +629,7 @@ async fn job_log_wait_unsequenced_update_between_calls_and_noop_update() {
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -664,21 +650,13 @@ async fn job_log_wait_unsequenced_update_between_calls_and_noop_update() {
         .unwrap();
     let job = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("legacy".to_string()),
+            JobStartRequest {
                 cwd: Some("/tmp".to_string()),
-                command: Some("printf legacy".to_string()),
-                timeout_secs: Some(30),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                ..shell_job_start_request("legacy", "printf legacy", Some(30))
             },
             "tester".to_string(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -746,6 +724,7 @@ async fn job_log_wait_activity_only_legacy_transition_advances_revision_and_wake
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -766,21 +745,13 @@ async fn job_log_wait_activity_only_legacy_transition_advances_revision_and_wake
         .unwrap();
     let job = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".into(),
-                client_id: Some("activity-legacy".into()),
+            JobStartRequest {
                 cwd: Some("/tmp".into()),
-                command: Some("sleep 10".into()),
-                timeout_secs: Some(30),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                ..shell_job_start_request("activity-legacy", "sleep 10", Some(30))
             },
             "tester".into(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1047,6 +1018,46 @@ async fn agent_job_log_observation_is_baseline_then_independent_deltas() {
     );
     assert_eq!(stdout.as_deref(), Some(""));
     assert_eq!(stderr.as_deref(), Some(""));
+}
+
+#[tokio::test]
+async fn cursorless_handoff_token_is_first_baseline_observation() {
+    for log in [None, Some("hello\n")] {
+        let registry = RunnerRegistry::default();
+        let job = start_wait_job(&registry).await;
+        registry
+            .update_job(wait_job_update(
+                "inst-wait",
+                &job.job_id,
+                1,
+                "running",
+                log,
+                false,
+            ))
+            .await
+            .unwrap();
+
+        let lifecycle = registry
+            .get_job(&job.job_id)
+            .await
+            .expect("job lifecycle view");
+        let token = lifecycle.observation_token.expect("baseline token");
+        let parsed = crate::job_observation::JobObservationToken::parse(&token).unwrap();
+        assert!(parsed.requires_baseline());
+
+        let (_, stdout, stderr, _, _, observation) = registry
+            .job_log_for_auth(None, &job.job_id, None, None, Some(10), Some(&token), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            observation.log_delta_status,
+            crate::job_observation::JobLogDeltaStatus::Baseline
+        );
+        assert!(!observation.stdout_delta_reset);
+        assert_eq!(stdout.as_deref(), Some(log.unwrap_or("")));
+        assert!(!observation.stderr_delta_reset);
+        assert_eq!(stderr.as_deref(), Some(""));
+    }
 }
 
 #[tokio::test]

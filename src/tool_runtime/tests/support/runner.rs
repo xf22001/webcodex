@@ -312,13 +312,13 @@ pub(in crate::tool_runtime::tests) fn run_runner_shell_request_locally(
     if req.kind == "file_skill_read_file" {
         return run_runner_skill_read_file_locally(req);
     }
-    let structured_process = if req.kind == "run_process" {
+    let structured_process = if matches!(req.kind.as_str(), "run_process" | "start_process_job") {
         assert!(req.command.is_empty());
         assert!(req.script.is_none());
         Some(
             req.process
                 .as_ref()
-                .expect("run_process request must carry a typed process payload"),
+                .expect("structured process request must carry a typed process payload"),
         )
     } else {
         None
@@ -541,7 +541,7 @@ fn run_runner_skill_read_file_locally(req: &RunnerRequest) -> (i32, String, Stri
     let end_line = req.end_line.unwrap_or(start_line);
     let limit = end_line.saturating_sub(start_line).saturating_add(1);
     let range = EffectiveRange::new(Some(start_line), Some(limit));
-    let result = match file_read_range::read_range_with_budget(
+    let result = match file_read_range::read_page_with_budget(
         &target,
         range,
         req.max_bytes.unwrap_or(48 * 1024),

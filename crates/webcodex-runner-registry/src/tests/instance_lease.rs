@@ -31,6 +31,7 @@ async fn lease_different_online_instance_takes_over_immediately_and_retires_old_
     let view = registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -206,21 +207,10 @@ async fn lease_stale_instance_job_update_rejected() {
     register_with_instance(&registry, "oe", "inst-a").await;
     let job = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("oe".to_string()),
-                cwd: None,
-                command: Some("sleep 10".to_string()),
-                timeout_secs: Some(10),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
-            },
+            shell_job_start_request("oe", "sleep 10", Some(10)),
             "tester".to_string(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -357,21 +347,10 @@ async fn lease_reconcile_disconnect_stale_instance_is_noop() {
     // replaces A, before any disconnect runs.
     let old_job = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("oe".to_string()),
-                cwd: None,
-                command: Some("sleep 10".to_string()),
-                timeout_secs: Some(10),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
-            },
+            shell_job_start_request("oe", "sleep 10", Some(10)),
             "tester".to_string(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -391,21 +370,10 @@ async fn lease_reconcile_disconnect_stale_instance_is_noop() {
     // B starts a fresh job of its own after the replacement.
     let b_job = registry
         .start_job(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("oe".to_string()),
-                cwd: None,
-                command: Some("sleep 10".to_string()),
-                timeout_secs: Some(10),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
-            },
+            shell_job_start_request("oe", "sleep 10", Some(10)),
             "tester".to_string(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -523,6 +491,7 @@ async fn lease_register_rejects_empty_instance_id() {
     let err = registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -563,6 +532,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -586,34 +556,32 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
         .unwrap();
 
     let job = registry
-        .start_job_with_metadata(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("oe".to_string()),
+        .start_job(
+            JobStartRequest {
                 cwd: Some("/tmp".to_string()),
-                command: Some(String::new()),
-                timeout_secs: Some(60),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                timeout_secs: 60,
+                context: JobStartContext {
+                    purpose: Some("test".to_string()),
+                    shell: Some("direct_argv".to_string()),
+                    ..Default::default()
+                },
+                ..JobStartRequest::new(
+                    "oe",
+                    JobStartExecution::DetachedProcess {
+                        process: crate::runner_protocol::ShellProcessArgv {
+                            executable: "/bin/sleep".to_string(),
+                            args: vec!["60".to_string()],
+                        },
+                        stdin: None,
+                        idempotency_key: "lease-detached-transfer".to_string(),
+                        validation_identity: None,
+                        validation_tool: None,
+                    },
+                )
             },
             "tester".to_string(),
-            ShellJobStartMetadata {
-                purpose: Some("test".to_string()),
-                shell: Some("direct_argv".to_string()),
-                structured_execution: Some(StructuredJobExecution::DetachedProcess(
-                    crate::runner_protocol::ShellProcessArgv {
-                        executable: "/bin/sleep".to_string(),
-                        args: vec!["60".to_string()],
-                    },
-                )),
-                detached_idempotency_key: Some("lease-detached-transfer".to_string()),
-                ..Default::default()
-            },
+            None,
+            Some(&DetachedInitiatorIdentity::internal()),
         )
         .await
         .unwrap();
@@ -697,6 +665,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
     let view = registry
         .register(current_runner_registration(RunnerRegisterRequest {
             computer_session_availability: None,
+            computer_control_epoch: None,
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

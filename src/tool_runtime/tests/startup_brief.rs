@@ -1,7 +1,8 @@
 use super::reconnect::dispatch_coding_call_in_window;
 use super::support::*;
-use crate::runner_http::ShellJobStartMetadata;
-use crate::runner_protocol::{RunnerCapabilities, RunnerJobUpdateRequest, ShellJobOpRequest};
+use webcodex_runner_registry::{JobStartContext, JobStartRequest};
+
+use crate::runner_protocol::{RunnerCapabilities, RunnerJobUpdateRequest};
 use crate::tool_runtime::startup_brief::{
     startup_brief_size, validate_schema_instance_for_test, STANDARD_STARTUP_HARD_MAX_BYTES,
 };
@@ -113,9 +114,12 @@ fn assert_builtin_workflow(output: &Value) {
         crate::tool_runtime::startup_brief::BUILTIN_CODING_WORKFLOW_VERSION
     );
     assert_eq!(workflow["authority"], "model_guidance_only");
-    assert!(workflow["role_selection"]
+    assert!(workflow.get("roles").is_none());
+    assert!(workflow["model_protocol"]["coding_guidance"]
         .as_str()
-        .is_some_and(|value| !value.is_empty()));
+        .is_some_and(
+            |value| value.contains(crate::tool_runtime::guidance::CODING_GUIDANCE_CONTEXT_KEY)
+        ));
     let recovery = workflow["model_protocol"]["handoff_recovery"]
         .as_str()
         .unwrap();
@@ -191,48 +195,13 @@ fn assert_builtin_workflow(output: &Value) {
     assert!(runner_targeting_guidance.contains("list_projects(client_id=...)"));
     assert!(runner_targeting_guidance.contains("before treating it as absent"));
     assert_eq!(workflow["tool_strategy"]["profile"], "direct");
-    let defaults = workflow["guidance"]
-        .as_array()
-        .expect("default workflow guidance")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>()
-        .join("\n");
-    for phrase in [
-        "concrete, reviewable completion",
-        "Recovery/compaction/exact Session resume is continuation",
-        "reuse still-current Git/read/validation/Job facts",
-        "continue independent work",
-        "For inspection, files/data/artifacts, diagnostics, or coding",
-        "Map cross-layer changes end to end",
-        "compiler/schema/exhaustiveness failures reveal gaps",
-        "tests don't prove architectural fit",
-        "Before nontrivial coding",
-        "necessary local refactoring",
-        "Report verified deliverables promptly",
-        "Validation failure is evidence, not queue cleanliness",
-        "Reuse assertion_name",
-        "outcome_unknown fails closed",
-        "overlap validation with independent work",
-        "edits invalidate it and require revalidation",
-        "Freeze covered source for final evidence",
-        "edits invalidate it",
-        "require revalidation",
-        "exact continuation",
-        "passive Job attention",
-        "observe_jobs is for logs/details/recovery",
-        "list_jobs is identity recovery",
-        "Keep one execution/Job",
-        "finish ready work",
-        "one wait_for_job_readiness join",
-        "any may unblock a branch",
-        "all requires every blocker",
-        "Deadline recomputes work/set",
-        "no automatic next turn",
-        "Never retry/redispatch",
-    ] {
-        assert!(defaults.contains(phrase), "workflow guidance: {phrase}");
-    }
+    // The real startup must carry the complete selected shared guidance.
+    // Contributor applicability and critical safety text have focused tests;
+    // do not duplicate editorial phrase lists in this integration helper.
+    assert_eq!(
+        workflow["guidance"],
+        serde_json::to_value(crate::tool_runtime::guidance::core_guidance()).unwrap()
+    );
     let persistent_shell_guidance = workflow["model_protocol"]["persistent_shell"]
         .as_str()
         .expect("persistent shell guidance");
@@ -310,11 +279,12 @@ fn assert_builtin_workflow(output: &Value) {
     let checkpoint = details["checkpoint"].as_str().unwrap();
     for phrase in [
         "After a plan phase completes",
-        "_wc.control.before.goal_progress",
+        "call checkpoint_goal",
         "facts already true",
         "never pre-complete tests",
-        "checkpoint_goal remains valid standalone",
+        "no gateway or _wc.control fallback",
         "explicit update_goal",
+        "current client configuration",
         "cannot judge natural-language conditions",
     ] {
         assert!(checkpoint.contains(phrase), "{phrase}");
@@ -334,29 +304,6 @@ fn assert_builtin_workflow(output: &Value) {
         assert!(sidecars.contains(phrase), "{phrase}");
     }
     assert!(sidecars.len() <= 640);
-    let roles = workflow["roles"]
-        .as_object()
-        .expect("workflow roles object");
-    assert!(!roles.contains_key("implementation_owner"));
-    assert_eq!(roles.len(), 1);
-    let review = &roles["independent_review"];
-    assert!(review["purpose"]
-        .as_str()
-        .is_some_and(|value| !value.is_empty()));
-    let review_guidance = review["guidance"]
-        .as_array()
-        .expect("workflow guidance array");
-    assert!(!review_guidance.is_empty());
-    assert!(
-        review_guidance.len()
-            <= crate::tool_runtime::startup_brief::BUILTIN_CODING_WORKFLOW_GUIDANCE_TARGET_ITEMS
-    );
-    assert!(review_guidance.iter().all(|item| {
-        item.as_str().is_some_and(|text| {
-            text.chars().count()
-                <= crate::tool_runtime::startup_brief::BUILTIN_CODING_WORKFLOW_GUIDANCE_TARGET_ITEM_CHARS
-        })
-    }));
     let serialized = workflow.to_string().replace("Stalled is not offline", "");
     for forbidden in ["ChatGPT", "browser", "another window", "online", "offline"] {
         assert!(
@@ -969,7 +916,7 @@ async fn restart_restored_coding_task_session_reloads_rules_without_persisting_b
     .await;
     assert!(read.success, "{:?}", read.error);
     runtime1.sessions.flush_persistence();
-    let persisted = fs::read_to_string(&ledger).unwrap();
+    let persisted = runtime1.sessions.persisted_json_for_test();
     assert!(!persisted.contains(marker));
     assert!(!persisted.contains(source_marker));
     assert!(!persisted.contains("Repository rules"));
@@ -1104,27 +1051,19 @@ async fn startup_uses_project_scoped_lifecycle_aware_job_summary() {
     let project_b = crate::tool_runtime::runner_project_runtime_id("startup-jobs", "b");
     let job = runtime
         .runner_registry
-        .start_job_with_metadata(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some("startup-jobs".to_string()),
+        .start_job(
+            JobStartRequest {
                 cwd: Some(root_a.path().to_string_lossy().to_string()),
-                command: Some("sleep 60".to_string()),
-                timeout_secs: Some(120),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                context: JobStartContext {
+                    project_id: Some(project_a.clone()),
+                    project_cwd: Some(root_a.path().to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+                ..JobStartRequest::shell("startup-jobs".to_string(), "sleep 60".to_string())
             },
             "startup-test".to_string(),
-            ShellJobStartMetadata {
-                project_id: Some(project_a.clone()),
-                project_cwd: Some(root_a.path().to_string_lossy().to_string()),
-                ..Default::default()
-            },
+            None,
+            None,
         )
         .await
         .unwrap();

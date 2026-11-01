@@ -58,6 +58,9 @@ pub(crate) struct ToolCallRequest {
 pub(crate) struct ToolInvocationMetadata {
     /// Explicit presentation request; never dispatch or continuation authority.
     pub(crate) compact_execution: bool,
+    /// Adapter-selected discovery subset, bounded by the static registry. This
+    /// only narrows catalog visibility; dispatch never consults it for authority.
+    pub(crate) discovery_tools: Option<std::collections::BTreeSet<String>>,
     pub(crate) control: Option<super::control_sidecar::ControlSidecars>,
     // Historical wrapper name retained for protocol compatibility. Exact IDs may
     // acknowledge either legacy Session-board messages or Window collaboration
@@ -67,6 +70,9 @@ pub(crate) struct ToolInvocationMetadata {
     pub(crate) session_message_resolution: Option<ToolCallSessionMessageResolution>,
     pub(crate) window_reply: Option<super::window_collaboration::ToolCallWindowReply>,
     pub(crate) context_request: Vec<String>,
+    /// Prefer complete observed instruction bodies within the existing context
+    /// envelope budget. Presentation only; does not widen reads or authority.
+    pub(crate) prefer_full_instruction_content: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -160,6 +166,9 @@ impl ToolCallOutcome {
 
 fn session_selector_failure(error: super::SessionSelectorError) -> ToolCallOutcome {
     match error {
+        super::SessionSelectorError::StorageUnavailable => ToolCallOutcome::rejected_result(
+            super::session_tools::session_storage_unavailable_result(),
+        ),
         super::SessionSelectorError::UnknownRef(message) => {
             ToolCallOutcome::rejected(ToolCallErrorStatus::InvalidArguments { message })
         }
@@ -483,20 +492,18 @@ impl ToolRuntime {
         // never re-evaluate (no second request id / inconsistent outcome).
         let execution_started = std::time::Instant::now();
         let (mut result, result_projection, mut correlation) = self
-            .dispatch_with_auth_transport_options_and_metadata_with_recording_mode_and_context_with_result_projection(
+            .dispatch_canonical(
                 call,
-                context.auth,
-                context.transport.into(),
-                recording.metadata.clone(),
-                context.window,
-                context.session_id.is_none(),
-                context_request,
-                super::context_projection::ContextMaterialCapabilities {
-                    skill_runtime: capabilities.skill_runtime,
-                    memory_surface: capabilities.memory_surface,
+                super::dispatch::DispatchContext {
+                    recorder: recording.metadata.clone(),
+                    context_request,
+                    prefer_full_instruction_content: invocation_metadata
+                        .prefer_full_instruction_content,
+                    capabilities,
+                    discovery_tools: invocation_metadata.discovery_tools.clone(),
+                    return_timing,
+                    ..super::dispatch::DispatchContext::new(context)
                 },
-                capabilities,
-                return_timing,
             )
             .await;
         crate::tool_request_trace::record_phase_latency(
@@ -908,7 +915,11 @@ mod tests {
                 description: "missing required scope: project:write".to_string(),
             })
         );
-        for tool in ["observe_coding_agent", "cancel_coding_agent"] {
+        for tool in [
+            "observe_coding_agent",
+            "cancel_coding_agent",
+            "diagnose_coding_agent",
+        ] {
             assert_eq!(
                 check_runtime_tool_scope(Some(&run_only), tool),
                 Ok(()),

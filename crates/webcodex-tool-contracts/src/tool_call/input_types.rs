@@ -1296,7 +1296,7 @@ pub enum ComputerObserveToolCall {
         #[serde(default)]
         limit: Option<usize>,
     },
-    /// Re-resolve a current element without replacing its observation_generation. When action support is unclear, inspect can_press/can_focus/can_input_text before choosing press/focus/input_text. Advisory native state grants no permission or capability and cannot refresh a stale element_id.
+    /// Re-resolve a current element without replacing its observation_generation. When action support is unclear, inspect can_press/can_focus/can_input_text/can_select before choosing press/focus/input_text/select. Windows selected reports target selection; missing selection fields on older Runners mean unknown. Advisory native state grants no permission or capability and cannot refresh a stale element_id.
     ElementState {
         #[schemars(length(min = 1, max = 128))]
         client_id: String,
@@ -1379,6 +1379,26 @@ pub enum ComputerControlToolCall {
         surface_id: String,
         #[schemars(length(min = 1, max = 128))]
         element_id: String,
+        /// Optional bounded fresh tree of this same window after a confirmed
+        /// successful action. Requires independent Computer read authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe_after: Option<ComputerPostObservation>,
+    },
+    /// Windows native replacement selection of one exact observed ListItem or TabItem.
+    /// SelectionItemPattern.Select clears other selections in the container. Requires
+    /// computer_selection and computer_control; missing capabilities reject before dispatch.
+    /// No add/remove/toggle, focus, activation or observe_after. Target and container must
+    /// remain correlated to the same unprotected window. A selected multi-select item
+    /// still clears its siblings; only proven single selection permits a no-op.
+    /// Use element_state selected after success; success does not imply UI stability.
+    /// After an uncertain attempt observe current state; never blindly replay select.
+    Select {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        surface_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        element_id: String,
     },
     Focus {
         #[schemars(length(min = 1, max = 128))]
@@ -1401,12 +1421,12 @@ pub enum ComputerControlToolCall {
         client_id: String,
         #[schemars(length(min = 1, max = 128))]
         surface_id: String,
-        /// Exact lowercase navigation key from the closed vocabulary; letters and shortcut strings
-        /// such as Ctrl+P are unsupported. The exact surface must already be foreground/focused.
+        /// Exact canonical key name; Windows supports general single-key chords.
+        /// Shortcut strings such as Ctrl+P are unsupported. The exact surface must already be foreground/focused.
         #[schemars(schema_with = "webcodex_core::computer_input_contract::computer_key_schema")]
         key: String,
         /// Unique canonical modifiers; omission/null means none. Windows maps option to Alt, rejects
-        /// command, option+Tab, option+Escape, and any control+Escape chord. macOS uses the named
+        /// command, option+Tab, option+Escape, control+Escape and control+option+Delete. macOS uses the named
         /// Shift/Control/Option/Command flags. Held/interfering keys can fail native preflight.
         #[schemars(schema_with = "webcodex_core::computer_input_contract::computer_key_modifiers_schema")]
         #[serde(default)]
@@ -1421,6 +1441,8 @@ pub enum ComputerControlToolCall {
         element_id: String,
         #[schemars(length(min = 1, max = 2048))]
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe_after: Option<ComputerPostObservation>,
     },
     PointerMove {
         #[schemars(length(min = 1, max = 128))]
@@ -1457,11 +1479,19 @@ pub enum ComputerControlToolCall {
 }
 
 impl ComputerControlToolCall {
+    pub fn observe_after(&self) -> Option<&ComputerPostObservation> {
+        match self {
+            Self::Press { observe_after, .. } | Self::InputText { observe_after, .. } => observe_after.as_ref(),
+            _ => None,
+        }
+    }
+
     pub const fn action_name(&self) -> &'static str {
         match self {
             Self::LaunchApplication { .. } => "launch_application",
             Self::ActivateWindow { .. } => "activate_window",
             Self::Press { .. } => "press",
+            Self::Select { .. } => "select",
             Self::Focus { .. } => "focus",
             Self::ScrollToElement { .. } => "scroll_to_element",
             Self::Key { .. } => "key",
@@ -1471,6 +1501,19 @@ impl ComputerControlToolCall {
             Self::WriteClipboard { .. } => "write_clipboard",
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComputerPostObservation {
+    AccessibilityTree {
+        /// Relative tree depth; existing accessibility bounds apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
+        /// Maximum nodes; existing accessibility bounds apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_nodes: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]

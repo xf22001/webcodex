@@ -1,4 +1,5 @@
 use super::support::*;
+use crate::tool_runtime::dispatch::DispatchContext;
 use crate::tool_runtime::sessions::SessionTransport;
 use crate::tool_runtime::validation_parser::{NO_STABLE_DIAGNOSTICS_REASON, PARSER_KIND};
 use crate::tool_runtime::{ExecutionPurpose, ExecutionShell, ToolCall};
@@ -56,7 +57,9 @@ async fn run_shell_declared_validation_enters_unified_summary_with_shell_and_roo
     assert!(execution.success, "{:?}", execution.error);
     assert_eq!(execution.output["cwd"], ".");
     assert_eq!(execution.output["shell"], "bash");
-    assert_eq!(execution.output["purpose"], "test");
+    // Declared purpose is redundant in the terminal receipt, but the
+    // canonical validation event must preserve its exact classification.
+    assert!(execution.output.get("purpose").is_none());
 
     let summary = runtime
         .dispatch_with_auth(
@@ -120,11 +123,12 @@ async fn completed_run_job_validation_enters_handoff_from_job_authority() {
     )
     .unwrap();
     let execution = runtime
-        .dispatch_with_auth_transport_options_and_metadata(
+        .dispatch_with_context(
             call,
-            Some(&auth),
-            SessionTransport::Mcp,
-            recorder_metadata,
+            DispatchContext {
+                recorder: recorder_metadata,
+                ..DispatchContext::internal(Some(&auth), SessionTransport::Mcp, None)
+            },
         )
         .await;
     assert!(execution.success, "{:?}", execution.error);
@@ -231,11 +235,12 @@ async fn promoted_run_process_cargo_test_materializes_canonical_validation_evide
         let auth = auth.clone();
         async move {
             runtime
-                .dispatch_with_auth_transport_options_and_metadata(
+                .dispatch_with_context(
                     call,
-                    Some(&auth),
-                    SessionTransport::Mcp,
-                    recorder_metadata,
+                    DispatchContext {
+                        recorder: recorder_metadata,
+                        ..DispatchContext::internal(Some(&auth), SessionTransport::Mcp, None)
+                    },
                 )
                 .await
         }
@@ -245,7 +250,8 @@ async fn promoted_run_process_cargo_test_materializes_canonical_validation_evide
     assert_eq!(request.process.as_ref().unwrap().executable, "cargo");
     let handoff = task.await.unwrap();
     assert!(handoff.success, "{:?}", handoff.error);
-    let job_id = assert_sparse_pending_job_handoff(&handoff.output).to_string();
+    let job_id =
+        assert_sparse_pending_job_handoff_with_unreported_policy(&handoff.output, 121).to_string();
     let admitted = runtime.runner_registry.get_job(&job_id).await.unwrap();
     let metadata = admitted.structured_execution.as_ref().unwrap();
     assert_eq!(metadata.execution_source, "run_process");

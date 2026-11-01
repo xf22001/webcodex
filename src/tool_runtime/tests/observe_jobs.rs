@@ -1,5 +1,6 @@
 //! Phase D bounded batch Job observation.
 
+mod mixed_projection;
 mod readiness;
 mod summary;
 
@@ -664,7 +665,7 @@ fn observe_jobs_compact_projection_single_running_unchanged_keeps_actionable_sta
     assert!(projected.output["wait"].get("waited_ms").is_none());
     let item = &projected.output["items"][0];
     assert_eq!(item["job_id"], "job-unchanged");
-    assert_eq!(item["project"], "agent:special:observe-kernel-projection");
+    assert!(item.get("project").is_none());
     assert_eq!(item["status"], "running");
     assert_eq!(item["terminal"], false);
     assert_eq!(item["changed"], false);
@@ -672,10 +673,7 @@ fn observe_jobs_compact_projection_single_running_unchanged_keeps_actionable_sta
     assert_eq!(item["observation_token"], token);
     assert!(item.get("continuation_semantics").is_none());
     assert!(projected.output.get("continuation_semantics").is_none());
-    assert_eq!(
-        item["activity"],
-        serde_json::to_value(process_activity()).unwrap()
-    );
+    assert!(item.get("activity").is_none());
     for omitted in [
         "index",
         "success",
@@ -762,10 +760,7 @@ async fn observe_jobs_kernel_model_surface_applies_compact_projection() {
     assert!(item["observation_token"]
         .as_str()
         .is_some_and(|token| !token.is_empty()));
-    assert_eq!(
-        item["activity"],
-        serde_json::to_value(process_activity()).unwrap()
-    );
+    assert!(item.get("activity").is_none());
     assert!(item.get("output").is_none());
     assert!(item.get("success").is_none());
 
@@ -928,10 +923,17 @@ fn observe_jobs_compact_projection_preserves_mixed_failure_and_budget_recovery()
         "error": "unknown job: missing-job"
     });
     let mixed = canonical_batch(vec![success.clone(), failure], "item_error", 0);
+    let projected = compact_projection(&mixed);
+    assert_eq!(projected.success, mixed.success);
+    assert_eq!(projected.error, mixed.error);
     assert_eq!(
-        serde_json::to_value(compact_projection(&mixed)).unwrap(),
-        serde_json::to_value(&mixed).unwrap()
+        projected.output["failed_count"],
+        mixed.output["failed_count"]
     );
+    assert_eq!(projected.output["wait"], mixed.output["wait"]);
+    assert_eq!(projected.output["items"][0]["status"], "running");
+    assert!(projected.output["items"][0].get("output").is_none());
+    assert_eq!(projected.output["items"][1], mixed.output["items"][1]);
     assert_eq!(
         mixed.output["items"][1]["suggested_call"],
         json!({"follow_up_kind": "fallback_recovery", "tool": "list_jobs", "arguments": {}})
@@ -1118,15 +1120,9 @@ fn observe_jobs_projection_reports_deterministic_byte_measurements() {
         println!(
             "OBSERVE_JOBS_PROJECTION_BYTES {name} canonical={canonical_bytes} projected={projected_bytes} reduction_pct={reduction:.1}"
         );
-        assert!(projected_bytes <= canonical_bytes);
-        if name != "mixed_success_unknown" {
-            assert!(projected_bytes < canonical_bytes);
-        } else {
-            assert_eq!(
-                serde_json::to_value(&projected).unwrap(),
-                serde_json::to_value(&canonical).unwrap()
-            );
-        }
+        assert!(projected_bytes < canonical_bytes, "{name}");
+        assert_eq!(projected.success, canonical.success);
+        assert_eq!(projected.error, canonical.error);
     }
 }
 
@@ -1169,7 +1165,7 @@ async fn observe_jobs_inaccessible_and_unknown_items_are_indistinguishable() {
 }
 
 #[tokio::test]
-async fn observe_jobs_compact_ref_roundtrips_and_survives_model_projection() {
+async fn observe_jobs_ref_roundtrips_but_model_keeps_restart_safe_token() {
     let runtime = test_runtime();
     let (job_id, request, auth) =
         register_and_start_agent_job(&runtime, "observe-ref-roundtrip").await;
@@ -1205,7 +1201,13 @@ async fn observe_jobs_compact_ref_roundtrips_and_survives_model_projection() {
         .is_some());
 
     let projected = compact_projection(&first);
-    assert_eq!(projected.output["items"][0]["observation_ref"], first_ref);
+    assert!(projected.output["items"][0]
+        .get("observation_ref")
+        .is_none());
+    assert_eq!(
+        projected.output["items"][0]["observation_token"],
+        first.output["items"][0]["output"]["observation_token"]
+    );
 
     let second = runtime
         .observe_jobs_for_auth(
@@ -2293,7 +2295,7 @@ async fn observe_jobs_generic_failed_test_identity_survives_small_model_tail() {
         let request = wait_for_patch_agent_request(&runtime, client).await;
         let handoff = task.await.unwrap();
         assert!(handoff.success, "{handoff:?}");
-        let job = assert_sparse_pending_job_handoff(&handoff.output);
+        let job = assert_sparse_pending_job_handoff_with_unreported_policy(&handoff.output, 30);
         let stdout = "running 1 test\ntest cases::outside_tail ... FAILED\n".to_string()
             + &"retained diagnostic padding\n".repeat(400)
             + "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n";
@@ -2347,4 +2349,215 @@ async fn observe_jobs_generic_failed_test_identity_survives_small_model_tail() {
         );
         assert!(snapshot.get("validation_target_id").is_none());
     }
+}
+
+#[tokio::test]
+async fn observe_jobs_metrics_sum_utf8_bytes_of_returned_producer_output() {
+    #[derive(Debug)]
+    struct RecordingMetrics {
+        returned_bytes: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl crate::tool_runtime::runtime_metrics::RuntimeMetrics for RecordingMetrics {
+        fn observe_tool_call(
+            &self,
+            _record: &crate::tool_runtime::model_ergonomics_telemetry::ModelErgonomicsRecord,
+        ) {
+        }
+
+        fn observe_mcp_call(
+            &self,
+            _observation: crate::tool_runtime::runtime_metrics::McpCallMetricObservation,
+        ) {
+        }
+
+        fn observe_job_observation(
+            &self,
+            observation: crate::tool_runtime::runtime_metrics::JobObservationMetricObservation,
+        ) {
+            self.returned_bytes
+                .lock()
+                .unwrap()
+                .push(observation.returned_bytes);
+        }
+
+        fn observe_skill_source(
+            &self,
+            _observation: crate::tool_runtime::runtime_metrics::SkillSourceMetricObservation,
+        ) {
+        }
+
+        fn observe_instruction_read_after_complete_bootstrap(
+            &self,
+            _target: crate::tool_runtime::model_ergonomics_telemetry::invocation::InstructionReadTarget,
+        ) {
+        }
+
+        fn observe_window_transition(
+            &self,
+            _transition: crate::tool_runtime::window_activity::WindowLoopTransition,
+        ) {
+        }
+
+        #[cfg(feature = "experimental-code-mode")]
+        fn observe_code_mode_composition(
+            &self,
+            _observation: &crate::tool_runtime::code_mode::CodeModeCompositionSummary,
+        ) {
+        }
+    }
+
+    async fn finish_with_chunks(
+        runtime: &ToolRuntime,
+        client_id: &str,
+        request: &crate::runner_protocol::RunnerRequest,
+        stdout_chunk: Option<&str>,
+        stderr_chunk: Option<&str>,
+    ) {
+        runtime
+            .runner_registry
+            .update_job(RunnerJobUpdateRequest {
+                request_id: Some(request.request_id.clone()),
+                stdout_chunk: stdout_chunk.map(str::to_string),
+                stderr_chunk: stderr_chunk.map(str::to_string),
+                exit_code: Some(0),
+                duration_ms: Some(5),
+                ..runner_job_update(
+                    client_id.to_string(),
+                    "inst".to_string(),
+                    request.job_id.clone().expect("Job request id"),
+                    "completed".to_string(),
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut runtime = test_runtime();
+    let sink = Arc::new(RecordingMetrics {
+        returned_bytes: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_handle: Arc<dyn crate::tool_runtime::runtime_metrics::RuntimeMetrics> = sink.clone();
+    runtime.metrics = sink_handle;
+
+    let (text_job, text_request, auth) =
+        register_and_start_agent_job(&runtime, "observe-bytes-text").await;
+    finish_with_chunks(
+        &runtime,
+        "observe-bytes-text",
+        &text_request,
+        Some("alpha\n\u{4e2d}\u{6587}-tail\n"),
+        Some("warn\n"),
+    )
+    .await;
+    let (stdout_job, stdout_request, _) =
+        register_and_start_agent_job(&runtime, "observe-bytes-out").await;
+    finish_with_chunks(
+        &runtime,
+        "observe-bytes-out",
+        &stdout_request,
+        Some("plain\n"),
+        None,
+    )
+    .await;
+    let (stderr_job, stderr_request, _) =
+        register_and_start_agent_job(&runtime, "observe-bytes-err").await;
+    finish_with_chunks(
+        &runtime,
+        "observe-bytes-err",
+        &stderr_request,
+        None,
+        Some("err-only\n"),
+    )
+    .await;
+    let (empty_job, empty_request, _) =
+        register_and_start_agent_job(&runtime, "observe-bytes-empty").await;
+    finish_with_chunks(&runtime, "observe-bytes-empty", &empty_request, None, None).await;
+
+    let observed = runtime
+        .observe_jobs_for_auth(
+            vec![
+                item(&text_job, None),
+                item(&stdout_job, None),
+                item(&stderr_job, None),
+                item(&empty_job, None),
+                item("observe-bytes-missing", Some("malformed".to_string())),
+            ],
+            40,
+            None,
+            Default::default(),
+            Some(&auth),
+        )
+        .await;
+    assert!(observed.success, "{observed:?}");
+    assert_eq!(observed.output["succeeded_count"], 4, "{observed:?}");
+    assert_eq!(observed.output["failed_count"], 1, "{observed:?}");
+
+    let expected = [
+        ("alpha\n\u{4e2d}\u{6587}-tail\n", "warn\n"),
+        ("plain\n", ""),
+        ("", "err-only\n"),
+        ("", ""),
+    ];
+    let mut expected_total = 0_u64;
+    for (index, (expected_stdout, expected_stderr)) in expected.iter().enumerate() {
+        let snapshot = &observed.output["items"][index]["output"];
+        assert_eq!(snapshot["stdout_tail"], *expected_stdout, "{snapshot}");
+        assert_eq!(snapshot["stderr_tail"], *expected_stderr, "{snapshot}");
+        assert_eq!(
+            snapshot["stdout_returned_bytes"].as_u64(),
+            Some(expected_stdout.len() as u64),
+            "stdout bytes must count returned UTF-8 bytes, not characters: {snapshot}"
+        );
+        assert_eq!(
+            snapshot["stderr_returned_bytes"].as_u64(),
+            Some(expected_stderr.len() as u64),
+            "stderr bytes must count returned UTF-8 bytes, not characters: {snapshot}"
+        );
+        expected_total += (expected_stdout.len() + expected_stderr.len()) as u64;
+    }
+    assert_ne!(
+        "alpha\n\u{4e2d}\u{6587}-tail\n".len(),
+        "alpha\n\u{4e2d}\u{6587}-tail\n".chars().count(),
+        "fixture must keep multibyte text distinct from character count"
+    );
+    assert_eq!(
+        *sink.returned_bytes.lock().unwrap(),
+        vec![expected_total],
+        "the observation metric must aggregate the successful items' returned bytes"
+    );
+
+    let truncated = runtime
+        .observe_jobs_for_auth(
+            vec![item(&text_job, None)],
+            1,
+            None,
+            Default::default(),
+            Some(&auth),
+        )
+        .await;
+    assert!(truncated.success, "{truncated:?}");
+    let snapshot = &truncated.output["items"][0]["output"];
+    assert_eq!(
+        snapshot["stdout_tail"], "\u{4e2d}\u{6587}-tail\n",
+        "{snapshot}"
+    );
+    assert_eq!(
+        snapshot["stdout_returned_bytes"].as_u64(),
+        Some("\u{4e2d}\u{6587}-tail\n".len() as u64),
+        "a bounded tail must report only the bytes it actually returned: {snapshot}"
+    );
+    let truncated_stdout = "\u{4e2d}\u{6587}-tail\n".len() as u64;
+    let truncated_stderr = "warn\n".len() as u64;
+    assert_eq!(
+        snapshot["stderr_returned_bytes"].as_u64(),
+        Some(truncated_stderr),
+        "{snapshot}"
+    );
+    assert_eq!(
+        sink.returned_bytes.lock().unwrap().last().copied(),
+        Some(truncated_stdout + truncated_stderr),
+        "the metric must aggregate the bounded stdout and stderr bytes"
+    );
 }

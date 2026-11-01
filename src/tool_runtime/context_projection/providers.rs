@@ -42,7 +42,9 @@ fn project_instructions(context: ContextMaterialContext<'_>) -> BoxFuture<'_, Va
         let budget = context.budget.for_instruction_projection(&material);
         material["projection"] =
             super::super::instruction_projection::project_instructions_context_projection(
-                snapshot, budget,
+                snapshot,
+                budget,
+                context.prefer_full_instruction_content,
             );
         material
     })
@@ -57,6 +59,22 @@ pub(super) static WORKFLOW: ContextMaterialProvider = ContextMaterialProvider {
     scope_unavailable_reason: SCOPE_UNAVAILABLE,
     provide: |context| {
         Box::pin(async move { context.budget.workflow.expect("requested workflow").clone() })
+    },
+};
+
+// Task guidance is an explicit optional chapter, not inferred from a Project,
+// Session or tool strategy and not included in every descriptor's key catalog.
+pub(super) static CODING_GUIDANCE: ContextMaterialProvider = ContextMaterialProvider {
+    key: crate::tool_runtime::guidance::CODING_GUIDANCE_CONTEXT_KEY,
+    project_required: false,
+    scope_policy: ScopePolicy::Public,
+    surface: Surface::AnySidecar,
+    advertised: false,
+    scope_unavailable_reason: SCOPE_UNAVAILABLE,
+    provide: |context| {
+        Box::pin(async move {
+            context.available(crate::tool_runtime::guidance::coding_guidance_projection())
+        })
     },
 };
 

@@ -10,21 +10,24 @@ mod cargo_test_assertions;
 mod project_validation;
 
 use super::support::*;
-use crate::runner_http::{ShellJobStartMetadata, ShellJobVisibility};
+use crate::runner_http::ShellJobVisibility;
 use crate::runner_protocol::{
     RunnerCapabilities, RunnerJobUpdateRequest, ShellCommandExecutionState, ShellJobActivity,
-    ShellJobActivityPhase, ShellJobActivitySource, ShellJobActivityState, ShellJobOpRequest,
+    ShellJobActivityPhase, ShellJobActivitySource, ShellJobActivityState,
     ShellJobValidationMetadata, ShellJobValidationProgress, ShellJobValidationStep,
     JOB_INVENTORY_MAX_TERMINAL_JOBS, VALIDATION_STEP_SPAWN_FAILED_CODE,
     VALIDATION_STEP_WAIT_FAILED_CODE, VALIDATION_TOOL_UNAVAILABLE_CODE,
 };
-use crate::tool_runtime::sessions::{SessionTransport, DEFAULT_MAX_EVENTS_PER_SESSION};
+use crate::tool_runtime::sessions::{SessionTransport, DEFAULT_RECENT_EVENT_LIMIT};
 use crate::tool_runtime::validation_events::validation_summary_for_session;
 use crate::tool_runtime::{ObserveJobsItem, ObserveJobsWakeOn, ToolCall, ToolRuntime};
 use serde_json::json;
 use webcodex_core::project_validation::{
     ProjectValidationAction, ProjectValidationPlan, ProjectValidationPlanningResult,
     ProjectValidationProvenance, ProjectValidationRequest, ProjectValidationScope,
+};
+use webcodex_runner_registry::{
+    JobStartContext, JobStartExecution, JobStartRequest, JobValidationPlan,
 };
 
 /// Fetch the `start_validation_job` request that the agent should have polled
@@ -83,6 +86,10 @@ pub(super) async fn complete_project_validation_plan_request(
             .as_ref()
             .and_then(|test| test.filter.as_deref()),
     )
+    .unwrap()
+    .with_dependency_policy(semantic.dependency_policy)
+    .unwrap()
+    .with_dependency_resolution_policy(semantic.dependency_resolution_policy)
     .unwrap();
     let adapter = operation.evidence_profile();
     let step = if backend == "node" && check == webcodex_validation::SemanticCheck::Test {
@@ -342,46 +349,43 @@ async fn seed_retained_terminal_validation_job(
     };
     let job = runtime
         .runner_registry
-        .start_job_with_metadata(
-            ShellJobOpRequest {
-                login: false,
-                op: "start".to_string(),
-                client_id: Some(client_id.to_string()),
+        .start_job(
+            JobStartRequest {
+                timeout_secs: 600,
                 cwd: Some("/tmp/agent-proj".to_string()),
-                command: Some("cargo check --all-targets".to_string()),
-                timeout_secs: Some(600),
-                job_id: None,
-                since_stdout_line: None,
-                since_stderr_line: None,
-                tail_lines: None,
-                limit: None,
-                codex: None,
+                context: JobStartContext {
+                    project_id: Some(project.to_string()),
+                    session_id: Some(session_id.to_string()),
+                    project_cwd: Some("/tmp/agent-proj".to_string()),
+                    purpose: Some("validation".to_string()),
+                    shell: Some("bash".to_string()),
+                    visibility: ShellJobVisibility::Public,
+                    ..Default::default()
+                },
+                ..JobStartRequest::new(
+                    client_id.to_string(),
+                    JobStartExecution::Validation {
+                        plan: JobValidationPlan::Metadata(ShellJobValidationMetadata {
+                            project_validation: None,
+                            source_fence: None,
+                            tool: "cargo_check".to_string(),
+                            kind: "check".to_string(),
+                            steps: vec![step],
+                            effective_timeout_secs: 600,
+                            sync_wait_secs: 10,
+                            adapter: "cargo_check".to_string(),
+                            validation_target_id: Some(validation_target_id.clone()),
+                            minimum_tests: None,
+                            require_tests: None,
+                            no_run: None,
+                        }),
+                        ssh_resource: None,
+                    },
+                )
             },
             "validation-stale-snapshot-test".to_string(),
-            ShellJobStartMetadata {
-                project_id: Some(project.to_string()),
-                session_id: Some(session_id.to_string()),
-                project_cwd: Some("/tmp/agent-proj".to_string()),
-                purpose: Some("validation".to_string()),
-                shell: Some("bash".to_string()),
-                validation_steps: vec![step.clone()],
-                validation: Some(ShellJobValidationMetadata {
-                    project_validation: None,
-                    source_fence: None,
-                    tool: "cargo_check".to_string(),
-                    kind: "check".to_string(),
-                    steps: vec![step],
-                    effective_timeout_secs: 600,
-                    sync_wait_secs: 10,
-                    adapter: "cargo_check".to_string(),
-                    validation_target_id: Some(validation_target_id.clone()),
-                    minimum_tests: None,
-                    require_tests: None,
-                    no_run: None,
-                }),
-                visibility: ShellJobVisibility::Public,
-                ..Default::default()
-            },
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -542,6 +546,7 @@ async fn go_test_rejects_empty_or_oversized_package_lists_before_dispatch() {
             project_validation_v1: false,
             project_validation_package_scope_v1: false,
             project_all_packages_v1: false,
+            project_workspace_exclusions_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -659,6 +664,7 @@ async fn fast_go_test_uses_exact_structured_argv_cwd_and_records_session_evidenc
             project_validation_v1: false,
             project_validation_package_scope_v1: false,
             project_all_packages_v1: false,
+            project_workspace_exclusions_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -763,6 +769,7 @@ async fn go_test_failure_reports_failed_test_identity_in_result_and_session() {
             project_validation_v1: false,
             project_validation_package_scope_v1: false,
             project_all_packages_v1: false,
+            project_workspace_exclusions_v1: false,
             structured_go_test_tool: true,
             ..Default::default()
         },
@@ -843,6 +850,7 @@ async fn long_go_test_hands_off_same_job_and_terminal_evidence_is_queryable() {
             project_validation_v1: false,
             project_validation_package_scope_v1: false,
             project_all_packages_v1: false,
+            project_workspace_exclusions_v1: false,
             structured_go_test_tool: true,
             structured_go_test_packages: true,
             ..Default::default()
@@ -2146,7 +2154,7 @@ async fn stale_validation_terminal_snapshot_cannot_evict_newer_materialization_m
 
     let materialized = runtime
         .sessions
-        .summary(&session_id, Some(DEFAULT_MAX_EVENTS_PER_SESSION))
+        .summary(&session_id, Some(DEFAULT_RECENT_EVENT_LIMIT))
         .unwrap();
     for job in [&jold, &jnew] {
         assert_eq!(
@@ -2179,7 +2187,7 @@ async fn stale_validation_terminal_snapshot_cannot_evict_newer_materialization_m
         .await;
     let after_repeat = runtime
         .sessions
-        .summary(&session_id, Some(DEFAULT_MAX_EVENTS_PER_SESSION))
+        .summary(&session_id, Some(DEFAULT_RECENT_EVENT_LIMIT))
         .unwrap();
     assert_eq!(after_repeat.events_total, events_total_before_repeat);
     assert_eq!(
@@ -2356,7 +2364,7 @@ async fn async_same_cargo_check_target_success_resolves_prior_failure_without_du
     // the authoritative Job registry. The retained Job must remain a candidate,
     // but reconciliation must not resurrect its terminal evidence or refresh
     // Session activity merely because a read path ran later.
-    for index in 0..=DEFAULT_MAX_EVENTS_PER_SESSION {
+    for index in 0..=DEFAULT_RECENT_EVENT_LIMIT {
         let started = runtime.sessions.record_tool_call_started(
             Some(&session_id),
             SessionTransport::Api,

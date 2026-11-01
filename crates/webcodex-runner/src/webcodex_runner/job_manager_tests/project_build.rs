@@ -5,6 +5,98 @@ use webcodex_core::runner_operation::{
 };
 
 #[test]
+#[ignore = "native Cargo exclusion smoke; run explicitly on the task candidate"]
+fn native_cargo_lifecycle_jobs_skip_an_intentionally_broken_workspace_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    for package in ["healthy", "broken"] {
+        std::fs::create_dir_all(root.join(package).join("src")).unwrap();
+        std::fs::write(
+            root.join(package).join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(package).join("src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"healthy\", \"broken\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("broken/build.rs"),
+        "fn main() { panic!(\"excluded member build script ran\"); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("broken/src/lib.rs"), "pub fn broken() {}\n").unwrap();
+    std::fs::write(
+        root.join("healthy/src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n#[cfg(test)] mod tests { #[test] fn healthy() { assert_eq!(super::value(), 1); } }\n",
+    )
+    .unwrap();
+
+    let manager = JobManager::new(1);
+    let (sink, _rx) = structured_test_sink("structured-agent", "structured-instance");
+    let cargo_jobs = [
+        ("build", vec!["build", "--workspace", "--exclude", "broken"]),
+        (
+            "check",
+            vec![
+                "check",
+                "--all-targets",
+                "--workspace",
+                "--exclude",
+                "broken",
+            ],
+        ),
+        (
+            "lint",
+            vec![
+                "clippy",
+                "--all-targets",
+                "--workspace",
+                "--exclude",
+                "broken",
+                "--",
+                "-D",
+                "clippy::correctness",
+            ],
+        ),
+        ("test", vec!["test", "--workspace", "--exclude", "broken"]),
+    ];
+    for (name, args) in cargo_jobs {
+        let job_id = format!("native-exclusion-{name}");
+        enqueue_structured_process_job(
+            &manager,
+            sink.clone(),
+            &root,
+            &job_id,
+            Path::new("cargo"),
+            args.into_iter().map(str::to_string).collect(),
+            None,
+            180,
+            None,
+        );
+        assert!(
+            manager.wait_for_workers(Instant::now() + Duration::from_secs(190)),
+            "native Cargo {name} worker did not finish"
+        );
+        let snapshot = lock_unpoison(&manager.jobs)
+            .get(&job_id)
+            .expect("native Cargo Job retained")
+            .snapshot
+            .clone();
+        assert_eq!(snapshot.status, "completed", "{name}: {snapshot:?}");
+        assert_eq!(snapshot.exit_code, Some(0), "{name}: {snapshot:?}");
+    }
+    manager.stop_all();
+}
+
+#[test]
 fn node_project_build_admission_accepts_runner_selected_package_manager() {
     for manager in ["npm", "pnpm", "yarn", "bun"] {
         for adapter in [ProjectBuildAdapter::Node, ProjectBuildAdapter::Auto] {
@@ -33,6 +125,9 @@ fn node_project_build_admission_accepts_runner_selected_package_manager() {
                 ..Default::default()
             };
             let request = ProjectBuildRequest {
+                profile: None,
+                targets: None,
+                artifact_policy: None,
                 project_id: "demo".into(),
                 cwd: None,
                 adapter,
@@ -207,6 +302,9 @@ edition = "2021"
             ..Default::default()
         };
         let request = ProjectBuildRequest {
+            profile: None,
+            targets: None,
+            artifact_policy: None,
             dependency_resolution_policy: None,
             project_id: "demo".into(),
             cwd: member_cwd.then(|| "member".into()),
@@ -349,6 +447,9 @@ fn go_project_build_overrides_ambient_gowork_at_spawn() {
         ..Default::default()
     };
     let request = ProjectBuildRequest {
+        profile: None,
+        targets: None,
+        artifact_policy: None,
         dependency_resolution_policy: None,
         project_id: "demo".into(),
         cwd: None,
@@ -442,6 +543,9 @@ fn enqueue_python_build_fixture(
         ..Default::default()
     };
     let request = ProjectBuildRequest {
+        profile: None,
+        targets: None,
+        artifact_policy: None,
         dependency_resolution_policy: None,
         project_id: "demo".into(),
         cwd: None,
@@ -722,6 +826,9 @@ fn node_project_build_real_declared_script_and_no_adapter_installation() {
         ..Default::default()
     };
     let request = ProjectBuildRequest {
+        profile: None,
+        targets: None,
+        artifact_policy: None,
         dependency_resolution_policy: None,
         project_id: "demo".into(),
         cwd: None,

@@ -556,15 +556,14 @@ fn startup_workspace_schema() -> Value {
 fn startup_workflow_schema() -> Value {
     json!({
             "type": "object",
-            "description": "WebCodex-owned shared workflow, selected tool strategy and optional review role. Separate from project instructions and Session authority.",
+            "description": "WebCodex-owned shared project workflow and selected tool strategy. Coding/review guidance is an explicit context chapter; neither grants Session authority.",
             "properties": {
                 "contract": {"type": "string", "const": BUILTIN_CODING_WORKFLOW_CONTRACT},
                 "version": {"type": "integer", "const": BUILTIN_CODING_WORKFLOW_VERSION},
                 "authority": {"type": "string", "const": "model_guidance_only"},
-                "role_selection": {"type": "string", "maxLength": 240},
                 "guidance": {
                     "type": "array",
-                    "description": "Default behavior for every coding/review task, including tasks without a named role. Guidance never grants authority.",
+                    "description": "Shared behavior for project tasks. Task-specific implementation conventions are requested separately; guidance never grants authority.",
                     "minItems": 1,
                     "items": {"type": "string"}
                 },
@@ -600,6 +599,7 @@ fn startup_workflow_schema() -> Value {
                     "type": "object",
                     "description": "Shared model-invocation guidance. It is not Session state, authority, or execution policy.",
                     "properties": {
+                        "coding_guidance": {"type": "string", "maxLength": 480},
                         "handoff_recovery": {"type": "string", "maxLength": 720},
                         "session_recording": {"type": "string", "maxLength": 720},
                         "session_message_ack": {"type": "string", "maxLength": 720},
@@ -612,12 +612,11 @@ fn startup_workflow_schema() -> Value {
                         "runner_targeting": {"type": "string", "maxLength": 320},
                         "persistent_shell": {"type": "string", "maxLength": 320},
                         "goal_workflow": {"type": "string", "maxLength": 720},
-                        "goal_continuation": {"type": "string", "maxLength": 720},
-                        "goal_checkpoint": {"type": "string", "maxLength": 480},
                         "work_result_presentation": {"type": "string", "maxLength": 640},
                         "normal_closeout": {"type": "string", "maxLength": 480}
                     },
                     "required": [
+                        "coding_guidance",
                         "handoff_recovery",
                         "session_recording",
                         "session_message_ack",
@@ -630,43 +629,15 @@ fn startup_workflow_schema() -> Value {
                         "runner_targeting",
                         "persistent_shell",
                         "goal_workflow",
-                        "goal_continuation",
-                        "goal_checkpoint",
                         "work_result_presentation",
                         "normal_closeout"
                     ],
                     "additionalProperties": false
-                },
-                "roles": {
-                    "type": "object",
-                    "description": "Optional named review behavior. Ordinary implementation uses shared guidance and the selected tool strategy.",
-                    "properties": {
-                        "independent_review": startup_workflow_role_schema()
-                    },
-                    "required": ["independent_review"],
-                    "additionalProperties": false
                 }
             },
-            "required": ["contract", "version", "authority", "role_selection", "guidance", "tool_strategy", "model_protocol", "roles"],
+            "required": ["contract", "version", "authority", "guidance", "tool_strategy", "model_protocol"],
             "additionalProperties": false
         })
-}
-
-#[cfg(any(test, feature = "root-test-support"))]
-fn startup_workflow_role_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "purpose": {"type": "string", "maxLength": 240},
-            "guidance": {
-                "type": "array",
-                "minItems": 1,
-                "items": {"type": "string"}
-            }
-        },
-        "required": ["purpose", "guidance"],
-        "additionalProperties": false
-    })
 }
 
 #[cfg(any(test, feature = "root-test-support"))]
@@ -986,6 +957,7 @@ fn startup_semantic_navigation_schema() -> Value {
         "properties": {
             "supported": {"type": "boolean", "description": "Whether LSP read-only navigation is advertised for this project."},
             "status": semantic_navigation_status_schema(),
+            "index_readiness": serde_json::to_value(schemars::schema_for!(webcodex_core::lsp_bridge::LspIndexReadiness)).expect("readiness schema"),
             "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means startup finished without waiting for availability, or the bounded status probe timed out or failed; this is advisory, not unavailability."),
             "provider": nullable_schema("string", "Semantic provider when applicable."),
             "capability": nullable_schema("string", "Bounded advertised capability summary."),
@@ -1118,6 +1090,7 @@ fn semantic_navigation_schema() -> Value {
             "available": nullable_schema("boolean", "Observed semantic-navigation availability. True means supported Rust/Go navigation has an available executable or an existing running/initializing server slot; false is a positive unavailable observation; null means a bounded startup status probe timed out or failed before availability could be observed; this is advisory, not unavailability."),
             "recommended": schema_type("boolean", "True only for available or running status."),
             "status": semantic_navigation_status_schema(),
+            "index_readiness": serde_json::to_value(schemars::schema_for!(webcodex_core::lsp_bridge::LspIndexReadiness)).expect("readiness schema"),
             "language": {
                 "anyOf": [
                     { "type": "string", "enum": ["rust", "go"] },
@@ -1282,6 +1255,7 @@ fn work_on_project_output_schema() -> Value {
             "supported": {"type": "boolean"},
             "available": nullable_schema("boolean", "Observed semantic-navigation availability. Null means startup finished without waiting for availability, or the bounded status probe timed out or failed; this does not lower coding readiness."),
             "status": semantic_navigation_status_schema(),
+            "index_readiness": serde_json::to_value(schemars::schema_for!(webcodex_core::lsp_bridge::LspIndexReadiness)).expect("readiness schema"),
             "capability": nullable_schema("string", "Bounded advertised capability summary."),
             "reason_code": nullable_schema("string", "Stable semantic-navigation reason.")
         },

@@ -22,8 +22,9 @@ mod trace_query;
 pub use trace_query::{ToolTraceCallRecord, ToolTraceQueryFilter};
 mod communication;
 mod connection_observation;
+pub use connection_observation::with_connection_trace;
 mod history_budget;
-pub use history_budget::HistoryReadBudget;
+pub use history_budget::{HistoryReadBudget, HistoryReadDiagnostics};
 
 mod external_observations;
 #[cfg(test)]
@@ -66,6 +67,8 @@ mod schema;
 mod server_instance;
 mod window_activity;
 mod window_inventory;
+mod window_labels;
+pub use window_labels::normalize_window_label;
 mod workbench_preferences;
 pub use window_inventory::{WindowInventoryPage, WindowInventoryQuery, WindowInventoryRow};
 
@@ -170,6 +173,8 @@ pub struct Database {
     window_history_reads: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "root-test-support"))]
     window_inventory_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "root-test-support"))]
+    history_budget_reads: std::sync::atomic::AtomicUsize,
     connection_observer: Arc<dyn StoreConnectionObserver>,
     state_path: PathBuf,
 }
@@ -183,6 +188,8 @@ impl Database {
             window_history_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "root-test-support"))]
             window_inventory_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "root-test-support"))]
+            history_budget_reads: std::sync::atomic::AtomicUsize::new(0),
             connection_observer: Arc::new(TracingStoreConnectionObserver),
             state_path,
         }
@@ -239,6 +246,12 @@ impl Database {
             self.window_history_reads.load(Relaxed),
             self.window_inventory_reads.load(Relaxed),
         )
+    }
+
+    /// Admitted budget scopes, isolated to this test Database.
+    pub fn history_budget_reads_for_test(&self) -> usize {
+        self.history_budget_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn conn_for_tests(&self) -> std::sync::MutexGuard<'_, Connection> {

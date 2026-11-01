@@ -23,6 +23,26 @@ Hidden/App-only tools remain independently capability-admitted. A gateway cannot
 turn presentation metadata into authority or call an unadmitted hidden tool.
 Host schema refresh and workflow guidance refresh remain distinct operations.
 
+The MCP adapter owns `WEBCODEX_MCP_TOOL_EXPOSURE`: Goal, Agent continuation and
+Job continuation model surfaces default off, with independent Adaptive/CLI
+defaults and bounded exact authenticated OAuth-client overrides. Keep selection
+request-local, snapshot configuration at startup, and align discovery, manifests,
+suggested calls, static App resources and call admission. Workbench App-only Goal
+controls retain their independent admission; they never create a model/gateway
+route. Enabled Host-reviewed tools require standalone descriptors even on CLI.
+See [client configuration](../MCP.md#optional-workflow-tools-per-client).
+
+`X-WebCodex-MCP-Surface: cli` selects an MCP-adapter-owned coding descriptor
+subset and text projection. Its direct entries come from canonical model-visible
+ToolDefinitions; long-tail calls still enter the same gateway and kernel. App
+admission is disabled for the request, including gateway calls. `_wc` is absent
+and rejected; CLI startup requests instruction context using internal typed
+metadata, with unchanged scope checks and context bounds. The optional default
+Project header supplies only omitted required selectors and never overrides an
+explicit Project, exact Session resume, or path registration. Render text only
+after canonical audit/Job correlation so presentation cannot change execution
+success or retry evidence. Third-party passthrough retains provider semantics.
+
 ## Maintained operational routes
 
 `/healthz` is a public deployment/readiness probe. `/api/runtime/status` is an
@@ -36,6 +56,15 @@ The retired `/openapi.json`, `/api/actions/{tool_name}`, and Action-only
 Do not replace them with dummy documents, redirects, or compatibility switches.
 Removing those entrypoints does not remove ActionAudit history, credential kinds,
 MCP OAuth, generic Runtime HTTP or Runner wire protocols.
+
+The old `/api/shell/run`, `/api/shell/file`, `/api/shell/job`, and
+`/api/shell/jobs/{status,log,stop,list}` execution routes are also unmounted. Use
+canonical tools through MCP or `/api/tools/call`; no deprecated endpoint or
+forwarding adapter is maintained for these unused internal APIs. This does not
+retire `/api/shell/agent/*`, whose registration, polling, result and Job-update
+handlers remain part of the Runner transport. Shared Registry primitives, existing
+Job recovery/cancellation and negotiated mixed-version capabilities are unchanged.
+See [compatibility policy](../compatibility-policy.md#internal-execution-interfaces).
 
 ## File provenance
 

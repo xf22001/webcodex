@@ -6,10 +6,11 @@ use super::effects::{
     computer_application_effect_not_started, computer_application_launch_runner_error,
     computer_clipboard_write_delivery_failure, computer_clipboard_write_not_started,
     computer_clipboard_write_runner_error, computer_effect_delivery_failure,
-    computer_effect_outcome_unknown, computer_error, computer_error_recovery_message,
-    computer_error_with_client, computer_pointer_effect_delivery_failure,
-    computer_pointer_effect_not_started, computer_pointer_runner_error, computer_request_is_effect,
-    computer_text_input_runner_error, ClipboardWriteContext, PointerRequestContext,
+    computer_effect_not_started, computer_effect_outcome_unknown, computer_error,
+    computer_error_recovery_message, computer_error_with_client,
+    computer_pointer_effect_delivery_failure, computer_pointer_effect_not_started,
+    computer_pointer_runner_error, computer_request_is_effect, computer_text_input_runner_error,
+    ClipboardWriteContext, PointerRequestContext,
 };
 use super::responses::{validate_computer_response, ComputerResponseContext};
 use super::*;
@@ -44,6 +45,45 @@ impl ToolRuntime {
         expected_surface_id: Option<&str>,
         accessibility_bounds: Option<(usize, usize)>,
     ) -> ToolResult {
+        self.dispatch_computer_request_for_instance(
+            client_id,
+            kind,
+            payload,
+            auth,
+            list_limit,
+            expected_surface_id,
+            accessibility_bounds,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_computer_request_for_instance(
+        &self,
+        client_id: &str,
+        kind: &'static str,
+        mut payload: Value,
+        auth: Option<&AuthContext>,
+        list_limit: Option<usize>,
+        expected_surface_id: Option<&str>,
+        accessibility_bounds: Option<(usize, usize)>,
+        expected_instance: Option<&str>,
+    ) -> ToolResult {
+        let is_selection = kind == "computer_control"
+            && payload.get("action").and_then(Value::as_str) == Some("select");
+        let key_input = if kind == "computer_key_input" {
+            let Ok(input) = serde_json::from_value::<
+                webcodex_core::computer_input_contract::ComputerKeyInputPayload,
+            >(payload.clone()) else {
+                return computer_error("invalid_request", "invalid computer key input payload");
+            };
+            if let Err(error) = input.validate() {
+                return computer_error("invalid_request", error);
+            }
+            Some(input)
+        } else {
+            None
+        };
         let expected_root_element_id = payload
             .get("root_element_id")
             .and_then(Value::as_str)
@@ -126,7 +166,14 @@ impl ToolRuntime {
                 &[RunnerFeature::ComputerAccessibilityObserve]
             }
             "computer_element_state" => &[RunnerFeature::ComputerElementState],
-            "computer_control" => &[RunnerFeature::ComputerControl],
+            "computer_control" => {
+                webcodex_core::computer_input_contract::computer_control_capabilities(
+                    payload
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+            }
             "computer_scroll_to_element" => &[RunnerFeature::ComputerScrollToElement],
             "computer_key_input" => &[RunnerFeature::ComputerKeyInput],
             "computer_activate_window" => &[RunnerFeature::ComputerWindowActivate],
@@ -166,13 +213,36 @@ impl ToolRuntime {
                         .expect("clipboard write context"),
                 );
             }
+            Err(error)
+                if (expected_instance.is_some() || key_input.is_some() || is_selection)
+                    && computer_request_is_effect(kind) =>
+            {
+                return computer_effect_not_started(&error);
+            }
             Err(error) => return computer_error("client_access_denied", &error),
         };
+        // Pin additive effects to the registration whose capability was observed.
+        // The same fence is checked under the queue lock and again at dequeue.
+        let expected_instance = expected_instance.or_else(|| {
+            (key_input.is_some() || is_selection).then_some(client.view.runner_instance_id.as_str())
+        });
+        let required_features = key_input.as_ref().map_or(required_features, |input| {
+            webcodex_core::computer_input_contract::computer_key_input_capabilities(
+                &input.key,
+                &input.modifiers,
+                client.supports(RunnerFeature::ComputerKeyChords),
+            )
+        });
         for required_feature in required_features {
             if client.supports(*required_feature) {
                 continue;
             }
             let required_capability = required_feature.as_wire_name();
+            if expected_instance.is_some() && computer_request_is_effect(kind) {
+                return computer_effect_not_started(&format!(
+                    "target Runner does not support {required_capability}"
+                ));
+            }
             if is_application_launch {
                 return computer_application_effect_not_started(
                     "capability_unavailable",
@@ -199,6 +269,10 @@ impl ToolRuntime {
                 "capability_unavailable",
                 &format!("target Runner does not support {required_capability}"),
             );
+        }
+        // Preserve the exact legacy response shape for old Servers and Runners.
+        if kind == "computer_element_state" && client.supports(RunnerFeature::ComputerSelection) {
+            payload["include_selection"] = json!(true);
         }
         let expected_element_id = payload
             .get("element_id")
@@ -255,19 +329,35 @@ impl ToolRuntime {
             }
         };
         let requested_by = crate::runner_http::requested_by_from_auth(auth);
-        let (request_id, mut receiver) = match self
-            .runner_registry
-            .enqueue_computer(
-                client_id.to_string(),
-                kind,
-                payload,
-                requested_by,
-                crate::runner_http::runner_access_from_auth(auth).as_ref(),
-                COMPUTER_WAIT_SECS,
-            )
-            .await
-        {
+        let enqueued = if let Some(instance) = expected_instance {
+            self.runner_registry
+                .enqueue_computer_for_instance(
+                    client_id.to_string(),
+                    kind,
+                    payload,
+                    requested_by,
+                    crate::runner_http::runner_access_from_auth(auth).as_ref(),
+                    COMPUTER_WAIT_SECS,
+                    instance,
+                )
+                .await
+        } else {
+            self.runner_registry
+                .enqueue_computer(
+                    client_id.to_string(),
+                    kind,
+                    payload,
+                    requested_by,
+                    crate::runner_http::runner_access_from_auth(auth).as_ref(),
+                    COMPUTER_WAIT_SECS,
+                )
+                .await
+        };
+        let (request_id, mut receiver) = match enqueued {
             Ok(value) => value,
+            Err(error) if error.starts_with("computer_control_unavailable:") => {
+                return computer_error("computer_control_unavailable", &error);
+            }
             Err(error) if kind == "computer_launch_application" => {
                 return computer_application_effect_not_started(
                     "not_started",
@@ -291,6 +381,9 @@ impl ToolRuntime {
                         .as_ref()
                         .expect("clipboard write context"),
                 );
+            }
+            Err(error) if expected_instance.is_some() && computer_request_is_effect(kind) => {
+                return computer_effect_not_started(&error);
             }
             Err(error) => return computer_error("dispatch_denied", &error),
         };
@@ -384,6 +477,16 @@ impl ToolRuntime {
         };
         if let Some(error) = response.error.as_deref() {
             let error_kind = classify_runner_error(error);
+            if matches!(
+                error_kind,
+                "computer_control_paused"
+                    | "computer_control_changed"
+                    | "computer_control_unavailable"
+            ) {
+                // These are Runner-owned pre-effect rejections. Preserve local
+                // user recovery instead of classifying them as uncertain input.
+                return computer_error(error_kind, error);
+            }
             if is_text_input {
                 return computer_text_input_runner_error(
                     error,

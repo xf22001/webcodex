@@ -88,11 +88,7 @@ pub use config::Config;
 pub use config::OAuth2Config;
 pub use db::{Database, RotateResult};
 
-pub(crate) use runner_http::{
-    runner_job_update, runner_offline, runner_persistent_shell_result, runner_poll,
-    runner_register, runner_result, shell_file_op, shell_job, shell_job_log, shell_job_status,
-    shell_job_stop, shell_jobs_list, shell_run, RunnerRegistry,
-};
+pub(crate) use runner_http::RunnerRegistry;
 pub use startup::{
     is_project_command, run_project_command, run_regular_server_tunnel, CliCommandOutput,
     RegularServerTunnelOptions,
@@ -275,7 +271,9 @@ pub async fn run_server_with_shutdown(
             load.loaded_count,
         );
     }
-    let config = Config::from_env();
+    let config = Config::from_env().map_err(std::io::Error::other)?;
+    let mcp_tool_exposure =
+        mcp::tool_exposure::ToolExposureConfig::from_env().map_err(std::io::Error::other)?;
     let mcp_host_timing =
         mcp_host::McpHostTimingOverrides::from_env().map_err(std::io::Error::other)?;
     let mcp_host_policy = mcp_host::McpHostConfig::from_env()
@@ -290,14 +288,6 @@ pub async fn run_server_with_shutdown(
     let console_asset_source = Arc::new(
         console_web::ConsoleAssetSource::from_env(&config.addr).map_err(std::io::Error::other)?,
     );
-    if !config.is_auth_enabled() {
-        tracing::warn!(
-            "WEBCODEX_TOKEN is not set! Running in development mode without authentication. \
-Use `webcodex server init` to generate a bootstrap/admin key, or set WEBCODEX_ALLOW_ANONYMOUS=true \
-only for local/trusted-network demos."
-        );
-        tracing::warn!("Anonymous API access is rejected by default in production mode.");
-    }
     if auth::shared_key_enabled() && auth::shared_key_requires_remote_opt_in(&config) {
         if auth::shared_key_remote_enabled() {
             tracing::warn!(
@@ -381,6 +371,7 @@ explicitly allow remote shared-key auth."
     let mut runtime_info =
         tool_runtime::RuntimeInfo::from_config_with_quic_config(&config, &quic_cfg);
     runtime_info.tunnels = tunnels.status();
+    runtime_info.mcp_tool_exposure = mcp_tool_exposure;
     let runtime_info = Arc::new(runtime_info);
     let runtime_state_dir = config.runtime_state_dir();
     let mut tool_runtime_builder =
@@ -392,7 +383,7 @@ explicitly allow remote shared-key auth."
             .with_project_reference_database(db.clone())
             .with_communication_database(db.clone())
             .with_job_terminal_attention(db.clone(), job_terminal_continuations)
-            .with_session_ledger(config.session_ledger_path())
+            .with_session_database(config.db_path(), &config.session_ledger_path())?
             .with_persistent_coding_agent_observation_state(&runtime_state_dir)
             .map_err(std::io::Error::other)?;
     #[cfg(feature = "workspace-checkpoints")]
@@ -588,46 +579,7 @@ explicitly allow remote shared-key auth."
             Router::with_path(route_metadata::api_path(RouteId::AgentTokensRevoke))
                 .post(runner_tokens_http::runner_tokens_revoke),
         )
-        .push(Router::with_path(route_metadata::api_path(RouteId::ShellRun)).post(shell_run))
-        .push(Router::with_path(route_metadata::api_path(RouteId::ShellFile)).post(shell_file_op))
-        .push(Router::with_path(route_metadata::api_path(RouteId::ShellJob)).post(shell_job))
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ShellJobsStatus))
-                .post(shell_job_status),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ShellJobsLog)).post(shell_job_log),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ShellJobsStop))
-                .post(shell_job_stop),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ShellJobsList))
-                .post(shell_jobs_list),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::RunnerRegister))
-                .post(runner_register),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::RunnerOffline))
-                .post(runner_offline),
-        )
-        .push(Router::with_path(route_metadata::api_path(RouteId::RunnerPoll)).post(runner_poll))
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::RunnerResult)).post(runner_result),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(
-                RouteId::RunnerPersistentShellResult,
-            ))
-            .post(runner_persistent_shell_result),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::RunnerJobUpdate))
-                .post(runner_job_update),
-        )
+        .push(runner_http::routes())
         // WebSocket Runner transport (preferred long-lived connection).
         // Polling endpoints above remain as fallback. Bearer auth is
         // enforced by the shared AuthMiddleware hoop.
@@ -994,13 +946,12 @@ mod tests {
         // Clear env vars to test defaults; Drop restores the process environment.
         env.remove("WEBCODEX_ADDR");
         env.remove("WEBCODEX_DATA");
-        env.remove("WEBCODEX_TOKEN");
+        env.set("WEBCODEX_TOKEN", "test-bootstrap");
 
-        let config = Config::from_env();
-        assert_eq!(config.addr, "0.0.0.0:8080");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.addr, "127.0.0.1:8080");
         assert_eq!(config.data_dir, PathBuf::from("./data"));
-        assert_eq!(config.token, None);
-        assert!(!config.is_auth_enabled());
+        assert!(config.is_auth_enabled());
         assert_eq!(config.max_text_size, 2 * 1024 * 1024);
     }
 

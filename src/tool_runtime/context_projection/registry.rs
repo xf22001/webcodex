@@ -78,6 +78,7 @@ pub(super) struct ContextMaterialContext<'a> {
     pub auth: Option<&'a AuthContext>,
     pub window: Option<&'a ClientWindow>,
     pub instructions: Option<&'a ProjectInstructionsSnapshot>,
+    pub prefer_full_instruction_content: bool,
     pub budget: ContextProjectionBudget<'a>,
 }
 
@@ -160,6 +161,7 @@ pub(super) static BUILTIN_CONTEXT_MATERIALS: ContextMaterialRegistry = ContextMa
         &providers::PLUGINS_CATALOG,
         &providers::MEMORY_BOOTSTRAP,
         &providers::GOAL_WORKFLOW,
+        &providers::CODING_GUIDANCE,
     ],
 };
 

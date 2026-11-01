@@ -43,16 +43,17 @@ never mean zero usage; ordinary request-dispatch queues are separate.
 
 In **Settings → Runtime & services → Runner job capacity**, Desktop-managed local
 Runners can save **Maximum concurrent jobs** as a whole number from **1 to 64**.
-The default remains **4**. The saved value and current effective limit are shown
-separately. **Save for next restart** only writes the exact local Runner's
-configuration, preserves unrelated settings, and rejects a conflicting edit.
-It does not hot-reload or restart services.
+The default for an omitted setting is **32**; explicit saved values are preserved. The saved value and current effective limit are shown
+separately. **Save and apply** stages the exact local Runner configuration, preserves
+unrelated settings, then validates and reloads with a generation fence. A definite
+rejection restores only an unchanged candidate; an uncertain result requires
+reconciliation and is never blindly retried or rolled back. Running Jobs continue.
 
-Choose **Restart Runner…** when ready and confirm the interruption warning.
+**Restart Runner…** remains a separate operation with an interruption warning.
 Restarting applies the saved Runner configuration and may interrupt Jobs,
 browser sessions, and handoffs. Desktop reuses its existing owned-process or
 persistent-service restart path. Remote and independently managed Runners remain
-read-only; their actual operator must edit the configuration and restart them.
+read-only; their actual operator must edit and apply their configuration.
 A restart is not reported as applying the saved limit until fresh Runner status
 reports that limit.
 
@@ -160,3 +161,10 @@ A Full Runtime consists of the Server, Runner, and the Runner's observed Project
 Desktop restart resumes the saved Server/Runner identity and Connections without registering a Project. Concrete Runtime Projects appear when model-driven work resolves a workspace path. A complete online Runner inventory is authoritative for those registrations; Desktop may reconcile stale display history, but the normal Desktop UI does not mutate Project registration state.
 
 Project directories, Git files, and Runner policy remain separate concerns: lazy Project registration creates or reuses runtime identity for an already-authorized path and does not broaden `allowed_roots`.
+
+## Local Computer activity and pause
+
+On Windows, the native tray shows Computer observation/control activity and offers
+**Pause Computer Control** for the saved local Runner. Observation remains available
+while control is paused. See [Local Computer Control](agent/computer-local-control.md)
+for resume, optional edge hints, shortcuts, and execution boundaries.

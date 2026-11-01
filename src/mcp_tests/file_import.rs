@@ -77,7 +77,7 @@ fn mcp_import_config_from_startup_env(
         "explicit env file must not override already-present OAuth trust settings"
     );
 
-    let config = Arc::new(crate::Config::from_env());
+    let config = Arc::new(crate::Config::from_env().unwrap());
     assert!(config.oauth2.enabled);
     assert_eq!(
         config.oauth2.trusted_mcp_file_client_ids,
@@ -263,6 +263,7 @@ async fn mcp_import_runtime_inner(
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
                 computer_session_availability: None,
+                computer_control_epoch: None,
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -348,10 +349,7 @@ async fn complete_mcp_import_save(
     assert!(begin.get("download_url").is_none());
     assert!(begin.get("download_link").is_none());
     assert!(begin.get("openaiFileIdRefs").is_none());
-    assert_eq!(
-        begin["max_bytes"],
-        crate::tool_runtime::files::MAX_PROJECT_ARTIFACT_UPLOAD_BYTES
-    );
+    assert_eq!(begin["max_bytes"], expected_bytes.len().max(1));
     assert_eq!(begin["expected_bytes"], expected_bytes.len());
     let path = begin["path"].as_str().unwrap().to_string();
     let mime_type = begin["mime_type"].as_str().unwrap().to_string();
@@ -370,7 +368,7 @@ async fn complete_mcp_import_save(
                     "next_offset": 0,
                     "expected_bytes": expected_bytes.len(),
                     "expected_sha256": null,
-                    "max_bytes": crate::tool_runtime::files::MAX_PROJECT_ARTIFACT_UPLOAD_BYTES,
+                    "max_bytes": expected_bytes.len(),
                     "mime_type": mime_type,
                     "committed": false
                 })
@@ -421,7 +419,7 @@ async fn complete_mcp_import_save(
                                 "next_offset": bytes.len(),
                                 "expected_bytes": expected_bytes.len(),
                                 "expected_sha256": null,
-                                "max_bytes": crate::tool_runtime::files::MAX_PROJECT_ARTIFACT_UPLOAD_BYTES,
+                                "max_bytes": expected_bytes.len(),
                                 "mime_type": mime_type,
                                 "committed": false
                             })
@@ -853,9 +851,11 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
     )
     .expect_err("caller-controlled host provenance must fail closed at the canonical parser");
     assert!(
-        forged_provenance_error.contains("unknown field `host_file_import_provenance`"),
+        forged_provenance_error.contains("unknown field"),
         "{forged_provenance_error}"
     );
+    assert!(!forged_provenance_error.contains(temporary_url));
+    assert!(!forged_provenance_error.contains("TrustedMcpHostFile"));
     let (status, body, _) = oauth_mcp_request(
         &service,
         &token,

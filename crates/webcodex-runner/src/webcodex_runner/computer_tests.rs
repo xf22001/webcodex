@@ -1,7 +1,66 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn headless_windows_local_control_preserves_runner_startup_without_input_authority() {
+    let original = webcodex_computer::local_control::LocalControl::new();
+    let active = local_control_after_pipe_start(original.clone(), Ok(())).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&active, &original));
+
+    let disabled = local_control_after_pipe_start(
+        original,
+        Err(webcodex_computer::local_control::INTERACTIVE_SESSION_REQUIRED_ERROR.into()),
+    )
+    .unwrap();
+    let epoch = disabled.snapshot().unwrap().epoch;
+    assert!(disabled.snapshot().unwrap().paused);
+    assert!(disabled.begin(true, Some(&epoch)).is_err());
+    assert!(
+        disabled.begin(false, None).is_ok(),
+        "headless observation remains non-effectful"
+    );
+
+    assert!(
+        local_control_after_pipe_start(
+            webcodex_computer::local_control::LocalControl::new(),
+            Err("computer_control_unavailable: pipe ACL".into()),
+        )
+        .is_err(),
+        "unexpected management failures must not silently downgrade"
+    );
+}
+
+#[test]
+fn computer_local_pause_and_old_epoch_reject_before_native_clipboard_dispatch() {
+    let runtime = ComputerRuntime::new(ComputerConfig {
+        max_encoded_image_bytes: MAX_MCP_IMAGE_BYTES,
+    });
+    let control = runtime.local_control();
+    let epoch = control.snapshot().unwrap().epoch;
+    let operation = RunnerComputerOperation {
+        control_epoch: Some(epoch.clone()),
+        kind: RunnerComputerOperationKind::WriteClipboard,
+        payload: r#"{"text":"must never be written"}"#.into(),
+        timeout_secs: 1,
+    };
+    let paused = control.set_paused(&epoch, true).unwrap();
+    let rejected = handle_computer_operation_with_runtime(&runtime, &operation);
+    assert!(rejected
+        .error
+        .unwrap()
+        .starts_with("computer_control_paused:"));
+    control.set_paused(&paused.epoch, false).unwrap();
+    let stale = handle_computer_operation_with_runtime(&runtime, &operation);
+    assert!(stale
+        .error
+        .unwrap()
+        .starts_with("computer_control_changed:"));
+    assert!(!control.snapshot().unwrap().controlling);
+}
+
 fn request(kind: &str, payload: &str) -> RunnerRequest {
     RunnerRequest {
+        computer_control_epoch: None,
         login: false,
         shell: None,
         request_id: "computer-test".to_string(),
@@ -166,6 +225,57 @@ fn computer_element_state_payload_is_exact_surface_and_element_only() {
         serde_json::json!({"surface_id": "surface_test", "element_id": "element_test", "refresh": true}),
     ] {
         assert!(ensure_exact_payload_fields(&extra, &["surface_id", "element_id"]).is_err());
+    }
+}
+
+#[test]
+fn computer_selection_uses_existing_control_wire_and_rejects_extra_effects() {
+    let runtime = ComputerRuntime::new(ComputerConfig {
+        max_encoded_image_bytes: 1024,
+    });
+    for extra in [None, Some("toggle"), Some("observe_after"), Some("index")] {
+        let mut payload = serde_json::json!({"surface_id":"surface_missing", "element_id":"element_missing", "action":"select"});
+        if let Some(extra) = extra {
+            payload[extra] = serde_json::json!(true);
+        }
+        let result = handle_computer_operation_with_runtime(
+            &runtime,
+            &RunnerComputerOperation {
+                control_epoch: None,
+                kind: RunnerComputerOperationKind::Control,
+                payload: payload.to_string(),
+                timeout_secs: 5,
+            },
+        );
+        let error = result.error.unwrap();
+        assert!(
+            error.starts_with(if extra.is_none() {
+                "stale_surface:"
+            } else {
+                "invalid_request:"
+            }),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn computer_selection_state_extension_is_explicit_and_legacy_requests_stay_legacy() {
+    let legacy = serde_json::json!({"surface_id":"surface_test", "element_id":"element_test"});
+    assert!(!element_state_selection_requested(&legacy).unwrap());
+    for value in [
+        serde_json::json!(true),
+        serde_json::json!(false),
+        serde_json::json!(null),
+        serde_json::json!("true"),
+    ] {
+        let mut payload = legacy.clone();
+        payload["include_selection"] = value.clone();
+        let result = element_state_selection_requested(&payload);
+        match value.as_bool() {
+            Some(expected) => assert_eq!(result.unwrap(), expected),
+            None => assert!(result.is_err()),
+        }
     }
 }
 

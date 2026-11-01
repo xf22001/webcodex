@@ -610,10 +610,10 @@ impl RunnerRegistry {
         self.enqueue_validated_file_op(body, requested_by).await
     }
 
-    /// Enqueue one Phase-3 read-only Skill filesystem primitive. Generic
-    /// `/api/shell/file` callers cannot reach these ops through
-    /// `enqueue_file_op`; ToolRuntime calls this internal method only after the
-    /// authoritative model-surface/project gates have resolved.
+    /// Enqueue one read-only Skill filesystem primitive. Generic
+    /// `enqueue_file_op` callers cannot reach these operations; ToolRuntime calls
+    /// this method only after the authoritative model-surface/project gates
+    /// have resolved.
     pub async fn enqueue_skill_file_op(
         &self,
         body: ShellFileOpRequest,
@@ -2476,7 +2476,82 @@ impl RunnerRegistry {
         auth: Option<&crate::RunnerAccess>,
         timeout_secs: u64,
     ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
+        self.enqueue_computer_checked(
+            client_id,
+            kind,
+            payload,
+            requested_by,
+            auth,
+            timeout_secs,
+            None,
+        )
+        .await
+    }
+
+    /// Pin either phase of an action plus accessibility observation to the
+    /// admitted Runner instance. Both phases require accessibility capability;
+    /// admission and dequeue independently enforce this fence.
+    pub async fn enqueue_computer_for_instance(
+        &self,
+        client_id: String,
+        kind: &'static str,
+        payload: String,
+        requested_by: String,
+        auth: Option<&crate::RunnerAccess>,
+        timeout_secs: u64,
+        expected_runner_instance_id: &str,
+    ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
+        self.enqueue_computer_checked(
+            client_id,
+            kind,
+            payload,
+            requested_by,
+            auth,
+            timeout_secs,
+            Some(expected_runner_instance_id),
+        )
+        .await
+    }
+
+    async fn enqueue_computer_checked(
+        &self,
+        client_id: String,
+        kind: &'static str,
+        payload: String,
+        requested_by: String,
+        auth: Option<&crate::RunnerAccess>,
+        timeout_secs: u64,
+        expected_runner_instance_id: Option<&str>,
+    ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
         validate_id(&client_id, "client_id")?;
+        if payload.len() > shell_computer_request_payload_max_bytes(kind) || payload.contains('\0')
+        {
+            return Err("computer request payload is invalid or too large".to_string());
+        }
+        let control_payload = if kind == "computer_control" {
+            Some(
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .map_err(|_| "invalid computer control payload".to_string())?,
+            )
+        } else {
+            None
+        };
+        let control_action = control_payload
+            .as_ref()
+            .and_then(|v| v.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let is_selection = control_action == "select";
+        let key_input = if kind == "computer_key_input" {
+            let input = serde_json::from_str::<
+                webcodex_core::computer_input_contract::ComputerKeyInputPayload,
+            >(&payload)
+            .map_err(|_| "invalid computer key input payload".to_string())?;
+            input.validate().map_err(str::to_string)?;
+            Some(input)
+        } else {
+            None
+        };
         let required_features: &[RunnerFeature] = match kind {
             "computer_list_applications" => &[RunnerFeature::ComputerApplicationDiscovery],
             "computer_launch_application" => &[RunnerFeature::ComputerApplicationLaunch],
@@ -2493,8 +2568,23 @@ impl RunnerRegistry {
             "computer_accessibility_status" | "computer_accessibility_tree" => {
                 &[RunnerFeature::ComputerAccessibilityObserve]
             }
-            "computer_element_state" => &[RunnerFeature::ComputerElementState],
-            "computer_control" => &[RunnerFeature::ComputerControl],
+            "computer_element_state" => {
+                let state: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|_| "invalid computer element state payload".to_string())?;
+                if state.get("include_selection") == Some(&serde_json::Value::Bool(true)) {
+                    &[
+                        RunnerFeature::ComputerElementState,
+                        RunnerFeature::ComputerSelection,
+                    ]
+                } else {
+                    &[RunnerFeature::ComputerElementState]
+                }
+            }
+            "computer_control" => {
+                webcodex_core::computer_input_contract::computer_control_capabilities(
+                    control_action,
+                )
+            }
             "computer_scroll_to_element" => &[RunnerFeature::ComputerScrollToElement],
             "computer_key_input" => &[RunnerFeature::ComputerKeyInput],
             "computer_pointer_move" | "computer_pointer_click" => {
@@ -2504,19 +2594,16 @@ impl RunnerRegistry {
             "computer_input_text" => &[RunnerFeature::ComputerTextInput],
             _ => return Err("invalid computer request kind".to_string()),
         };
-        if payload.len() > shell_computer_request_payload_max_bytes(kind) || payload.contains('\0')
-        {
-            return Err("computer request payload is invalid or too large".to_string());
-        }
         let request_id = next_request_id();
         let (tx, rx) = oneshot::channel();
         let operation_kind = RunnerComputerOperationKind::from_wire(kind)
             .ok_or_else(|| "invalid computer request kind".to_string())?;
-        let request = encode_runner_operation(
+        let mut request = encode_runner_operation(
             &request_id,
             &client_id,
             requested_by,
             RunnerOperation::Computer(RunnerComputerOperation {
+                control_epoch: None,
                 kind: operation_kind,
                 payload,
                 timeout_secs: timeout_secs.max(1),
@@ -2529,6 +2616,51 @@ impl RunnerRegistry {
             .get(&client_id)
             .ok_or_else(|| format!("unknown shell client: {client_id}"))?;
         assert_runner_access(auth, current)?;
+        let required_features = key_input.as_ref().map_or(required_features, |input| {
+            webcodex_core::computer_input_contract::computer_key_input_capabilities(
+                &input.key,
+                &input.modifiers,
+                current.supports(RunnerFeature::ComputerKeyChords),
+            )
+        });
+        if operation_kind.is_effect() {
+            if current
+                .runner_features
+                .supports(RunnerFeature::ComputerLocalControl)
+                && current.computer_control_epoch.is_none()
+            {
+                return Err(
+                    "computer_control_unavailable: local control version is not available".into(),
+                );
+            }
+            request.computer_control_epoch = current.computer_control_epoch.clone();
+        }
+        let control_instance = request
+            .computer_control_epoch
+            .as_ref()
+            .map(|_| current.runner_instance_id.clone());
+        let key_instance = key_input
+            .as_ref()
+            .map(|_| current.runner_instance_id.clone());
+        let selection_instance = is_selection.then(|| current.runner_instance_id.clone());
+        let expected_runner_instance_id = expected_runner_instance_id
+            .or(key_instance.as_deref())
+            .or(selection_instance.as_deref())
+            .or(control_instance.as_deref());
+        if let Some(expected) = expected_runner_instance_id {
+            if expected.is_empty() || current.runner_instance_id != expected {
+                return Err(
+                    "runner_replaced: Computer target Runner changed before admission".into(),
+                );
+            }
+            if control_instance.is_none()
+                && kind != "computer_key_input"
+                && !is_selection
+                && !current.supports(RunnerFeature::ComputerAccessibilityObserve)
+            {
+                return Err("capability_unavailable: post-observation requires computer_accessibility_observe".into());
+            }
+        }
         if let Some(required_feature) = required_features
             .iter()
             .copied()
@@ -2539,7 +2671,7 @@ impl RunnerRegistry {
                 required_feature.as_wire_name()
             ));
         }
-        enqueue_pending_request_locked(
+        enqueue_pending_request_with_fence_locked(
             self.telemetry.as_ref(),
             &mut inner,
             &client_id,
@@ -2547,6 +2679,12 @@ impl RunnerRegistry {
             request,
             Some(tx),
             None,
+            expected_runner_instance_id.map_or(PendingDispatchFence::Unfenced, |id| {
+                PendingDispatchFence::Computer {
+                    runner_instance_id: id.to_string(),
+                    access: auth.cloned(),
+                }
+            }),
         )
         .map_err(|error| error.to_string())?;
         notify_runner_locked(&inner, &client_id);
@@ -2710,10 +2848,15 @@ impl RunnerRegistry {
         payload.validate()?;
         let requires_node =
             payload.adapter == webcodex_core::project_build::ProjectBuildAdapter::Node;
+        let requires_rust_options = payload.has_rust_options();
         let requires_all_packages = payload
             .scope
             .as_ref()
             .is_some_and(webcodex_core::project_build::ProjectBuildScope::selects_all_packages);
+        let requires_workspace_exclusions = payload
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !scope.exclude_packages.is_empty());
         let requires_dependency_policy = payload.dependency_policy.is_some();
         let requires_resolution_offline = payload.dependency_resolution_policy.is_some();
         let requires_python =
@@ -2735,9 +2878,11 @@ impl RunnerRegistry {
             &runner.runner_features,
             [
                 Some(RunnerFeature::ProjectBuild),
+                requires_rust_options.then_some(RunnerFeature::ProjectBuildRustOptions),
                 requires_node.then_some(RunnerFeature::ProjectBuildNode),
                 requires_python.then_some(RunnerFeature::ProjectBuildPython),
                 requires_all_packages.then_some(RunnerFeature::ProjectAllPackages),
+                requires_workspace_exclusions.then_some(RunnerFeature::ProjectWorkspaceExclusions),
                 requires_dependency_policy.then_some(RunnerFeature::ProjectDependencyPolicy),
                 requires_resolution_offline
                     .then_some(RunnerFeature::ProjectDependencyResolutionOffline),
@@ -2852,8 +2997,16 @@ impl RunnerRegistry {
         let requires_all_packages = payload.scope.as_ref().is_some_and(
             webcodex_core::project_validation::ProjectValidationScope::selects_all_packages,
         );
+        let requires_workspace_exclusions = payload
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !scope.exclude_packages.is_empty());
         let requires_dependency_policy = payload.dependency_policy.is_some();
         let requires_resolution_offline = payload.dependency_resolution_policy.is_some();
+        // Offline lint is Rust-only even with auto selection, so fence before planning.
+        let clippy_offline_capability = (requires_resolution_offline
+            && payload.action == webcodex_core::project_validation::ProjectValidationAction::Lint)
+            .then_some(RunnerFeature::ProjectValidationRustClippyOffline);
         let requires_test_options = payload.test.is_some();
         let request_id = next_request_id();
         let (tx, rx) = oneshot::channel();
@@ -2873,9 +3026,11 @@ impl RunnerRegistry {
             [
                 Some(RunnerFeature::ProjectValidation),
                 clippy_capability,
+                clippy_offline_capability,
                 python_capability,
                 node_capability,
                 requires_all_packages.then_some(RunnerFeature::ProjectAllPackages),
+                requires_workspace_exclusions.then_some(RunnerFeature::ProjectWorkspaceExclusions),
                 requires_dependency_policy.then_some(RunnerFeature::ProjectDependencyPolicy),
                 requires_resolution_offline
                     .then_some(RunnerFeature::ProjectDependencyResolutionOffline),

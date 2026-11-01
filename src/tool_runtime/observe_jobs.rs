@@ -740,6 +740,16 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
     if observation.get("job_id")?.as_str()? != job_id {
         return None;
     }
+    // Uncertain execution keeps its entire canonical recovery evidence.
+    // Other eligible items in the same batch can still be projected.
+    if observation
+        .get("command_execution_state")
+        .and_then(Value::as_str)
+        == Some("outcome_unknown")
+        || observation.get("status").and_then(Value::as_str) == Some("outcome_unknown")
+    {
+        return None;
+    }
     let status = observation.get("status")?.as_str()?.to_string();
     let terminal = observation.get("terminal")?.as_bool()?;
     let changed = observation.get("changed")?.as_bool()?;
@@ -780,15 +790,13 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
     sparse.insert("heartbeat_changed".to_string(), json!(heartbeat_changed));
     sparse.insert("log_delta_status".to_string(), json!(log_delta_status));
     sparse.insert("observation_token".to_string(), json!(observation_token));
-    copy_non_null(observation, &mut sparse, "project");
-    if let Some(observation_ref) = item.get("observation_ref").and_then(Value::as_str) {
-        sparse.insert("observation_ref".to_string(), json!(observation_ref));
-    }
+    // Refs are process-local and capacity-evicted. Keep the raw token as the
+    // sole model continuation so restart/eviction cannot discard log position.
 
     for key in [
+        "error",
         "exit_code",
         "command_execution_state",
-        "activity",
         "detected_summary",
         "validation",
         "build_artifacts",
@@ -797,6 +805,51 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
         "suggested_call",
     ] {
         copy_non_null(observation, &mut sparse, key);
+    }
+
+    // Keep validation/test evidence and useful phase changes. Generic process
+    // activity merely repeats `running`; its derived summary adds no evidence.
+    if let Some(summary) = sparse
+        .get_mut("detected_summary")
+        .and_then(Value::as_object_mut)
+    {
+        if summary
+            .get("progress")
+            .and_then(|p| p.get("state"))
+            .and_then(Value::as_str)
+            == Some("working")
+            && summary
+                .get("progress")
+                .and_then(|p| p.get("reason_code"))
+                .and_then(Value::as_str)
+                == Some("process_running")
+        {
+            summary.remove("progress");
+        }
+        let redundant_outcome = match summary.get("outcome").and_then(Value::as_str) {
+            Some("in_progress") => !terminal,
+            Some("passed") => {
+                status == "completed" && observation.get("exit_code") == Some(&json!(0))
+            }
+            Some("failed") => {
+                terminal
+                    && observation
+                        .get("exit_code")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|code| code != 0)
+            }
+            Some("cancelled") => matches!(status.as_str(), "stopped" | "cancelled"),
+            _ => false,
+        };
+        if redundant_outcome
+            && summary.len() == 2
+            && matches!(
+                summary.get("kind").and_then(Value::as_str),
+                Some("operation" | "diagnostic")
+            )
+        {
+            sparse.remove("detected_summary");
+        }
     }
 
     if observation.contains_key("state_changed") || observation.contains_key("failure_kind") {
@@ -875,7 +928,7 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
         }
     }
 
-    if matches!(log_delta_status, "baseline" | "reset") {
+    if log_delta_status == "reset" {
         for key in ["purpose", "command_summary"] {
             copy_non_null(observation, &mut sparse, key);
         }
@@ -883,27 +936,23 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
     Some(Value::Object(sparse))
 }
 
-/// Final model-facing projection for ordinary successful Job observations.
-/// The canonical batch and canonical single-Job snapshots remain unchanged for
-/// budgeting, Session/audit recording, operator diagnostics, and internal use.
+/// Final model-facing projection, applied independently to eligible Job items.
+/// Canonical batches/snapshots are already recorded for budgeting, Session/audit
+/// evidence and diagnostics. Presentation never changes batch success or errors.
 pub(crate) fn sparsify_observe_jobs_model_result(result: &mut ToolResult) {
-    if !result.success {
-        return;
-    }
     let Some(output) = result.output.as_object_mut() else {
         return;
     };
-    if output.get("output_truncated").and_then(Value::as_bool) == Some(true) {
-        if output.get("suggested_call").is_some() {
-            output.remove("next_index");
-            output.remove("continuation_semantics");
-        }
+    let Some(truncated) = output.get("output_truncated").and_then(Value::as_bool) else {
         return;
-    }
-    if output.get("output_truncated").and_then(Value::as_bool) != Some(false)
-        || output
-            .get("next_index")
-            .is_some_and(|value| !value.is_null())
+    };
+    if truncated {
+        if output.get("suggested_call").is_none() {
+            return;
+        }
+    } else if output
+        .get("next_index")
+        .is_some_and(|value| !value.is_null())
     {
         return;
     }
@@ -914,10 +963,24 @@ pub(crate) fn sparsify_observe_jobs_model_result(result: &mut ToolResult) {
         return;
     }
     let count = items.len() as u64;
-    if output.get("requested_count").and_then(Value::as_u64) != Some(count)
+    let Some(requested) = output.get("requested_count").and_then(Value::as_u64) else {
+        return;
+    };
+    let succeeded = items
+        .iter()
+        .filter(|item| item.get("success").and_then(Value::as_bool) == Some(true))
+        .count() as u64;
+    let failed = items
+        .iter()
+        .filter(|item| item.get("success").and_then(Value::as_bool) == Some(false))
+        .count() as u64;
+    if requested < count
+        || requested > MAX_OBSERVE_JOBS_ITEMS as u64
+        || (!truncated && requested != count)
+        || succeeded + failed != count
         || output.get("returned_count").and_then(Value::as_u64) != Some(count)
-        || output.get("succeeded_count").and_then(Value::as_u64) != Some(count)
-        || output.get("failed_count").and_then(Value::as_u64) != Some(0)
+        || output.get("succeeded_count").and_then(Value::as_u64) != Some(succeeded)
+        || output.get("failed_count").and_then(Value::as_u64) != Some(failed)
     {
         return;
     }
@@ -929,48 +992,80 @@ pub(crate) fn sparsify_observe_jobs_model_result(result: &mut ToolResult) {
     };
     if !matches!(
         wait_outcome,
-        "immediate" | "updated" | "terminal" | "timeout"
+        "immediate" | "updated" | "terminal" | "item_error" | "timeout"
     ) {
-        // item_error is intentionally kept in the canonical batch shape.
         return;
     }
     let Some(waited_ms) = wait.get("waited_ms").and_then(Value::as_u64) else {
         return;
     };
-
-    let mut sparse_items = Vec::with_capacity(items.len());
-    let mut changed_count = 0u64;
-    let mut terminal_count = 0u64;
-    for item in items {
-        let Some(sparse) = sparse_success_item(item) else {
-            return;
-        };
-        changed_count += u64::from(sparse.get("changed").and_then(Value::as_bool) == Some(true));
-        terminal_count += u64::from(sparse.get("terminal").and_then(Value::as_bool) == Some(true));
-        sparse_items.push(sparse);
-    }
-    if output.get("changed_count").and_then(Value::as_u64) != Some(changed_count)
-        || output.get("terminal_count").and_then(Value::as_u64) != Some(terminal_count)
+    let successful = items
+        .iter()
+        .filter(|item| item.get("success").and_then(Value::as_bool) == Some(true));
+    let changed = successful
+        .clone()
+        .filter(|item| item["output"]["changed"].as_bool() == Some(true))
+        .count() as u64;
+    let terminal = successful
+        .filter(|item| item["output"]["terminal"].as_bool() == Some(true))
+        .count() as u64;
+    if output.get("changed_count").and_then(Value::as_u64) != Some(changed)
+        || output.get("terminal_count").and_then(Value::as_u64) != Some(terminal)
     {
         return;
     }
 
+    let projections: Vec<_> = items.iter().map(sparse_success_item).collect();
+    let ordinary_success = result.success
+        && !truncated
+        && failed == 0
+        && wait_outcome != "item_error"
+        && projections.iter().all(Option::is_some);
+    let sparse_items = items
+        .iter()
+        .zip(projections)
+        .map(|(item, projection)| {
+            let Some(mut sparse) = projection else {
+                return item.clone();
+            };
+            if !ordinary_success {
+                // Mixed/truncated envelopes retain input indexes and batch facts.
+                let Some(index) = item
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .filter(|index| *index < MAX_OBSERVE_JOBS_ITEMS as u64)
+                else {
+                    return item.clone();
+                };
+                sparse["index"] = json!(index);
+            }
+            sparse
+        })
+        .collect();
     output.insert("items".to_string(), Value::Array(sparse_items));
-    for key in [
-        "requested_count",
-        "returned_count",
-        "succeeded_count",
-        "failed_count",
-        "changed_count",
-        "terminal_count",
-        "output_truncated",
-        "next_index",
-    ] {
-        output.remove(key);
+    if truncated {
+        // The validated canonical continuation contains the exact omitted suffix.
+        output.remove("next_index");
+        output.remove("continuation_semantics");
     }
-    if waited_ms == 0 {
-        if let Some(wait) = output.get_mut("wait").and_then(Value::as_object_mut) {
-            wait.remove("waited_ms");
+
+    if ordinary_success {
+        for key in [
+            "requested_count",
+            "returned_count",
+            "succeeded_count",
+            "failed_count",
+            "changed_count",
+            "terminal_count",
+            "output_truncated",
+            "next_index",
+        ] {
+            output.remove(key);
+        }
+        if waited_ms == 0 {
+            if let Some(wait) = output.get_mut("wait").and_then(Value::as_object_mut) {
+                wait.remove("waited_ms");
+            }
         }
     }
 }
