@@ -176,6 +176,19 @@ jobs:
                 webcodex webcodex-server webcodex-runner webcodex-tunnel
             '
 
+      - name: Normalize cache ownership
+        # 容器以 root 写入 CARGO_HOME / RUSTUP_HOME / target，且部分 crates.io 包解包后
+        # 保留 0600，runner 用户读不到，actions/cache 保存时 tar 会 EACCES 失败。
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in "$CARGO_CACHE_DIR" "$RUSTUP_CACHE_DIR" target; do
+            [ -e "$dir" ] || continue
+            sudo chown -R "$(id -u):$(id -g)" "$dir"
+            chmod -R u+rwX "$dir"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
