@@ -1408,6 +1408,34 @@ pub enum ComputerControlToolCall {
         #[schemars(length(min = 1, max = 128))]
         element_id: String,
     },
+    /// Scroll one exact observed Windows UIA ScrollPattern container. Requires
+    /// computer_scroll and computer_control. One small/large native increment;
+    /// omitted/null amount selects small. Provider-defined distance is not pixels.
+    /// Inspect element_state scroll axes/percentages: null axis is non-scrollable,
+    /// null object unsupported/protected, omitted field unknown. At a native boundary
+    /// this succeeds without input. position_before/position_after may be unchanged
+    /// or intermediate; they do not prove UI stability or task completion.
+    /// Re-observe content after scrolling. Native attempt/read-back uncertainty is
+    /// outcome_unknown; never replay without reconciliation. Local pause applies.
+    /// No implicit focus/activation. Optional observe_after requests one fresh
+    /// bounded tree of the same window under independent read authority.
+    Scroll {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        surface_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        element_id: String,
+        direction: webcodex_core::computer_scroll_contract::ComputerScrollDirection,
+        /// Omission/null selects one small increment. Native distance is provider-defined.
+        #[schemars(schema_with = "webcodex_core::computer_scroll_contract::computer_scroll_amount_schema")]
+        #[serde(default)]
+        amount: Option<webcodex_core::computer_scroll_contract::ComputerScrollAmount>,
+        /// One fresh bounded tree of the same window after confirmed success,
+        /// including an observed boundary no-op. Requires independent read authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe_after: Option<ComputerPostObservation>,
+    },
     ScrollToElement {
         #[schemars(length(min = 1, max = 128))]
         client_id: String,
@@ -1481,7 +1509,9 @@ pub enum ComputerControlToolCall {
 impl ComputerControlToolCall {
     pub fn observe_after(&self) -> Option<&ComputerPostObservation> {
         match self {
-            Self::Press { observe_after, .. } | Self::InputText { observe_after, .. } => observe_after.as_ref(),
+            Self::Press { observe_after, .. }
+            | Self::InputText { observe_after, .. }
+            | Self::Scroll { observe_after, .. } => observe_after.as_ref(),
             _ => None,
         }
     }
@@ -1494,6 +1524,7 @@ impl ComputerControlToolCall {
             Self::Select { .. } => "select",
             Self::Focus { .. } => "focus",
             Self::ScrollToElement { .. } => "scroll_to_element",
+            Self::Scroll { .. } => "scroll",
             Self::Key { .. } => "key",
             Self::InputText { .. } => "input_text",
             Self::PointerMove { .. } => "pointer_move",

@@ -43,6 +43,10 @@ pub(super) fn computer_control_policy(
         | InputText {
             observe_after: Some(_),
             ..
+        }
+        | Scroll {
+            observe_after: Some(_),
+            ..
         } => SpecializedOperationPolicy::consequential_all(
             SpecializedSource::Computer,
             call.action_name(),
@@ -77,6 +81,7 @@ pub(super) fn computer_control_policy(
         | Select { .. }
         | Focus { .. }
         | ScrollToElement { .. }
+        | Scroll { .. }
         | Key { .. }
         | InputText { .. } => SpecializedOperationPolicy::consequential(
             SpecializedSource::Computer,
