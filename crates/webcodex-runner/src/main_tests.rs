@@ -1,3 +1,4 @@
+use crate::webcodex_runner::shell::ShellExecutionContext;
 #[test]
 fn check_config_is_a_separate_non_runtime_action() {
     assert_eq!(
@@ -78,7 +79,7 @@ use crate::webcodex_runner::transport::registration::*;
 use crate::webcodex_runner::config::validate_shell_config;
 use crate::webcodex_runner::job_manager::job_manager_tests::{shell_job_request, ws_sink};
 use crate::webcodex_runner::projects::{project_root_fingerprint, RunnerProjectFile};
-use crate::webcodex_runner::run_shell_with_profiles;
+
 use crate::webcodex_runner::{
     handle_prepare_managed_worktree, handle_project_lifecycle_op, handle_project_op,
     handle_resolve_or_register_project,
@@ -415,18 +416,18 @@ fn run_profile_shell(
     command: &str,
 ) -> CommandResult {
     let cwd = cwd.to_string_lossy().to_string();
-    run_shell_with_profiles(
-        1,
+    (ShellExecutionContext {
+        generation: 1,
         policy,
         shell,
         project_registry_dir,
         cache,
-        Some(&cwd),
-        command,
-        None,
-        10,
-        None,
-    )
+        cwd: Some(&cwd),
+        timeout_secs: 10,
+        stop_requested: None,
+    })
+    .run_shell(command, None, false, None)
+    .result
 }
 
 fn line_edit_json(result: CommandResult) -> serde_json::Value {
@@ -1250,6 +1251,7 @@ fn register_managed_source_project_as(registry: &Path, source: &Path, id: &str) 
         name: Some("Source".to_string()),
         kind: Some("repo".to_string()),
         registration_source: None,
+        registration_incarnation: None,
         description: None,
         disabled: false,
         hooks: HashMap::new(),
@@ -2007,6 +2009,89 @@ fn concurrent_managed_worktree_bootstraps_choose_distinct_runner_paths() {
 }
 
 #[test]
+fn managed_worktree_uses_configured_central_root_without_changing_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let other_root = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    let central = tmp.path().join("central");
+    let registry = tmp.path().join("project-registry");
+    seed_managed_worktree_repo(&source);
+    std::fs::create_dir(&central).unwrap();
+    let central = central.canonicalize().unwrap();
+    register_managed_source_project(&registry, &source);
+    let mut policy = project_policy(tmp.path());
+    policy.allowed_roots = vec![
+        other_root.path().canonicalize().unwrap(),
+        tmp.path().canonicalize().unwrap(),
+    ];
+    policy.managed_worktree_root = Some(central.clone());
+    let request = managed_worktree_request(
+        &source,
+        serde_json::Value::Null,
+        "77777777-7777-4777-8777-777777777777",
+        None,
+    );
+
+    let result = project_ok(handle_prepare_managed_worktree(
+        &policy, &registry, &request,
+    ));
+    let path = PathBuf::from(result["path"].as_str().unwrap());
+    assert_eq!(path.parent(), Some(central.as_path()));
+    assert_eq!(result["outcome"], "managed_worktree_created");
+    assert_eq!(result["managed"], true);
+}
+
+#[test]
+fn managed_worktree_resume_revalidates_current_root_without_retargeting_old_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    let central = tmp.path().join("central");
+    let replacement = tmp.path().join("replacement");
+    let registry = tmp.path().join("project-registry");
+    seed_managed_worktree_repo(&source);
+    std::fs::create_dir(&central).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    register_managed_source_project(&registry, &source);
+
+    let mut initial_policy = project_policy(tmp.path());
+    initial_policy.managed_worktree_root = Some(central.canonicalize().unwrap());
+    let request = managed_worktree_request(
+        &source,
+        serde_json::Value::Null,
+        "88888888-8888-4888-8888-888888888888",
+        None,
+    );
+    let created = project_ok(handle_prepare_managed_worktree(
+        &initial_policy,
+        &registry,
+        &request,
+    ));
+    let old_path = created["path"].clone();
+
+    let mut reloaded_policy = project_policy(tmp.path());
+    reloaded_policy.managed_worktree_root = Some(replacement.canonicalize().unwrap());
+    let resume = managed_worktree_request(
+        &source,
+        serde_json::Value::Null,
+        "99999999-9999-4999-8999-999999999999",
+        created["agent_project_id"].as_str(),
+    );
+    let resumed = project_ok(handle_prepare_managed_worktree(
+        &reloaded_policy,
+        &registry,
+        &resume,
+    ));
+    assert_eq!(resumed["outcome"], "managed_worktree_recovered");
+    assert_eq!(resumed["path"], old_path);
+    assert_eq!(
+        Path::new(resumed["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        central.canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn managed_worktree_git_source_without_registered_project_does_not_infer_lineage() {
     let tmp = tempfile::tempdir().unwrap();
     let source = tmp.path().join("source");
@@ -2076,6 +2161,202 @@ fn runner_project_cache_invalidate_refreshes_after_project_op() {
     let projects = cache.get(&cfg);
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].id, "cached");
+}
+
+#[test]
+fn runner_registration_incarnation_survives_reload_and_rotates_after_unregister() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let registry = tmp.path().join("project-registry");
+    std::fs::create_dir(&root).unwrap();
+    let policy = project_policy(tmp.path());
+    let register = || {
+        project_request(
+            "register_project",
+            serde_json::json!({
+                "id": "reusable",
+                "name": "Reusable",
+                "path": root.to_string_lossy()
+            }),
+        )
+    };
+
+    let first = project_ok(handle_project_op(&policy, &registry, &register()));
+    let original_id = first["registration_incarnation"]
+        .as_str()
+        .expect("new registration must persist an incarnation")
+        .to_string();
+    uuid::Uuid::parse_str(&original_id).unwrap();
+
+    let persisted = std::fs::read_to_string(registry.join("reusable.toml")).unwrap();
+    let parsed = parse_runner_project_toml(&persisted).unwrap();
+    assert_eq!(
+        parsed.registration_incarnation.as_deref(),
+        Some(original_id.as_str())
+    );
+    assert_eq!(
+        runner_project_summary(&parsed, 1, false)
+            .registration_incarnation
+            .as_deref(),
+        Some(original_id.as_str())
+    );
+
+    let recovered = project_ok(handle_project_op(&policy, &registry, &register()));
+    assert_eq!(recovered["registration_incarnation"], original_id);
+    let removed = project_ok(handle_project_lifecycle_op(
+        &policy,
+        &registry,
+        &project_request(
+            "project_lifecycle_unregister",
+            serde_json::json!({
+                "project_id": "reusable",
+                "expected_revision": first["revision"],
+            }),
+        ),
+    ));
+    assert_eq!(removed["changed"], true);
+    assert!(!registry.join("reusable.toml").exists());
+
+    let replacement = project_ok(handle_project_op(&policy, &registry, &register()));
+    let replacement_id = replacement["registration_incarnation"]
+        .as_str()
+        .expect("new registration must have an incarnation");
+    assert_ne!(replacement_id, original_id);
+    uuid::Uuid::parse_str(replacement_id).unwrap();
+}
+
+#[test]
+fn project_lifecycle_receipts_keep_the_persisted_registration_incarnation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let registry = tmp.path().join("project-registry");
+    std::fs::create_dir(&root).unwrap();
+    let policy = project_policy(tmp.path());
+
+    let registered = project_ok(handle_project_op(
+        &policy,
+        &registry,
+        &project_request(
+            "register_project",
+            serde_json::json!({
+                "id": "stable",
+                "name": "Stable",
+                "path": root.to_string_lossy()
+            }),
+        ),
+    ));
+    let incarnation = registered["registration_incarnation"]
+        .as_str()
+        .expect("new Project registration must have an identity")
+        .to_string();
+    let mut revision = registered["revision"].as_str().unwrap().to_string();
+
+    for (operation, outcome, disabled) in [
+        ("project_lifecycle_enable", "already_enabled", false),
+        ("project_lifecycle_disable", "disabled", true),
+        ("project_lifecycle_disable", "already_disabled", true),
+        ("project_lifecycle_enable", "enabled", false),
+    ] {
+        let reply = project_ok(handle_project_lifecycle_op(
+            &policy,
+            &registry,
+            &project_request(
+                operation,
+                serde_json::json!({
+                    "project_id": "stable",
+                    "expected_revision": revision
+                }),
+            ),
+        ));
+        assert_eq!(reply["outcome"], outcome);
+        assert_eq!(reply["disabled"], disabled);
+        assert_eq!(
+            reply["registration_incarnation"], incarnation,
+            "{operation} must not drop the Project registration identity in its receipt"
+        );
+        revision = reply["revision"].as_str().unwrap().to_string();
+
+        let reloaded = load_runner_project_summaries_from_dir(&registry);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(
+            reloaded[0].registration_incarnation.as_deref(),
+            Some(incarnation.as_str())
+        );
+    }
+}
+
+#[test]
+fn legacy_project_toml_migration_is_durable_and_never_resumes_old_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path().join("repo");
+    let registry = tmp.path().join("project-registry");
+    std::fs::create_dir(&project_dir).unwrap();
+    std::fs::create_dir(&registry).unwrap();
+    let record = registry.join("legacy.toml");
+    let legacy_toml = format!(
+        "id = \"legacy\"\npath = {:?}\nname = \"Legacy\"\n[hooks]\ncheck = [\"echo safe\"]\n",
+        project_dir.to_string_lossy()
+    );
+    std::fs::write(&record, &legacy_toml).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let first = load_runner_project_summaries_from_dir(&registry);
+    assert_eq!(first.len(), 1);
+    let first_identity = first[0].registration_incarnation.as_deref().unwrap();
+    uuid::Uuid::parse_str(first_identity).unwrap();
+
+    let upgraded_toml = std::fs::read_to_string(&record).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&record).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "migration must retain the private TOML file mode",
+        );
+    }
+    assert!(
+        upgraded_toml.starts_with("registration_incarnation = "),
+        "migration must prepend the key before a trailing TOML table"
+    );
+    assert!(upgraded_toml.contains("[hooks]\ncheck = [\"echo safe\"]"));
+    let upgraded = parse_runner_project_toml(&upgraded_toml).unwrap();
+    assert_eq!(
+        upgraded.registration_incarnation.as_deref(),
+        Some(first_identity)
+    );
+    assert_eq!(
+        load_runner_project_summaries_from_dir(&registry)[0]
+            .registration_incarnation
+            .as_deref(),
+        Some(first_identity)
+    );
+
+    let removed = project_ok(handle_project_lifecycle_op(
+        &project_policy(tmp.path()),
+        &registry,
+        &project_request(
+            "project_lifecycle_unregister",
+            serde_json::json!({
+                "project_id": "legacy",
+                "expected_revision": first[0].revision
+            }),
+        ),
+    ));
+    assert_eq!(removed["changed"], true);
+
+    // Even a byte-for-byte reintroduced legacy config is a NEW registration.
+    std::fs::write(&record, legacy_toml).unwrap();
+    let replacement = load_runner_project_summaries_from_dir(&registry);
+    assert_eq!(replacement.len(), 1);
+    assert_ne!(
+        replacement[0].registration_incarnation,
+        first[0].registration_incarnation
+    );
 }
 
 #[test]

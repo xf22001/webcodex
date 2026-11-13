@@ -70,7 +70,9 @@ mod window_inventory;
 mod window_labels;
 pub use window_labels::normalize_window_label;
 mod workbench_preferences;
-pub use window_inventory::{WindowInventoryPage, WindowInventoryQuery, WindowInventoryRow};
+pub use window_inventory::{
+    WindowInventoryPage, WindowInventoryQuery, WindowInventoryRow, WindowOAuthVisibility,
+};
 
 pub use self::admin_project_lifecycle::{AdminProjectAudit, AdminProjectIdempotencyRecord};
 pub use self::agent_continuation_reference::AgentContinuationReferenceRecord;
@@ -163,6 +165,12 @@ pub use self::store_primitives::{
     CommunicationPrincipal, CommunicationStoreError, COMMUNICATION_PRINCIPAL_DIGEST_PREFIX,
 };
 pub use self::window_activity::{MAX_WINDOW_ACTIVITY_LIMIT, MAX_WINDOW_LINK_LIMIT};
+
+/// Minimum seconds between two `last_used_at` writes for one credential.
+/// `last_used_at` is display/audit metadata only (token-management listing);
+/// every authorization decision re-validates expiry/revocation directly, so a
+/// coarse floor removes one write per request without weakening anything.
+pub const LAST_USED_UPDATE_FLOOR_SECS: i64 = 60;
 
 pub struct Database {
     conn: Mutex<Connection>,

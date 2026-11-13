@@ -1299,6 +1299,7 @@ async fn closeout_boundary_gap_keeps_historical_validation_visible_without_curre
     runtime
         .sessions
         .ensure_coding_session(crate::tool_runtime::sessions::CodingSessionRequest {
+            project_identity: None,
             project: project.clone(),
             authority_fingerprint:
                 crate::tool_runtime::sessions::TEST_ONLY_PROJECT_SESSION_AUTHORITY_FINGERPRINT
@@ -3162,34 +3163,6 @@ async fn session_handoff_diagnostic_verdict_fails_for_unresolved_mixed_validatio
         "warning_reasons",
         "validation_historical_failures_resolved",
     );
-}
-
-#[test]
-fn compact_review_evidence_tools_are_bounded_and_source_only() {
-    let source_tools: Vec<Value> = (0..25)
-        .map(|idx| Value::String(format!("review_tool_{idx}")))
-        .collect();
-    let review_evidence = json!({
-        "available": true,
-        "total": 25,
-        "read_only_inspection_count": 25,
-        "search_count": 0,
-        "diff_review_count": 0,
-        "workspace_review_count": 0,
-        "hygiene_review_count": 0,
-        "tools": source_tools,
-        "command": "ignored command text"
-    });
-
-    let compact = crate::tool_runtime::handoff::compact_review_evidence(&review_evidence);
-
-    let tools = compact["tools"]
-        .as_array()
-        .expect("compact review evidence tools array");
-    assert_eq!(tools.len(), 20);
-    assert_eq!(tools[0], "review_tool_0");
-    assert_eq!(tools[19], "review_tool_19");
-    assert!(compact.get("command").is_none());
 }
 
 // =========================================================================

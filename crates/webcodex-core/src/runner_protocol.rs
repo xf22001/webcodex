@@ -407,6 +407,12 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub apply_patch: bool = false;
     }
+    /// Revision-fenced whole-file replacement in a transactional file batch.
+    ApplyFileWrite => RUNNER_CAPABILITY_APPLY_FILE_WRITE("apply_file_write"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub apply_file_write: bool = false;
+    }
     /// The Runner returns the complete trusted apply_patch patch-plan/match metadata
     /// required by the 0.4 success contract. Missing on older Runners is false; a
     /// current Server must reject apply_patch before dispatch rather than accepting a
@@ -837,6 +843,13 @@ runner_capabilities! {
         #[serde(default)]
         pub project_lifecycle: bool = false;
     }
+    /// Additive, revision-guarded Project allow_patch updates. An older Runner
+    /// can advertise project_lifecycle without understanding this wire kind.
+    ProjectSettingsUpdate => RUNNER_CAPABILITY_PROJECT_SETTINGS_UPDATE("project_settings_update"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub project_settings_update: bool = false;
+    }
     /// Resolve an absolute canonical project path to an existing registration or
     /// atomically persist a new project registration record. Missing on older runners and
     /// therefore fails closed.
@@ -1265,6 +1278,8 @@ pub enum RunnerConfigErrorField {
     SkillsRoots,
     #[serde(rename = "instructions.files")]
     InstructionsFiles,
+    #[serde(rename = "policy.managed_worktree_root")]
+    ManagedWorktreeRoot,
     #[serde(rename = "shell.max_persistent_shells")]
     ShellMaxPersistentShells,
     #[serde(rename = "shell.persistent_shell_idle_timeout_secs")]
@@ -1451,6 +1466,10 @@ pub struct RunnerProjectSummary {
     /// Stable SHA-256 revision of the persisted project registration record TOML content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// Opaque stable ID for this exact persisted Project registration. A new
+    /// registration must never reuse the ID, even for the same root and name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_incarnation: Option<String>,
     /// Domain-separated identity of the currently observed canonical Project
     /// root. Missing means the Runner could not prove a current root identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2942,6 +2961,7 @@ mod envelope_tests {
                 apply_text_edit_local_guard_without_sha: false,
                 apply_text_edit_line_scope: false,
                 apply_text_edit_range: false,
+                apply_file_write: false,
                 apply_text_edit_expected_match_count: false,
                 apply_patch: false,
                 apply_patch_match_metadata: false,
@@ -2994,6 +3014,7 @@ mod envelope_tests {
                 lsp_read_only_navigation: false,
                 lsp_call_hierarchy: false,
                 project_lifecycle: false,
+                project_settings_update: false,
                 project_path_registration: false,
                 managed_worktree: false,
                 skill_runtime: false,

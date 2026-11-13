@@ -2017,7 +2017,12 @@ fn key_tool_output_schemas_include_expected_fields() {
         assert!(continuation["properties"]["arguments"]["required"]
             .as_array()
             .unwrap()
-            .contains(&serde_json::json!("wake_on")));
+            .contains(&serde_json::json!("items")));
+        assert_eq!(
+            continuation["properties"]["arguments"]["properties"]["items"]["items"]["properties"]
+                ["page"]["type"],
+            "boolean"
+        );
         assert!(!has_output_field(name, "pending_strategy"));
         assert!(
             has_output_field(name, "failure_kind"),
@@ -3720,7 +3725,11 @@ fn project_validate_schema_admits_canonical_planning_and_replan_failures() {
         });
     }
 
-    for failure_kind in ["validation_plan_stale", "validation_unavailable"] {
+    for failure_kind in [
+        "validation_plan_stale",
+        "validation_tool_unavailable",
+        "validation_unavailable",
+    ] {
         let result = json!({
             "success": false,
             "output": {

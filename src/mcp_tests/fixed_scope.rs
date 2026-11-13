@@ -70,6 +70,7 @@ async fn scope_fixture_runner(
         client_id,
         &format!("inst-{client_id}"),
         vec![RunnerProjectSummary {
+            registration_incarnation: None,
             id: "repo".to_string(),
             name: None,
             path: format!("/scope-fixture/{client_id}"),
@@ -304,7 +305,7 @@ async fn fixed_credential_scope_canonical_http_matrix_preserves_failure_and_oaut
                         let params = fixed_scope_params(
                             route,
                             "run_shell",
-                            json!({"project":project,"command":"printf scope-fixture","purpose":"diagnostic"}),
+                            json!({"project":project,"command":"printf scope-fixture"}),
                         );
                         let (status, body, challenge) = fixed_scope_request(
                             &fixture.service,

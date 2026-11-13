@@ -158,7 +158,10 @@ impl RuntimeSurface {
             && !app_only_job_terminal_continuation
             && !protocol_extension_admitted
             && !via_adaptive_runtime_gateway
-            && !context.exposure.is_direct(context.surface, &params.name);
+            && (!context.exposure.is_direct(context.surface, &params.name)
+                || (context.surface == crate::mcp::request_policy::McpSurface::Cli
+                    && context.default_project.is_some()
+                    && params.name == "list_projects"));
         if direct_denied {
             if let Some(lc) = lifecycle.as_deref() {
                 lc.dispatch_failed("direct_route_denied");
@@ -166,9 +169,23 @@ impl RuntimeSurface {
             }
             // A recovery hint must name a real, currently admitted route. Retired
             // names and unavailable App tools cannot become valid through a gateway.
-            let message = if mcp_adaptive_runtime_gateway_target_route(&params.name, stateless_2026)
-                != crate::model_surface::AdaptiveRuntimeGatewayTargetRoute::Gateway
-            {
+            let gateway_available =
+                if context.surface == crate::mcp::request_policy::McpSurface::Cli {
+                    matches!(
+                        crate::mcp::cli::default_project_route(
+                            &params.name,
+                            context
+                                .exposure
+                                .route(context.surface, &params.name, stateless_2026),
+                            context.default_project.is_some(),
+                        ),
+                        crate::model_surface::SuggestedToolCallRoute::Gateway(_)
+                    )
+                } else {
+                    mcp_adaptive_runtime_gateway_target_route(&params.name, stateless_2026)
+                        == crate::model_surface::AdaptiveRuntimeGatewayTargetRoute::Gateway
+                };
+            let message = if !gateway_available {
                 if params.name == "import_conversation_files_to_project" {
                     format!(
                         "tool '{}' is unavailable on the current MCP surface; refresh tools/list (reconnect the MCP client after a Server upgrade if its tool catalog is stale) and select a current callable",
@@ -190,21 +207,23 @@ impl RuntimeSurface {
                 )
             } else {
                 format!(
-                    "tool '{}' is not directly callable on Adaptive Runtime; use call_runtime_tool with its current canonical arguments and normal authorization",
-                    params.name
+                    "tool '{}' is not directly callable on {}; use call_runtime_tool with its current canonical arguments and normal authorization",
+                    params.name,
+                    if context.surface == crate::mcp::request_policy::McpSurface::Cli { "CLI" } else { "Adaptive Runtime" }
                 )
             };
             return Err(McpOutcome::BadRequest(rpc_error(id, -32602, message)));
         }
 
+        let execution_only = context.surface == crate::mcp::request_policy::McpSurface::Cli;
         Ok(Self {
             capabilities: ToolProtocolCapabilities {
-                control_sidecars: stateless_2026,
-                context_sidecar: stateless_2026
-                    || context.surface == crate::mcp::request_policy::McpSurface::Cli,
-                skill_runtime: stateless_2026,
-                skill_management: stateless_2026,
-                memory_surface: stateless_2026,
+                execution_only,
+                control_sidecars: stateless_2026 && !execution_only,
+                context_sidecar: stateless_2026 && !execution_only,
+                skill_runtime: stateless_2026 && !execution_only,
+                skill_management: stateless_2026 && !execution_only,
+                memory_surface: stateless_2026 && !execution_only,
                 trace_diagnostics: stateless_2026,
                 goal_plan_app: goal_plan_app_admitted && context.exposure.goals,
                 work_result_app: work_result_app_admitted,

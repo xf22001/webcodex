@@ -99,12 +99,32 @@ Runner policy 中的 `allowed_roots` 控制项目可以在哪里注册或创建�
 [policy]
 allow_cwd_anywhere = false
 allowed_roots = ["/root/git"]
+# 新创建的 managed worktree 可选的集中目录。
+managed_worktree_root = "/srv/webcodex-worktrees"
 ```
+
+Managed-worktree bootstrap 使用相同的边界。Runner 可以派生私有 managed
+namespace，使模型无需提供目标路径；但该 namespace 与最终 Project 仍必须符合有效的
+`allowed_roots` policy（除非 `allow_cwd_anywhere=true`）。如果多个 allowed root 需要
+集中放置新 worktree，可将 `managed_worktree_root` 设置为有效 allowed root 内的绝对、
+已存在且不含符号链接/重定向的目录，并且不能位于 source checkout 内。配置检查或 reload
+遇到无效值会直接拒绝，绝不会静默回退到派生 namespace。该值支持 hot reload，只影响今后
+的创建，并会在创建和 resume 时重新验证；已有 managed worktree 不会移动或静默改向。
+Project selector 或 Project ref 不会扩大此文件系统 authority。
 
 ### 运行时注册项目
 
 runtime 工具 `register_project` 与 `create_project` 让客户端在在线 Runner 上
 注册已有目录或创建新目录，受 Runner 的 `allowed_roots` policy 约束。
+
+管理员接口 `POST /api/admin/projects/register` 与
+`POST /api/admin/projects/create` 使用与这些工具相同的跨平台路径校验。
+无论 Server 运行在哪个操作系统，都应传入所选 Runner 上的绝对路径，例如
+`/srv/projects/demo`、`D:\projects\demo` 或 `D:/projects/demo`。
+JSON 中的反斜杠需要转义：`"path": "D:\\projects\\demo"`；不必改用 Windows verbatim 路径。
+管理员 API 会拒绝空路径、相对路径、盘符相对路径（`D:demo`）、含 NUL 的路径和
+超过 4096 字节的路径。原生路径校验、规范化及 `allowed_roots` 检查仍由 Runner 执行。
+Windows 上的已有 UNC/verbatim-UNC 目录只能在已授权根目录内注册；仍不支持在网络共享上创建 Project。
 
 ## Skill 来源
 

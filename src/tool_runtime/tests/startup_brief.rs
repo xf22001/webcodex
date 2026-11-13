@@ -920,10 +920,43 @@ async fn restart_restored_coding_task_session_reloads_rules_without_persisting_b
     assert!(!persisted.contains(marker));
     assert!(!persisted.contains(source_marker));
     assert!(!persisted.contains("Repository rules"));
+    let original_registration = runtime1
+        .runner_registry
+        .get_runner_view("rules-restart")
+        .await
+        .unwrap()
+        .projects
+        .into_iter()
+        .find(|project| project.id == "demo")
+        .unwrap();
     drop(runtime1);
 
     let runtime2 = ToolRuntime::new_for_tests().with_session_ledger(&ledger);
-    register_runner_project_at_path(&runtime2, "rules-restart", "demo", root.path()).await;
+    runtime2
+        .runner_registry
+        .register(crate::test_support::runner_registration(
+            "rules-restart",
+            "inst",
+            RunnerCapabilities {
+                shell: true,
+                explicit_shell_selection: true,
+                bash_login_shell: true,
+                git: true,
+                file_read: true,
+                file_write: true,
+                internal_posix_script: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    crate::test_support::apply_project_inventory_snapshot(
+        &runtime2.runner_registry,
+        "rules-restart",
+        "inst",
+        vec![original_registration],
+    )
+    .await;
     let restored = start(
         &runtime2,
         "rules-restart",
@@ -1090,13 +1123,13 @@ async fn startup_uses_project_scoped_lifecycle_aware_job_summary() {
         "startup-jobs",
         &project_a,
         "startup-jobs-running",
-        StartupDetail::Full,
+        StartupDetail::Standard,
         "inspect running job",
         None,
     )
     .await;
     assert!(running.success, "{:?}", running.error);
-    let running_brief = &running.output["startup_brief"];
+    let running_brief = &running.output;
     assert_eq!(running_brief["continuation"]["jobs"]["active_count"], 1);
     assert_eq!(
         running_brief["continuation"]["jobs"]["blocking_active_count"],
@@ -1121,17 +1154,6 @@ async fn startup_uses_project_scoped_lifecycle_aware_job_summary() {
         .any(|blocker| blocker == "active_jobs_blocking"));
     assert_eq!(running_brief["startup_verdict"]["status"], "fail");
     assert_eq!(running_brief["startup_verdict"]["blocking"], true);
-    assert_eq!(running.output["startup_verdict"]["status"], "fail");
-    assert_eq!(running.output["startup_verdict"]["blocking"], true);
-    assert!(running.output["startup_verdict"]["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|check| {
-            check["name"] == "jobs"
-                && check["status"] == "fail"
-                && check["reason"] == "blocking_active_jobs"
-        }));
 
     let other_project = start(
         &runtime,
@@ -1278,7 +1300,7 @@ async fn startup_runner_health_uses_the_exact_project_client() {
             SessionMode::Normal,
             false,
             false,
-            StartupDetail::Full,
+            StartupDetail::Standard,
             None,
             None,
             Some(&auth),
@@ -1288,7 +1310,7 @@ async fn startup_runner_health_uses_the_exact_project_client() {
         )
         .await;
     assert!(unavailable.success, "{:?}", unavailable.error);
-    let unavailable_brief = &unavailable.output["startup_brief"];
+    let unavailable_brief = &unavailable.output;
     assert!(unavailable_brief["blockers"]
         .as_array()
         .unwrap()
@@ -1296,17 +1318,6 @@ async fn startup_runner_health_uses_the_exact_project_client() {
         .any(|blocker| blocker == "runner_unavailable"));
     assert_eq!(unavailable_brief["startup_verdict"]["status"], "fail");
     assert_eq!(unavailable_brief["startup_verdict"]["blocking"], true);
-    assert_eq!(unavailable.output["startup_verdict"]["status"], "fail");
-    assert_eq!(unavailable.output["startup_verdict"]["blocking"], true);
-    assert!(unavailable.output["startup_verdict"]["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|check| {
-            check["name"] == "agent"
-                && check["status"] == "fail"
-                && check["reason"] == "agent_offline"
-        }));
 
     register_agent_with_projects(
         &runtime,
@@ -1328,13 +1339,13 @@ async fn startup_runner_health_uses_the_exact_project_client() {
         "startup-target",
         &target_project,
         "startup-target-online",
-        StartupDetail::Full,
+        StartupDetail::Standard,
         "inspect available target runner",
         None,
     )
     .await;
     assert!(available.success, "{:?}", available.error);
-    let available_brief = &available.output["startup_brief"];
+    let available_brief = &available.output;
     assert!(!available_brief["blockers"]
         .as_array()
         .unwrap()
@@ -1342,17 +1353,10 @@ async fn startup_runner_health_uses_the_exact_project_client() {
         .any(|blocker| blocker == "runner_unavailable"));
     assert_ne!(available_brief["startup_verdict"]["status"], "fail");
     assert_eq!(available_brief["startup_verdict"]["blocking"], false);
-    assert_ne!(available.output["startup_verdict"]["status"], "fail");
-    assert_eq!(available.output["startup_verdict"]["blocking"], false);
-    assert!(available.output["startup_verdict"]["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|check| check["name"] == "agent" && check["status"] == "pass"));
 }
 
 #[tokio::test]
-async fn minimal_standard_and_full_coding_workflow_diagnostics_validate_against_strict_schema() {
+async fn coding_workflow_briefs_validate_against_strict_schema() {
     let root = tempfile::tempdir().unwrap();
     seed_rules(root.path());
     let runtime = ToolRuntime::new_for_tests();
@@ -1369,7 +1373,6 @@ async fn minimal_standard_and_full_coding_workflow_diagnostics_validate_against_
     for (detail, label) in [
         (StartupDetail::Minimal, "minimal"),
         (StartupDetail::Standard, "standard"),
-        (StartupDetail::Full, "full"),
     ] {
         let result = start(
             &runtime,
@@ -1383,11 +1386,7 @@ async fn minimal_standard_and_full_coding_workflow_diagnostics_validate_against_
         .await;
         assert!(result.success, "{label}: {:?}", result.error);
         let output_bytes = serde_json::to_vec(&result.output).unwrap().len();
-        let core = if label == "full" {
-            &result.output["startup_brief"]
-        } else {
-            &result.output
-        };
+        let core = &result.output;
         let core_bytes = startup_brief_size(core);
         assert_builtin_workflow(core);
         let action_wrapped_bytes = serde_json::to_vec(&ToolResult::ok(json!({

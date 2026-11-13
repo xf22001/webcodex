@@ -25,9 +25,9 @@
 //!
 //! ## Token Verifier Chain
 //!
-//! The [`TokenVerifier`] trait is the extension point for bearer token
-//! verification. The verifier chain currently runs [`PatVerifier`] followed by
-//! [`OAuth2Verifier`].
+//! The bearer verifier chain runs on the blocking pool: synchronous
+//! [`PatVerifier`] and then [`OAuth2Verifier`] checks preserve token-kind and
+//! credential authorization while avoiding SQLite work on async workers.
 
 use crate::{Config, Database};
 use std::sync::Arc;
@@ -101,12 +101,14 @@ pub(crate) use middleware::{
     enforce_token_surface, is_account_control_path, is_runner_transport_path,
 };
 
+pub(crate) use webcodex_core::authority::validate_username;
+
 pub(crate) use pat::{
     clean_token_name, generate_account_credential, generate_agent_token, generate_api_token,
     generate_oauth_access_token, generate_oauth_authorization_code, generate_oauth_client_id,
     generate_oauth_client_secret, generate_oauth_refresh_token, hash_token,
     is_unique_constraint_error, normalize_token_hash, token_prefix, validate_allowed_client_id,
-    validate_role, validate_token_prefix, validate_username,
+    validate_role, validate_token_prefix,
 };
 pub(crate) use shared_key::{
     allow_anonymous_enabled, direct_shared_key_enabled, direct_shared_key_enabled_with_quic,
@@ -285,7 +287,7 @@ fn restore_test_env(name: &str, value: &Option<std::ffi::OsString>) {
 /// but rejected (disabled user, expired token, account credential). The
 /// caller MUST treat `None` as "reject the connection".
 pub(crate) async fn authenticate_bearer(
-    config: &Config,
+    config: &Arc<Config>,
     db: Option<&Arc<Database>>,
     token: Option<&str>,
 ) -> Option<AuthContext> {
@@ -313,7 +315,7 @@ pub(crate) async fn authenticate_bearer(
     // OAuth2Verifier). Any error (disabled user, expired token) is treated
     // the same as "unknown" for the QUIC transport — the caller rejects
     // the connection either way.
-    match authenticate(config, db, token).await {
+    match authenticate(config.clone(), db, token).await {
         Ok(Some(ctx)) => {
             // Account credentials are not valid on the Runner transport surface.
             // Reject them here so they don't silently update last_used_at and then

@@ -135,7 +135,7 @@ async fn result_app_descriptor_and_resource_exposure_require_ui_operator_capabil
     assert_eq!(MCP_RESULT_UI_RESOURCE_URI, "ui://webcodex/changes/v4");
     assert_eq!(
         MCP_WORK_RESULT_UI_RESOURCE_URI,
-        "ui://webcodex/work-result/v38"
+        "ui://webcodex/work-result/v39"
     );
     assert!(super::super::app_registry::resource_meta(None)["ui"]
         .get("domain")
@@ -1771,6 +1771,7 @@ async fn register_job_runner(runtime: &ToolRuntime, auth: &crate::auth::AuthCont
         "result-app-runner",
         "inst-result-app",
         vec![RunnerProjectSummary {
+            registration_incarnation: None,
             id: "demo".to_string(),
             name: Some("Result App Demo".to_string()),
             path: "/tmp/result-app-demo".to_string(),
@@ -2438,6 +2439,7 @@ fn observe_jobs_item_limit_matches_presentation_bound() {
     let parsed = ToolCall::ObserveJobs {
         items: (0..8)
             .map(|index| ObserveJobsItem {
+                page: false,
                 job_id: format!("job-{index}"),
                 after_observation_token: None,
                 observation_ref: None,

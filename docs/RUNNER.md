@@ -65,13 +65,15 @@ When upgrading an older installation across the 0.4 boundary, upgrade the first-
 
 The exact protocol-generation field names, baseline capability list, registration grammar, and compatibility-test matrix are maintainer/wire-contract details and are intentionally omitted from this operations guide.
 
-Streaming Runners register before gathering project Git metadata. The initial
-project catalog is scanned in one process-owned background worker, then sent
-through the usual acknowledged inventory pages. Registration, keepalive and
-shutdown remain responsive while a large or slow catalog is being inspected;
-project inventory can still be pending just after the Runner connects. Reconnects
-reuse an in-flight scan, and process shutdown cancels its Git probes through the
-existing owned-tree cleanup path.
+Streaming Runners register before gathering project Git metadata. One
+process-owned background worker first publishes the validated project catalog
+through the usual acknowledged inventory pages, then replaces it once Git details
+are known. Until then a Project's `git_branch`, `git_head` and `git_dirty` are
+absent, which means unknown, not clean. Registration, keepalive and shutdown
+remain responsive while a large or slow catalog is being inspected. A Project
+mutation republishes the catalog immediately and restarts enrichment, so an older
+result is never published. Reconnects reuse an in-flight scan, and process
+shutdown cancels its Git probes through the existing owned-tree cleanup path.
 
 A ChatGPT Host message that the current conversation does not support developer
 MCPs is not a Runner heartbeat or reconnect result. If ChatGPT cannot dispatch
@@ -118,19 +120,39 @@ or created:
 [policy]
 allow_cwd_anywhere = false
 allowed_roots = ["/root/git"]
+# Optional central namespace for newly created managed worktrees.
+managed_worktree_root = "/srv/webcodex-worktrees"
 ```
 
 Managed-worktree bootstrap uses the same boundary. The Runner may derive a
 private managed namespace so the model never supplies a destination path, but
 that namespace and the resulting Project still have to fit the effective
-`allowed_roots` policy (unless `allow_cwd_anywhere=true`). A Project selector or
-Project ref does not widen this filesystem authority.
+`allowed_roots` policy (unless `allow_cwd_anywhere=true`). To centralize new
+worktrees across multiple allowed roots, set `managed_worktree_root` to an
+absolute, existing, non-symbolic-link directory inside the effective
+`allowed_roots` and outside each source checkout. Invalid values reject config
+check/reload and never fall back to the derived namespace. The value is
+hot-reloadable; it affects only future creation and revalidates on creation and
+resume. Existing managed worktrees are never moved or retargeted. A Project
+selector or Project ref does not widen this filesystem authority.
 
 ### Registering projects at runtime
 
 The runtime tools `register_project` and `create_project` let a client register
 an existing directory or create a new one on an online Runner, subject to the
 Runner's `allowed_roots` policy.
+
+The admin `POST /api/admin/projects/register` and
+`POST /api/admin/projects/create` routes use the same cross-platform path
+validation as these tools. Supply an absolute path on the selected Runner,
+regardless of the Server's OS: for example `/srv/projects/demo`,
+`D:\projects\demo` or `D:/projects/demo`. In JSON, escape backslashes:
+`"path": "D:\\projects\\demo"`. Windows verbatim paths are not required.
+Empty, relative, drive-relative (`D:demo`), NUL-containing and over-4096-byte
+paths are rejected by the admin API. The Runner still owns native path
+validation, canonicalization and `allowed_roots` enforcement. On Windows,
+existing UNC/verbatim-UNC directories can be registered only under already
+authorized roots; creating Projects on network shares remains unsupported.
 
 ## Skill sources
 

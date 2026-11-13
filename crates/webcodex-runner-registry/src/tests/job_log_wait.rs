@@ -55,26 +55,17 @@ fn wait_job_update(
 async fn register_sequenced(registry: &RunnerRegistry, instance: &str) {
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
-            computer_session_availability: None,
-            computer_control_epoch: None,
-            process_started_at: None,
-            build: None,
-            job_concurrency_limit: None,
             job_inventory: Some(crate::runner_protocol::ShellJobInventory {
                 active_complete: true,
                 jobs: Vec::new(),
             }),
-            coding_agent_providers: None,
-            coding_agent_inventory: None,
-            client_id: "oe".to_string(),
-            runner_instance_id: instance.to_string(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
-            display_name: None,
             owner: Some("alice".to_string()),
-            hostname: None,
-            host_context: None,
-            capabilities: sequenced_job_capabilities(),
-            policy: None,
+            ..runner_registration_request(
+                "oe".to_string(),
+                instance.to_string(),
+                crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                sequenced_job_capabilities(),
+            )
         }))
         .await
         .unwrap();
@@ -628,23 +619,13 @@ async fn job_log_wait_unsequenced_update_between_calls_and_noop_update() {
     };
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
-            computer_session_availability: None,
-            computer_control_epoch: None,
-            process_started_at: None,
-            build: None,
-            job_concurrency_limit: None,
-            job_inventory: None,
-            coding_agent_providers: None,
-            coding_agent_inventory: None,
-            client_id: "legacy".to_string(),
-            runner_instance_id: "legacy-inst".to_string(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
-            display_name: None,
             owner: Some("alice".to_string()),
-            hostname: None,
-            host_context: None,
-            capabilities,
-            policy: None,
+            ..runner_registration_request(
+                "legacy".to_string(),
+                "legacy-inst".to_string(),
+                crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                capabilities,
+            )
         }))
         .await
         .unwrap();
@@ -723,23 +704,13 @@ async fn job_log_wait_activity_only_legacy_transition_advances_revision_and_wake
     };
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
-            computer_session_availability: None,
-            computer_control_epoch: None,
-            process_started_at: None,
-            build: None,
-            job_concurrency_limit: None,
-            job_inventory: None,
-            coding_agent_providers: None,
-            coding_agent_inventory: None,
-            client_id: "activity-legacy".to_string(),
-            runner_instance_id: "activity-legacy-inst".to_string(),
-            runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
-            display_name: None,
             owner: Some("alice".to_string()),
-            hostname: None,
-            host_context: None,
-            capabilities,
-            policy: None,
+            ..runner_registration_request(
+                "activity-legacy".to_string(),
+                "activity-legacy-inst".to_string(),
+                crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                capabilities,
+            )
         }))
         .await
         .unwrap();
@@ -1376,4 +1347,121 @@ fn compact_job_allocation_retries_only_occupied_ids() {
     assert_eq!(result.len(), 23);
     assert_eq!(jobs[&first], 7);
     assert!(crate::job_updates::allocate_job_id(&jobs, || first.clone()).is_err());
+}
+
+#[tokio::test]
+async fn job_log_live_tail_and_explicit_pages_share_tokens_without_losing_terminal_errors() {
+    let registry = RunnerRegistry::default();
+    let job = start_wait_job(&registry).await;
+    registry
+        .update_job(wait_job_update(
+            "inst-wait",
+            &job.job_id,
+            1,
+            "running",
+            Some("START\n"),
+            false,
+        ))
+        .await
+        .unwrap();
+    let (running, _, _, _, _, _) = registry
+        .job_log_for_auth(None, &job.job_id, None, None, Some(40), None, None)
+        .await
+        .unwrap();
+    let token = running.observation_token.unwrap();
+    let burst = (1..=300)
+        .map(|i| format!("detail {i}\n"))
+        .collect::<String>()
+        + "FINAL_STDOUT_FAILURE\n";
+    let mut update = wait_job_update("inst-wait", &job.job_id, 2, "failed", Some(&burst), true);
+    update.exit_code = Some(1);
+    registry.update_job(update).await.unwrap();
+    let (terminal, stdout, _, _, _, observed) = registry
+        .job_log_for_auth(None, &job.job_id, None, None, Some(40), Some(&token), None)
+        .await
+        .unwrap();
+    assert_eq!(terminal.exit_code, Some(1));
+    assert!(observed.terminal);
+    assert!(stdout.unwrap().ends_with("FINAL_STDOUT_FAILURE\n"));
+    let (first, stdout, _, _, _, observed) = registry
+        .job_log_with_paging_for_auth(
+            None,
+            &job.job_id,
+            None,
+            None,
+            Some(200),
+            Some(&token),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(observed.has_more_log_pages);
+    assert_eq!(observed.stdout_returned_lines, 200);
+    assert!(stdout.unwrap().starts_with("detail 1\n"));
+    let (_, stdout, _, _, _, observed) = registry
+        .job_log_with_paging_for_auth(
+            None,
+            &job.job_id,
+            None,
+            None,
+            Some(200),
+            first.observation_token.as_deref(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(!observed.has_more_log_pages);
+    assert!(stdout.unwrap().ends_with("FINAL_STDOUT_FAILURE\n"));
+    let other = registry
+        .start_job(
+            JobStartRequest {
+                cwd: Some("/tmp".into()),
+                ..shell_job_start_request("oe", "true", Some(30))
+            },
+            "tester".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let denied = crate::RunnerAccess {
+        global_visibility: false,
+        owner_bypass: false,
+        username: Some("other-owner".into()),
+        group: None,
+    };
+    assert!(registry
+        .job_log_with_paging_for_auth(
+            Some(&denied),
+            &job.job_id,
+            None,
+            None,
+            Some(200),
+            Some(&token),
+            None,
+            true
+        )
+        .await
+        .is_err());
+    let (_, stdout, stderr, _, _, observation) = registry
+        .job_log_with_paging_for_auth(
+            None,
+            &other.job_id,
+            None,
+            None,
+            Some(200),
+            Some(&token),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation.log_delta_status,
+        crate::job_observation::JobLogDeltaStatus::Reset
+    );
+    assert_eq!(stdout.as_deref(), Some(""));
+    assert_eq!(stderr.as_deref(), Some(""));
 }
